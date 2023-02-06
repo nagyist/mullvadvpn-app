@@ -1,4 +1,10 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    net::{Ipv4Addr, Ipv6Addr},
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+};
 
 use tokio::sync::Mutex;
 
@@ -195,8 +201,10 @@ impl InnerParametersGenerator {
                 let tunnel = wireguard::TunnelConfig {
                     private_key: data.device.wg_data.private_key,
                     addresses: vec![
-                        data.device.wg_data.addresses.ipv4_address.ip().into(),
-                        data.device.wg_data.addresses.ipv6_address.ip().into(),
+                        Ipv4Addr::from_str("10.127.255.254").unwrap().into(),
+                        Ipv6Addr::from_str("fc00:bbbb:bbbb:bb01:ffff:ffff:ffff:ffff")
+                            .unwrap()
+                            .into(),
                     ],
                 };
 
