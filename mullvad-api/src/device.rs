@@ -16,7 +16,7 @@ pub struct DevicesProxy {
     handle: rest::MullvadRestHandle,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct DeviceResponse {
     id: DeviceId,
     name: DeviceName,
@@ -203,7 +203,7 @@ impl DevicesProxy {
                 ipv4_address,
                 ipv6_address,
                 ..
-            } = updated_device;
+            } = dbg!(updated_device);
             Ok(mullvad_types::wireguard::AssociatedAddresses {
                 ipv4_address,
                 ipv6_address,
