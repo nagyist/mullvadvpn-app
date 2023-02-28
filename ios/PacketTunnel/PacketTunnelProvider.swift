@@ -524,40 +524,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider, TunnelMonitorDelegate {
         providerLogger.debug("Set tunnel relay to \(newTunnelRelay.hostname).")
         setReconnecting(true)
         tunnelMonitor.stop()
-
-        let group = DispatchGroup()
-        group.enter()
-        var reconnectionError: WireGuardAdapterError?
-
-        adapter.update(tunnelConfiguration: tunnelConfiguration.wgTunnelConfig) { error in
-            reconnectionError = error
-            group.leave()
-        }
-
-        group.wait()
-
         tunnelMonitor = TunnelMonitor(queue: dispatchQueue, adapter: adapter)
         tunnelMonitor.delegate = self
-        if let error = reconnectionError {
-            wgError = error
-            providerLogger.error(
-                error: error,
-                message: "Failed to update WireGuard configuration."
-            )
 
-            // Revert to previously used relay selector as it's very likely that we keep
-            // using previous configuration.
-            selectorResult = oldSelectorResult
-            providerLogger.debug(
-                "Reset tunnel relay to \(oldSelectorResult?.relay.hostname ?? "none")."
-            )
-            setReconnecting(false)
-        } else {
-            tunnelMonitor.start(
-                probeAddress: tunnelConfiguration.selectorResult.endpoint.ipv4Gateway
-            )
+        /* let group = DispatchGroup() */
+        /* group.enter() */
+        /* var reconnectionError: WireGuardAdapterError? */
+
+        adapter.update(tunnelConfiguration: tunnelConfiguration.wgTunnelConfig) { error in
+            self.dispatchQueue.async {
+                if let error = error {
+                    self.wgError = error
+                    self.providerLogger.error(
+                        error: error,
+                        message: "Failed to update WireGuard configuration."
+                    )
+
+                    // Revert to previously used relay selector as it's very likely that we keep
+                    // using previous configuration.
+                    self.selectorResult = oldSelectorResult
+                    self.providerLogger.debug(
+                        "Reset tunnel relay to \(oldSelectorResult?.relay.hostname ?? "none")."
+                    )
+                    self.setReconnecting(false)
+                } else {
+                    self.tunnelMonitor.start(
+                        probeAddress: tunnelConfiguration.selectorResult.endpoint.ipv4Gateway
+                    )
+                }
+                completionHandler?(error)
+            }
         }
-        completionHandler?(reconnectionError)
     }
 
     /// Load relay cache with potential networking to refresh the cache and pick the relay for the
