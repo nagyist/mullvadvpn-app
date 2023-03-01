@@ -522,11 +522,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider, TunnelMonitorDelegate {
         selectorResult = tunnelConfiguration.selectorResult
 
         providerLogger.debug("Set tunnel relay to \(newTunnelRelay.hostname).")
+        tunnelMonitor.suspend()
         setReconnecting(true)
-        tunnelMonitor.stop()
-        tunnelMonitor = TunnelMonitor(queue: dispatchQueue, adapter: adapter)
-        tunnelMonitor.delegate = self
-
         /* let group = DispatchGroup() */
         /* group.enter() */
         /* var reconnectionError: WireGuardAdapterError? */
@@ -546,6 +543,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider, TunnelMonitorDelegate {
                     self.providerLogger.debug(
                         "Reset tunnel relay to \(oldSelectorResult?.relay.hostname ?? "none")."
                     )
+                    // TODO: reanimate the tunnel monitor
                     self.setReconnecting(false)
                 } else {
                     self.tunnelMonitor.start(

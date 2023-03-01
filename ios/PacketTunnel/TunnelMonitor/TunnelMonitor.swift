@@ -267,6 +267,12 @@ final class TunnelMonitor: PingerDelegate {
             self.stopNoQueue()
         }
     }
+    
+    func suspend() {
+        internalQueue.sync {
+            self.stopNoQueue(forRestart: true)
+        }
+    }
 
     func onWake() {
         internalQueue.async {
@@ -337,7 +343,7 @@ final class TunnelMonitor: PingerDelegate {
 
         state.connectionState = .stopped
     }
-
+    
     private func checkConnectivity() {
         guard let probeAddress = probeAddress, let newStats = getStats() else {
             return
