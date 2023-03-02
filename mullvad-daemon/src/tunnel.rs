@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     str::FromStr,
     sync::Arc,
@@ -23,6 +23,17 @@ use talpid_types::{
 use talpid_types::net::openvpn;
 
 use crate::device::{AccountManagerHandle, PrivateAccountAndDevice};
+
+lazy_static::lazy_static! {
+    /// The IP-addresses that the client uses when it connects to a server that supports the
+    /// "Same IP" functionality. This means all clients have the same in-tunnel IP on these
+    /// servers. This improves anonymity since the in-tunnel IP will not be unique to a specific
+    /// peer.
+    static ref SAME_IP_V4: IpAddr = Ipv4Addr::from_str("10.127.255.254").unwrap().into();
+    static ref SAME_IP_V6: IpAddr = Ipv6Addr::from_str("fc00:bbbb:bbbb:bb01:ffff:ffff:ffff:ffff")
+        .unwrap()
+        .into();
+}
 
 #[derive(err_derive::Error, Debug)]
 pub enum Error {
@@ -198,14 +209,17 @@ impl InnerParametersGenerator {
                 unreachable!("OpenVPN is not supported on Android");
             }
             MullvadEndpoint::Wireguard(endpoint) => {
+                let addresses = if relay.same_ip {
+                    vec![SAME_IP_V4, SAME_IP_V6]
+                } else {
+                    vec![
+                        data.device.wg_data.addresses.ipv4_address.ip().into(),
+                        data.device.wg_data.addresses.ipv6_address.ip().into(),
+                    ]
+                };
                 let tunnel = wireguard::TunnelConfig {
                     private_key: data.device.wg_data.private_key,
-                    addresses: vec![
-                        Ipv4Addr::from_str("10.127.255.254").unwrap().into(),
-                        Ipv6Addr::from_str("fc00:bbbb:bbbb:bb01:ffff:ffff:ffff:ffff")
-                            .unwrap()
-                            .into(),
-                    ],
+                    addresses,
                 };
 
                 let (obfuscator_relay, obfuscator_config) = match obfuscator {
