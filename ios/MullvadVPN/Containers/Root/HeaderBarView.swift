@@ -154,9 +154,9 @@ class HeaderBarView: UIView {
             accountButton.centerYAnchor.constraint(equalTo: brandNameImageView.centerYAnchor)
 
             settingsButton.leadingAnchor.constraint(
-                greaterThanOrEqualTo: accountButton.trailingAnchor,
+                equalTo: accountButton.trailingAnchor,
                 constant: 20
-            )
+            ).withPriority(.defaultHigh)
             settingsButton.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor)
             settingsButton.centerYAnchor.constraint(equalTo: accountButton.centerYAnchor)
 

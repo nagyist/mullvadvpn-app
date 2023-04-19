@@ -21,6 +21,7 @@ class SecondaryContextPresentationController: FormsheetPresentationController {
         if let containerView = containerView,
            let rootContainer = presentingViewController as? RootContainerViewController
         {
+            rootContainer.addAccountButtonToPresentationContainer(containerView)
             rootContainer.addSettingsButtonToPresentationContainer(containerView)
         }
     }
@@ -29,6 +30,7 @@ class SecondaryContextPresentationController: FormsheetPresentationController {
         super.dismissalTransitionDidEnd(completed)
 
         if let rootContainer = presentingViewController as? RootContainerViewController, completed {
+            rootContainer.removeAccountButtonFromPresentationContainer()
             rootContainer.removeSettingsButtonFromPresentationContainer()
         }
     }

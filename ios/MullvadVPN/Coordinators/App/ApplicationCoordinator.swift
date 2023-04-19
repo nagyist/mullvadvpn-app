@@ -256,6 +256,8 @@ final class ApplicationCoordinator: Coordinator, Presenting, RootContainerViewCo
     private func continueFlow(animated: Bool) {
         let next = evaluateNextRoute()
 
+//        primaryNavigationContainer.presentationContainerAccountButton?.isHidden = next == .login
+
         /*
          On iPad the main route is always visible as it's a part of root controller hence we never
          ask router to navigate to it. Instead this is when we hide the primary horizontal
@@ -632,9 +634,11 @@ final class ApplicationCoordinator: Coordinator, Presenting, RootContainerViewCo
 
     private func deviceStateDidChange(_ deviceState: DeviceState) {
         splitViewController.preferredDisplayMode = deviceState.splitViewMode
+        primaryNavigationContainer.presentationContainerAccountButton?.isHidden = true
 
         switch deviceState {
         case let .loggedIn(accountData, _):
+            primaryNavigationContainer.presentationContainerAccountButton?.isHidden = false
             updateOutOfTimeTimer()
 
             if !accountData.isExpired {

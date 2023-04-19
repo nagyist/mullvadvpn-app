@@ -67,7 +67,8 @@ class RootContainerViewController: UIViewController {
     typealias CompletionHandler = () -> Void
 
     private let headerBarView = HeaderBarView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-    private let transitionContainer = UIView(frame: UIScreen.main.bounds)
+    let transitionContainer = UIView(frame: UIScreen.main.bounds)
+    private (set) var presentationContainerAccountButton: UIButton?
     private var presentationContainerSettingsButton: UIButton?
 
     private(set) var headerBarPresentation = HeaderBarPresentation.default
@@ -117,6 +118,9 @@ class RootContainerViewController: UIViewController {
         addTransitionView()
         addHeaderBarView()
         updateHeaderBarBackground()
+
+
+        addAccountButtonToPresentationContainer(transitionContainer)
     }
 
     override func viewDidLayoutSubviews() {
@@ -275,6 +279,45 @@ class RootContainerViewController: UIViewController {
             navigateTo: route,
             animated: animated
         )
+    }
+
+    /// Add account bar button into the presentation container to make account accessible even
+    /// when the root container is covered with modal.
+    func addAccountButtonToPresentationContainer(_ presentationContainer: UIView) {
+        let accountButton: UIButton
+
+        if let transitionViewAccountButton = presentationContainerAccountButton {
+            transitionViewAccountButton.removeFromSuperview()
+            accountButton = transitionViewAccountButton
+        } else {
+            accountButton = HeaderBarView.makeHeaderBarButton(with: UIImage(named: "IconAccount"))
+            accountButton.isEnabled = headerBarView.settingsButton.isEnabled
+            accountButton.addTarget(
+                self,
+                action: #selector(handleAccountButtonTap),
+                for: .touchUpInside
+            )
+
+            presentationContainerAccountButton = accountButton
+        }
+
+        // Hide the account button inside the header bar to avoid color blending issues
+        headerBarView.accountButton.alpha = 0
+
+//        accountButton.isHidden = true
+        presentationContainer.addSubview(accountButton)
+
+        NSLayoutConstraint.activate([
+            accountButton.centerXAnchor
+                .constraint(equalTo: headerBarView.accountButton.centerXAnchor),
+            accountButton.centerYAnchor
+                .constraint(equalTo: headerBarView.accountButton.centerYAnchor),
+        ])
+    }
+
+    func removeAccountButtonFromPresentationContainer() {
+        presentationContainerAccountButton?.removeFromSuperview()
+        headerBarView.accountButton.alpha = 1
     }
 
     /// Add settings bar button into the presentation container to make settings accessible even
