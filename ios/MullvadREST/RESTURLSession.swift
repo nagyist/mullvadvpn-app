@@ -21,9 +21,14 @@ extension REST {
         fileprivate func apply(to sessionConfiguration: URLSessionConfiguration) {
             var configuration = [CFString: Any]()
 
+            configuration[kCFNetworkProxiesHTTPEnable] = kCFBooleanTrue
             configuration[kCFNetworkProxiesHTTPProxy] = address
             configuration[kCFNetworkProxiesHTTPPort] = NSNumber(value: port)
             configuration[kCFNetworkProxiesProxyAutoConfigEnable] = kCFBooleanFalse
+
+            configuration["HTTPSEnable" as CFString] = kCFBooleanTrue
+            configuration["HTTPSProxy" as CFString] = address
+            configuration["HTTPSPort" as CFString] = NSNumber(value: port)
 
             sessionConfiguration.connectionProxyDictionary = configuration
         }

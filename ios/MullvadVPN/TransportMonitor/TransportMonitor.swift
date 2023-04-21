@@ -18,7 +18,9 @@ final class TransportMonitor {
         self.tunnelManager = tunnelManager
         self.tunnelStore = tunnelStore
 
-        urlSessionTransport = REST.URLSessionTransport(urlSession: REST.makeURLSession())
+        urlSessionTransport = REST.URLSessionTransport(urlSession: REST.makeURLSession(
+            httpProxyConfiguration: .init(address: "192.168.1.147", port: 8888))
+        )
     }
 
     var transport: RESTTransport? {
