@@ -28,6 +28,7 @@ interface MapProps {
   markerStyle: MarkerStyle;
 }
 
+// TODO: Add wrapper component which fetches coordinates and connection state from store.
 export default function Map(props: MapProps) {
   const connection = useSelector((state) => state.connection);
   const coordinate = useMemo<Coordinate>(() => {
