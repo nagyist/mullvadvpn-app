@@ -18,3 +18,25 @@ fun String.parseAsDateTime(): DateTime? {
         null
     }
 }
+
+fun String.fuzzyMatch(needle: String): Boolean {
+   if(needle.isEmpty()) return false
+
+    val haystack = this.lowercase()
+    val remainder = needle.lowercase()
+
+    val indices = mutableListOf<Int>()
+
+    haystack.forEachIndexed { index, character ->
+        if (character == remainder.first()) {
+            indices.add(index)
+            remainder.removeRange(0, 1)
+
+            if (remainder.isEmpty()) {
+                return indices.isNotEmpty()
+            }
+        }
+    }
+
+    return false
+}

@@ -2,6 +2,7 @@ package net.mullvad.mullvadvpn.relaylist
 
 import net.mullvad.mullvadvpn.model.Constraint
 import net.mullvad.mullvadvpn.model.LocationConstraint
+import net.mullvad.mullvadvpn.util.fuzzyMatch
 
 class RelayList {
     val countries: List<RelayCountry>
@@ -38,6 +39,10 @@ class RelayList {
         relayCountries.sortBy({ it.name })
 
         countries = relayCountries.toList()
+    }
+
+    constructor(countries: List<RelayCountry>) {
+        this.countries = countries
     }
 
     fun findItemForLocation(
@@ -78,6 +83,35 @@ class RelayList {
                     }
                 }
             }
+        }
+    }
+
+    fun filter(filter: String): RelayList {
+        return if (filter.isNotEmpty()) {
+            val filteredCountries = mutableListOf<RelayCountry>()
+            countries.forEach { relayCountry ->
+                if (relayCountry.name == filter || relayCountry.name.fuzzyMatch(filter)) {
+                    filteredCountries.add(relayCountry)
+                } else {
+                    relayCountry.cities.forEach { relayCity ->
+                        if (relayCity.name == filter || relayCity.name.fuzzyMatch(filter)) {
+                            relayCountry.expanded = true
+                            filteredCountries.add(relayCountry)
+                        } else {
+                            relayCity.relays.forEach { relay ->
+                                if (relay.name == filter || relay.name.fuzzyMatch(filter)) {
+                                    relayCountry.expanded = true
+                                    relayCity.expanded = true
+                                    filteredCountries.add(relayCountry)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RelayList(filteredCountries)
+        } else {
+            this
         }
     }
 }
