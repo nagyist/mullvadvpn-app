@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material.Icon
 import androidx.compose.material.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,7 +60,7 @@ private fun DnsTitle(address: String, modifier: Modifier = Modifier) {
     val textSize = dimensionResource(id = R.dimen.text_medium).value.sp
     Text(
         text = address,
-        color = Color.White,
+        color = MaterialTheme.colorScheme.onSurface,
         fontSize = textSize,
         fontStyle = FontStyle.Normal,
         textAlign = TextAlign.Start,

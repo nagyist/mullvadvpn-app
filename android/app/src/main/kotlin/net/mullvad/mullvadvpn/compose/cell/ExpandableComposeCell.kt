@@ -23,8 +23,6 @@ import net.mullvad.mullvadvpn.compose.component.HtmlText
 import net.mullvad.mullvadvpn.compose.component.textResource
 import net.mullvad.mullvadvpn.compose.theme.AlphaInactive
 import net.mullvad.mullvadvpn.compose.theme.AlphaVisible
-import net.mullvad.mullvadvpn.compose.theme.MullvadWhite
-import net.mullvad.mullvadvpn.compose.theme.MullvadWhite60
 
 @Preview
 @Composable
@@ -93,11 +91,11 @@ private fun ExpandableComposeCellBody(
                         .align(Alignment.CenterVertically),
                 painter = painterResource(id = R.drawable.icon_info),
                 contentDescription = null,
-                tint = MullvadWhite
+                tint = MaterialTheme.colorScheme.onPrimary
             )
         }
 
-        ChevronView(isExpanded)
+        ChevronView(isExpanded, color = MaterialTheme.colorScheme.onPrimary)
     }
 }
 
@@ -112,7 +110,7 @@ fun ContentBlockersDisableModeCellSubtitle(modifier: Modifier) {
                 stringResource(id = R.string.enable_custom_dns)
             ),
         textSize = textSize,
-        textColor = MullvadWhite60.toArgb(),
+        textColor = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
         modifier = modifier
     )
 }

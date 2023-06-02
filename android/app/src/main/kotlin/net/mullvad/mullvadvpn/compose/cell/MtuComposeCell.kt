@@ -57,7 +57,7 @@ private fun MtuBodyView(mtuValue: String, modifier: Modifier) {
     Row(modifier = modifier.wrapContentWidth1().wrapContentHeight()) {
         Text(
             text = mtuValue.ifEmpty { stringResource(id = R.string.hint_default) },
-            color = Color.White
+            color = MaterialTheme.colorScheme.onPrimary
         )
     }
 }
@@ -67,7 +67,7 @@ private fun MtuSubtitle(modifier: Modifier) {
     Text(
         text = stringResource(R.string.wireguard_mtu_footer, MTU_MIN_VALUE, MTU_MAX_VALUE),
         style = MaterialTheme.typography.labelMedium,
-        color = MullvadWhite60,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = modifier
     )
 }

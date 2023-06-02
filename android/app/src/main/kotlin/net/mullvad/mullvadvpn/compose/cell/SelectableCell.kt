@@ -23,7 +23,7 @@ import net.mullvad.mullvadvpn.compose.theme.Dimens
 @Composable
 private fun PreviewSelectableCell() {
     AppTheme {
-        SpacedColumn(Modifier.background(MaterialTheme.colorScheme.background)) {
+        SpacedColumn(Modifier.background(MaterialTheme.colorScheme.surface)) {
             SelectableCell(title = "Selected", isSelected = true)
             SelectableCell(title = "Not Selected", isSelected = false)
         }
@@ -39,7 +39,7 @@ fun SelectableCell(
         Icon(
             painter = painterResource(id = R.drawable.icon_tick),
             contentDescription = iconContentDescription,
-            tint = MaterialTheme.colorScheme.onPrimary,
+            tint = MaterialTheme.colorScheme.onSecondary,
             modifier =
                 Modifier.padding(end = Dimens.selectableCellTextMargin)
                     .alpha(if (isSelected) AlphaVisible else AlphaInvisible)
@@ -47,13 +47,26 @@ fun SelectableCell(
     },
     titleStyle: TextStyle = MaterialTheme.typography.labelLarge,
     startPadding: Dp = Dimens.cellStartPadding,
-    selectedColor: Color = MaterialTheme.colorScheme.surface,
-    backgroundColor: Color = MaterialTheme.colorScheme.secondaryContainer,
+    selectedColor: Color = MaterialTheme.colorScheme.secondary,
+    backgroundColor: Color = MaterialTheme.colorScheme.primaryContainer,
+    onSelectedColor: Color = MaterialTheme.colorScheme.onSecondary,
+    onBackgroundColor: Color = MaterialTheme.colorScheme.onPrimaryContainer,
     onCellClicked: () -> Unit = {}
 ) {
     BaseCell(
         onCellClicked = onCellClicked,
-        title = { BaseCellTitle(title = title, style = titleStyle) },
+        title = {
+            BaseCellTitle(
+                title = title,
+                style = titleStyle,
+                textColor =
+                    if (isSelected) {
+                        onSelectedColor
+                    } else {
+                        onBackgroundColor
+                    }
+            )
+        },
         background =
             if (isSelected) {
                 selectedColor

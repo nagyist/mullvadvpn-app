@@ -1,5 +1,6 @@
 package net.mullvad.mullvadvpn.compose.cell
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
@@ -30,7 +31,7 @@ import net.mullvad.mullvadvpn.compose.theme.Dimens
 @Composable
 private fun PreviewSwitchComposeCell() {
     AppTheme {
-        SpacedColumn {
+        SpacedColumn(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
             HeaderSwitchComposeCell(
                 title = "Checkbox Title",
                 isEnabled = true,
@@ -64,17 +65,25 @@ fun NormalSwitchComposeCell(
     startPadding: Dp = Dimens.indentedCellStartPadding,
     subtitle: String? = null,
     isEnabled: Boolean = true,
-    background: Color = MaterialTheme.colorScheme.primary,
+    background: Color = MaterialTheme.colorScheme.primaryContainer,
+    onBackground: Color = MaterialTheme.colorScheme.onPrimaryContainer,
     onCellClicked: (Boolean) -> Unit = {},
     onInfoClicked: (() -> Unit)? = null
 ) {
     SwitchComposeCell(
-        titleView = { BaseCellTitle(title = title, style = MaterialTheme.typography.labelLarge) },
+        titleView = {
+            BaseCellTitle(
+                title = title,
+                style = MaterialTheme.typography.labelLarge,
+                textColor = onBackground
+            )
+        },
         isToggled = isToggled,
         startPadding = startPadding,
         subtitle = subtitle,
         isEnabled = isEnabled,
         background = background,
+        onBackground = onBackground,
         onCellClicked = onCellClicked,
         onInfoClicked = onInfoClicked
     )
@@ -88,16 +97,24 @@ fun HeaderSwitchComposeCell(
     subtitle: String? = null,
     isEnabled: Boolean = true,
     background: Color = MaterialTheme.colorScheme.primary,
+    onBackground: Color = MaterialTheme.colorScheme.onPrimary,
     onCellClicked: (Boolean) -> Unit = {},
     onInfoClicked: (() -> Unit)? = null
 ) {
     SwitchComposeCell(
-        titleView = { BaseCellTitle(title = title, style = MaterialTheme.typography.titleMedium) },
+        titleView = {
+            BaseCellTitle(
+                title = title,
+                style = MaterialTheme.typography.titleMedium,
+                textColor = onBackground
+            )
+        },
         isToggled = isToggled,
         startPadding = startPadding,
         subtitle = subtitle,
         isEnabled = isEnabled,
         background = background,
+        onBackground = onBackground,
         onCellClicked = onCellClicked,
         onInfoClicked = onInfoClicked
     )
@@ -111,6 +128,7 @@ private fun SwitchComposeCell(
     subtitle: String?,
     isEnabled: Boolean,
     background: Color,
+    onBackground: Color,
     onCellClicked: (Boolean) -> Unit,
     onInfoClicked: (() -> Unit)?
 ) {
@@ -122,7 +140,7 @@ private fun SwitchComposeCell(
                     Text(
                         text = it,
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSecondary
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             },
@@ -132,6 +150,7 @@ private fun SwitchComposeCell(
                 onSwitchClicked = null,
                 isEnabled = isEnabled,
                 isToggled = isToggled,
+                iconColor = onBackground,
                 onInfoClicked = onInfoClicked
             )
         },
@@ -145,6 +164,7 @@ private fun SwitchComposeCell(
 fun SwitchCellView(
     isEnabled: Boolean,
     isToggled: Boolean,
+    iconColor: Color,
     modifier: Modifier = Modifier,
     onSwitchClicked: ((Boolean) -> Unit)? = null,
     onInfoClicked: (() -> Unit)? = null
@@ -168,11 +188,16 @@ fun SwitchCellView(
                         .align(Alignment.CenterVertically),
                 painter = painterResource(id = R.drawable.icon_info),
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary
+                tint = iconColor
             )
         }
 
-        CellSwitch(isChecked = isToggled, isEnabled = isEnabled, onCheckedChange = onSwitchClicked)
+        CellSwitch(
+            isChecked = isToggled,
+            isEnabled = isEnabled,
+            onCheckedChange = onSwitchClicked,
+            thumbColor = iconColor
+        )
     }
 }
 
@@ -192,7 +217,7 @@ fun CustomDnsCellSubtitle(isCellClickable: Boolean, modifier: Modifier) {
     Text(
         text = spanned.toAnnotatedString(),
         style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSecondary,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = modifier
     )
 }

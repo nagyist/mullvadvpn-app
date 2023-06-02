@@ -29,7 +29,7 @@ import net.mullvad.mullvadvpn.compose.theme.Dimens
 @Composable
 fun PreviewBaseCell() {
     AppTheme {
-        SpacedColumn {
+        SpacedColumn(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
             BaseCell(
                 title = {
                     BaseCellTitle(
@@ -61,6 +61,7 @@ internal fun BaseCell(
     subtitle: @Composable (() -> Unit)? = null,
     subtitleModifier: Modifier = Modifier,
     background: Color = MaterialTheme.colorScheme.primary,
+    subtitleBackground: Color = MaterialTheme.colorScheme.surface,
     startPadding: Dp = Dimens.cellStartPadding,
     endPadding: Dp = Dimens.cellEndPadding
 ) {
@@ -93,7 +94,7 @@ internal fun BaseCell(
             Row(
                 modifier =
                     subtitleModifier
-                        .background(MaterialTheme.colorScheme.secondary)
+                        .background(subtitleBackground)
                         .padding(
                             start = startPadding,
                             top = Dimens.cellFooterTopPadding,
@@ -110,12 +111,12 @@ internal fun BaseCell(
 }
 
 @Composable
-internal fun BaseCellTitle(title: String, style: TextStyle, modifier: Modifier = Modifier) {
+internal fun BaseCellTitle(title: String, style: TextStyle, textColor: Color = MaterialTheme.colorScheme.onPrimary, modifier: Modifier = Modifier) {
     Text(
         text = title,
         textAlign = TextAlign.Center,
         style = style,
-        color = MaterialTheme.colorScheme.onPrimary,
+        color = textColor,
         modifier = modifier.wrapContentWidth(align = Alignment.End).wrapContentHeight()
     )
 }
