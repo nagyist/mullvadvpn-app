@@ -240,6 +240,7 @@
 		58C3A4B222456F1B00340BDB /* AccountInputGroupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C3A4B122456F1A00340BDB /* AccountInputGroupView.swift */; };
 		58C3F4F92964B08300D72515 /* MapViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C3F4F82964B08300D72515 /* MapViewController.swift */; };
 		58C3F4FB296C3AD500D72515 /* SettingsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C3F4FA296C3AD500D72515 /* SettingsCoordinator.swift */; };
+		58C6A3DB2A2A0F5800CA0192 /* CustomActorExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C6A3DA2A2A0F5800CA0192 /* CustomActorExecutor.swift */; };
 		58C774BE29A7A249003A1A56 /* CustomNavigationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C774BD29A7A249003A1A56 /* CustomNavigationController.swift */; };
 		58C8191829FAA2C400DEB1B4 /* NotificationConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C8191729FAA2C400DEB1B4 /* NotificationConfiguration.swift */; };
 		58CAF9F82983D36800BE19F7 /* Coordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CAF9F72983D36800BE19F7 /* Coordinator.swift */; };
@@ -945,6 +946,7 @@
 		58C3A4B122456F1A00340BDB /* AccountInputGroupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountInputGroupView.swift; sourceTree = "<group>"; };
 		58C3F4F82964B08300D72515 /* MapViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapViewController.swift; sourceTree = "<group>"; };
 		58C3F4FA296C3AD500D72515 /* SettingsCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCoordinator.swift; sourceTree = "<group>"; };
+		58C6A3DA2A2A0F5800CA0192 /* CustomActorExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomActorExecutor.swift; sourceTree = "<group>"; };
 		58C774BD29A7A249003A1A56 /* CustomNavigationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomNavigationController.swift; sourceTree = "<group>"; };
 		58C8191729FAA2C400DEB1B4 /* NotificationConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationConfiguration.swift; sourceTree = "<group>"; };
 		58CAF9F72983D36800BE19F7 /* Coordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Coordinator.swift; sourceTree = "<group>"; };
@@ -1759,6 +1761,7 @@
 		58B0A2A1238EE67E00BC001D /* MullvadVPNTests */ = {
 			isa = PBXGroup;
 			children = (
+				58C6A3DA2A2A0F5800CA0192 /* CustomActorExecutor.swift */,
 				582AE3112440CA0D00E6733A /* AccountTokenInputTests.swift */,
 				5896AE85246D6AD8005B36CB /* CustomDateComponentsFormattingTests.swift */,
 				58B0A2A4238EE67E00BC001D /* Info.plist */,
@@ -2733,6 +2736,7 @@
 			files = (
 				58B8644529C7971B005E107C /* AccountTokenInput.swift in Sources */,
 				582AE3122440CA0D00E6733A /* AccountTokenInputTests.swift in Sources */,
+				58C6A3DB2A2A0F5800CA0192 /* CustomActorExecutor.swift in Sources */,
 				582A8A3A28BCE19B00D0F9FB /* FixedWidthIntegerArithmeticsTests.swift in Sources */,
 				5896AE86246D6AD8005B36CB /* CustomDateComponentsFormattingTests.swift in Sources */,
 				58B8644629C7972F005E107C /* CustomDateComponentsFormatting.swift in Sources */,
@@ -3503,6 +3507,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				OTHER_SWIFT_FLAGS = "-disable-availability-checking";
 				PRODUCT_BUNDLE_IDENTIFIER = net.mullvad.MullvadVPNTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -3520,6 +3525,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				OTHER_SWIFT_FLAGS = "-disable-availability-checking";
 				PRODUCT_BUNDLE_IDENTIFIER = net.mullvad.MullvadVPNTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -3658,6 +3664,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				OTHER_SWIFT_FLAGS = "-disable-availability-checking";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APPLICATION_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -3679,6 +3686,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				OTHER_SWIFT_FLAGS = "-disable-availability-checking";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APPLICATION_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;

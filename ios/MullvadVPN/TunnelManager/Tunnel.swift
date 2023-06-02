@@ -135,6 +135,10 @@ final class Tunnel: Equatable {
         tunnelProvider.removeFromPreferences(completionHandler: completion)
     }
 
+    func removeFromPreferences() async throws {
+        try await tunnelProvider.removeFromPreferences()
+    }
+
     func addBlockObserver(
         queue: DispatchQueue? = nil,
         handler: @escaping (Tunnel, NEVPNStatus) -> Void

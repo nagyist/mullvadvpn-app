@@ -39,7 +39,7 @@ extension REST {
             retryStrategy: RetryStrategy,
             requestHandler: RESTRequestHandler,
             responseHandler: AnyResponseHandler<Success>,
-            completionHandler: @escaping CompletionHandler
+            completionHandler: CompletionHandler?
         ) {
             addressCacheStore = configuration.addressCacheStore
             transportProvider = configuration.transportProvider

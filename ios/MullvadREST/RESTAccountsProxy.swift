@@ -27,6 +27,14 @@ extension REST {
             retryStrategy: REST.RetryStrategy,
             completion: @escaping CompletionHandler<NewAccountData>
         ) -> Cancellable {
+            return createAccountTaskFactory(retryStrategy: retryStrategy).execute(completionHandler: completion)
+        }
+
+        public func createAccount(retryStrategy: REST.RetryStrategy) async throws -> NewAccountData {
+            return try await createAccountTaskFactory(retryStrategy: retryStrategy).execute()
+        }
+
+        private func createAccountTaskFactory(retryStrategy: REST.RetryStrategy) -> ProxyTaskFactory<NewAccountData> {
             let requestHandler = AnyRequestHandler { endpoint in
                 return try self.requestFactory.createRequest(
                     endpoint: endpoint,
@@ -40,12 +48,11 @@ extension REST {
                 with: responseDecoder
             )
 
-            return addOperation(
+            return makeTaskFactory(
                 name: "create-account",
                 retryStrategy: retryStrategy,
                 requestHandler: requestHandler,
-                responseHandler: responseHandler,
-                completionHandler: completion
+                responseHandler: responseHandler
             )
         }
 
@@ -54,6 +61,22 @@ extension REST {
             retryStrategy: REST.RetryStrategy,
             completion: @escaping CompletionHandler<AccountData>
         ) -> Cancellable {
+            return getAccountDataTaskFactory(accountNumber: accountNumber, retryStrategy: retryStrategy)
+                .execute(completionHandler: completion)
+        }
+
+        public func getAccountData(
+            accountNumber: String,
+            retryStrategy: REST.RetryStrategy
+        ) async throws -> AccountData {
+            return try await getAccountDataTaskFactory(accountNumber: accountNumber, retryStrategy: retryStrategy)
+                .execute()
+        }
+
+        private func getAccountDataTaskFactory(
+            accountNumber: String,
+            retryStrategy: REST.RetryStrategy
+        ) -> ProxyTaskFactory<AccountData> {
             let requestHandler = AnyRequestHandler(
                 createURLRequest: { endpoint, authorization in
                     var requestBuilder = try self.requestFactory.createRequestBuilder(
@@ -74,12 +97,11 @@ extension REST {
                 with: responseDecoder
             )
 
-            return addOperation(
+            return makeTaskFactory(
                 name: "get-my-account",
                 retryStrategy: retryStrategy,
                 requestHandler: requestHandler,
-                responseHandler: responseHandler,
-                completionHandler: completion
+                responseHandler: responseHandler
             )
         }
     }

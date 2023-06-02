@@ -14,6 +14,8 @@ public protocol Cancellable {
 
 extension Operation: Cancellable {}
 
+extension Task: Cancellable {}
+
 /// An object representing a cancellation token.
 public final class AnyCancellable: Cancellable {
     private let block: (() -> Void)?
