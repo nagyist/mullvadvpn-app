@@ -1,4 +1,9 @@
-use crate::dns::DnsMonitorT;
+//! DNS monitor that uses `SetInterfaceDnsSettings`. According to
+//! <https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-setinterfacednssettings>,
+//! it requires at least Windows 10, build 19041. For that reason, use run-time linking and fall
+//! back on other methods if it is not available.
+
+use crate::dns::{DnsMonitorT, ResolvedDnsConfig};
 use once_cell::sync::OnceCell;
 use std::{
     ffi::OsString,
@@ -7,55 +12,53 @@ use std::{
     os::windows::ffi::OsStrExt,
     ptr,
 };
-use talpid_windows_net::{guid_from_luid, luid_from_alias};
+use talpid_types::win32_err;
+use talpid_windows::net::{guid_from_luid, luid_from_alias};
 use windows_sys::{
     core::GUID,
     s, w,
     Win32::{
-        Foundation::{ERROR_PROC_NOT_FOUND, NO_ERROR, NTSTATUS},
+        Foundation::{FreeLibrary, ERROR_PROC_NOT_FOUND, WIN32_ERROR},
         NetworkManagement::IpHelper::{
             DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_IPV6,
             DNS_SETTING_NAMESERVER,
         },
-        System::LibraryLoader::{
-            FreeLibrary, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
-        },
+        System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32},
     },
 };
 
 /// Errors that can happen when configuring DNS on Windows.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failure to obtain an interface LUID given an alias.
-    #[error(display = "Failed to obtain LUID for the interface alias")]
-    ObtainInterfaceLuid(#[error(source)] io::Error),
+    #[error("Failed to obtain LUID for the interface alias")]
+    ObtainInterfaceLuid(#[source] io::Error),
 
     /// Failure to obtain an interface GUID.
-    #[error(display = "Failed to obtain GUID for the interface")]
-    ObtainInterfaceGuid(#[error(source)] io::Error),
+    #[error("Failed to obtain GUID for the interface")]
+    ObtainInterfaceGuid(#[source] io::Error),
 
     /// Failed to set DNS settings on interface.
-    #[error(display = "Failed to set DNS settings on interface: {}", _0)]
-    SetInterfaceDnsSettings(i32),
+    #[error("Failed to set DNS settings on interface")]
+    SetInterfaceDnsSettings(#[source] io::Error),
 
     /// Failure to flush DNS cache.
-    #[error(display = "Failed to flush DNS resolver cache")]
-    FlushResolverCache(#[error(source)] super::dnsapi::Error),
+    #[error("Failed to flush DNS resolver cache")]
+    FlushResolverCache(#[source] super::dnsapi::Error),
 
     /// Failed to load iphlpapi.dll.
-    #[error(display = "Failed to load iphlpapi.dll")]
-    LoadDll(#[error(source)] io::Error),
+    #[error("Failed to load iphlpapi.dll")]
+    LoadDll(#[source] io::Error),
 
     /// Failed to obtain exported function.
-    #[error(display = "Failed to obtain DNS function")]
-    GetFunction(#[error(source)] io::Error),
+    #[error("Failed to obtain DNS function")]
+    GetFunction(#[source] io::Error),
 }
 
 type SetInterfaceDnsSettingsFn = unsafe extern "stdcall" fn(
     interface: GUID,
     settings: *const DNS_INTERFACE_SETTINGS,
-) -> NTSTATUS;
+) -> WIN32_ERROR;
 
 struct IphlpApi {
     set_interface_dns_settings: SetInterfaceDnsSettingsFn,
@@ -74,6 +77,9 @@ impl IphlpApi {
             return Err(Error::LoadDll(io::Error::last_os_error()));
         }
 
+        // This function is loaded at runtime since it may be unavailable. See the module-level
+        // docs. TODO: `windows_sys` can be used directly when support for versions older
+        // than Windows 10, 2004, is dropped.
         let set_interface_dns_settings =
             unsafe { GetProcAddress(module, s!("SetInterfaceDnsSettings")) };
         let set_interface_dns_settings = set_interface_dns_settings.ok_or_else(|| {
@@ -116,7 +122,8 @@ impl DnsMonitorT for DnsMonitor {
         Ok(DnsMonitor { current_guid: None })
     }
 
-    fn set(&mut self, interface: &str, servers: &[IpAddr]) -> Result<(), Error> {
+    fn set(&mut self, interface: &str, config: ResolvedDnsConfig) -> Result<(), Error> {
+        let servers = config.tunnel_config();
         let guid = guid_from_luid(&luid_from_alias(interface).map_err(Error::ObtainInterfaceLuid)?)
             .map_err(Error::ObtainInterfaceGuid)?;
 
@@ -199,12 +206,10 @@ fn set_interface_dns_servers<T: ToString>(
         ProfileNameServer: ptr::null_mut(),
     };
 
-    let result =
-        unsafe { (iphlpapi.set_interface_dns_settings)(guid.to_owned(), &dns_interface_settings) };
-    if result != (NO_ERROR as i32) {
-        return Err(Error::SetInterfaceDnsSettings(result));
-    }
-    Ok(())
+    win32_err!(unsafe {
+        (iphlpapi.set_interface_dns_settings)(guid.to_owned(), &dns_interface_settings)
+    })
+    .map_err(Error::SetInterfaceDnsSettings)
 }
 
 fn flush_dns_cache() -> Result<(), Error> {

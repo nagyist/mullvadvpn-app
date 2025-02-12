@@ -3,7 +3,7 @@
 //  Operations
 //
 //  Created by pronebird on 01/06/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -39,7 +39,7 @@ import Foundation
 }
 
 /// A base implementation of an asynchronous operation
-open class AsyncOperation: Operation {
+open class AsyncOperation: Operation, @unchecked Sendable {
     /// Mutex lock used for guarding critical sections of operation lifecycle.
     private let operationLock = NSRecursiveLock()
 
@@ -71,7 +71,6 @@ open class AsyncOperation: Operation {
         get {
             stateLock.lock()
             defer { stateLock.unlock() }
-
             return _state
         }
         set(newState) {
@@ -88,7 +87,6 @@ open class AsyncOperation: Operation {
         get {
             stateLock.lock()
             defer { stateLock.unlock() }
-
             return __isCancelled
         }
         set {
@@ -117,7 +115,7 @@ open class AsyncOperation: Operation {
         _error
     }
 
-    override public final var isReady: Bool {
+    dynamic override public final var isReady: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
 
@@ -182,7 +180,6 @@ open class AsyncOperation: Operation {
     public final var conditions: [OperationCondition] {
         operationLock.lock()
         defer { operationLock.unlock() }
-
         return _conditions
     }
 
@@ -202,7 +199,7 @@ open class AsyncOperation: Operation {
 
         state = .evaluatingConditions
 
-        var results = [Bool](repeating: false, count: _conditions.count)
+        nonisolated(unsafe) var results = [Bool](repeating: false, count: _conditions.count)
         let group = DispatchGroup()
 
         for (index, condition) in _conditions.enumerated() {
@@ -238,44 +235,22 @@ open class AsyncOperation: Operation {
 
     public let dispatchQueue: DispatchQueue
 
+    private var isReadyObserver: NSKeyValueObservation?
     public init(dispatchQueue: DispatchQueue? = nil) {
         self.dispatchQueue = dispatchQueue ?? DispatchQueue(label: "AsyncOperation.dispatchQueue")
         super.init()
 
-        addObserver(
-            self,
-            forKeyPath: #keyPath(isReady),
-            options: [],
-            context: &Self.observerContext
-        )
+        isReadyObserver = observe(\.isReady, options: []) { operation, _ in
+            operation.checkReadiness()
+        }
     }
 
     deinit {
-        removeObserver(self, forKeyPath: #keyPath(isReady), context: &Self.observerContext)
+        // Clear the observer when the operation is deallocated to avoid leaking memory.
+        isReadyObserver = nil
     }
 
     // MARK: - KVO
-
-    private static var observerContext = 0
-
-    override public func observeValue(
-        forKeyPath keyPath: String?,
-        of object: Any?,
-        change: [NSKeyValueChangeKey: Any]?,
-        context: UnsafeMutableRawPointer?
-    ) {
-        if context == &Self.observerContext {
-            checkReadiness()
-            return
-        }
-
-        super.observeValue(
-            forKeyPath: keyPath,
-            of: object,
-            change: change,
-            context: context
-        )
-    }
 
     @objc class func keyPathsForValuesAffectingIsReady() -> Set<String> {
         [#keyPath(state)]
@@ -414,35 +389,12 @@ open class AsyncOperation: Operation {
     }
 }
 
+extension AsyncOperation: OperationBlockObserverSupport {}
+
 extension Operation {
     public func addDependencies(_ dependencies: [Operation]) {
         for dependency in dependencies {
             addDependency(dependency)
         }
-    }
-}
-
-public protocol OperationBlockObserverSupport {}
-extension AsyncOperation: OperationBlockObserverSupport {}
-
-extension OperationBlockObserverSupport where Self: AsyncOperation {
-    /// Add observer responding to cancellation event.
-    public func onCancel(_ fn: @escaping (Self) -> Void) {
-        addBlockObserver(OperationBlockObserver(didCancel: fn))
-    }
-
-    /// Add observer responding to finish event.
-    public func onFinish(_ fn: @escaping (Self, Error?) -> Void) {
-        addBlockObserver(OperationBlockObserver(didFinish: fn))
-    }
-
-    /// Add observer responding to start event.
-    public func onStart(_ fn: @escaping (Self) -> Void) {
-        addBlockObserver(OperationBlockObserver(didStart: fn))
-    }
-
-    /// Add block-based observer.
-    public func addBlockObserver(_ observer: OperationBlockObserver<Self>) {
-        addObserver(observer)
     }
 }

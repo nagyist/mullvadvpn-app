@@ -1,29 +1,16 @@
 package net.mullvad.mullvadvpn.util
 
-import net.mullvad.mullvadvpn.BuildConfig
-import net.mullvad.mullvadvpn.constant.BuildTypes
-import org.joda.time.DateTime
-import org.joda.time.format.DateTimeFormat
+import android.text.Html
+import androidx.core.text.HtmlCompat
 
-private const val EXPIRY_FORMAT = "YYYY-MM-dd HH:mm:ss z"
-
-fun String.capitalizeFirstCharOfEachWord(): String {
-    return split(" ")
-        .joinToString(" ") { word -> word.replaceFirstChar { firstChar -> firstChar.uppercase() } }
-        .trimEnd()
-}
-
-fun String.parseAsDateTime(): DateTime? {
-    return try {
-        DateTime.parse(this, DateTimeFormat.forPattern(EXPIRY_FORMAT))
-    } catch (ex: Exception) {
-        null
-    }
-}
-
-fun String.appendHideNavOnReleaseBuild(): String =
-    if (BuildTypes.RELEASE == BuildConfig.BUILD_TYPE) {
+fun String.appendHideNavOnPlayBuild(isPlayBuild: Boolean): String =
+    if (isPlayBuild) {
         "$this?hide_nav"
     } else {
         this
     }
+
+fun String.removeHtmlTags(): String =
+    Html.fromHtml(this, HtmlCompat.FROM_HTML_MODE_LEGACY).toString()
+
+fun List<String>.trimAll() = map { it.trim() }

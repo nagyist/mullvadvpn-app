@@ -1,7 +1,7 @@
-use crate::dns::DnsMonitorT;
+use crate::dns::{DnsMonitorT, ResolvedDnsConfig};
 use std::{io, net::IpAddr};
 use talpid_types::ErrorExt;
-use talpid_windows_net::{guid_from_luid, luid_from_alias};
+use talpid_windows::net::{guid_from_luid, luid_from_alias};
 use windows_sys::{core::GUID, Win32::System::Com::StringFromGUID2};
 use winreg::{
     enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE},
@@ -10,24 +10,23 @@ use winreg::{
 };
 
 /// Errors that can happen when configuring DNS on Windows.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failure to obtain an interface LUID given an alias.
-    #[error(display = "Failed to obtain LUID for the interface alias")]
-    ObtainInterfaceLuid(#[error(source)] io::Error),
+    #[error("Failed to obtain LUID for the interface alias")]
+    ObtainInterfaceLuid(#[source] io::Error),
 
     /// Failure to obtain an interface GUID.
-    #[error(display = "Failed to obtain GUID for the interface")]
-    ObtainInterfaceGuid(#[error(source)] io::Error),
+    #[error("Failed to obtain GUID for the interface")]
+    ObtainInterfaceGuid(#[source] io::Error),
 
     /// Failure to flush DNS cache.
-    #[error(display = "Failed to flush DNS resolver cache")]
-    FlushResolverCache(#[error(source)] super::dnsapi::Error),
+    #[error("Failed to flush DNS resolver cache")]
+    FlushResolverCache(#[source] super::dnsapi::Error),
 
     /// Failed to update DNS servers for interface.
-    #[error(display = "Failed to update interface DNS servers")]
-    SetResolvers(#[error(source)] io::Error),
+    #[error("Failed to update interface DNS servers")]
+    SetResolvers(#[source] io::Error),
 }
 
 pub struct DnsMonitor {
@@ -45,7 +44,9 @@ impl DnsMonitorT for DnsMonitor {
         })
     }
 
-    fn set(&mut self, interface: &str, servers: &[IpAddr]) -> Result<(), Error> {
+    fn set(&mut self, interface: &str, config: ResolvedDnsConfig) -> Result<(), Error> {
+        let servers = config.tunnel_config();
+
         let guid = guid_from_luid(&luid_from_alias(interface).map_err(Error::ObtainInterfaceLuid)?)
             .map_err(Error::ObtainInterfaceGuid)?;
         set_dns(&guid, servers)?;
@@ -94,24 +95,24 @@ fn set_dns_inner(
         transaction,
         &guid_str,
         "Tcpip",
-        servers.iter().filter(|addr| addr.is_ipv4()),
+        servers.iter().filter(|addr| addr.is_ipv4()).copied(),
     )?;
 
     config_interface(
         transaction,
         &guid_str,
         "Tcpip6",
-        servers.iter().filter(|addr| addr.is_ipv6()),
+        servers.iter().filter(|addr| addr.is_ipv6()).copied(),
     )?;
 
     Ok(())
 }
 
-fn config_interface<'a>(
+fn config_interface(
     transaction: &Transaction,
     guid: &str,
     service: &str,
-    nameservers: impl Iterator<Item = &'a IpAddr>,
+    nameservers: impl Iterator<Item = IpAddr>,
 ) -> io::Result<()> {
     let nameservers = nameservers
         .map(|addr| addr.to_string())

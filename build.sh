@@ -8,6 +8,7 @@ set -eu
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+source scripts/utils/host
 source scripts/utils/log
 
 ################################################################################
@@ -25,17 +26,20 @@ log_header "Building Mullvad VPN $PRODUCT_VERSION"
 OPTIMIZE="false"
 # If the produced binaries should be signed (Windows + macOS only)
 SIGN="false"
-# If a macOS build should create an installer artifact working on both
-# Intel and Apple Silicon Macs
+# If the produced app and pkg should be notarized by apple (macOS only)
+NOTARIZE="false"
+# If a macOS or Windows build should create an installer artifact working on both
+# x86 and arm64
 UNIVERSAL="false"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --optimize) OPTIMIZE="true";;
         --sign)     SIGN="true";;
+        --notarize) NOTARIZE="true";;
         --universal)
-            if [[ "$(uname -s)" != "Darwin" ]]; then
-                log_error "--universal only works on macOS"
+            if [[ "$(uname -s)" != "Darwin" && "$(uname -s)" != "MINGW"* ]]; then
+                log_error "--universal only works on macOS and Windows"
                 exit 1
             fi
             UNIVERSAL="true"
@@ -68,24 +72,46 @@ if [[ -n ${TARGETS:-""} ]]; then
     NPM_PACK_ARGS+=(--targets "${TARGETS[*]}")
 fi
 
+NPM_PACK_ARGS+=(--host-target-triple "$HOST")
+
 if [[ "$UNIVERSAL" == "true" ]]; then
     if [[ -n ${TARGETS:-""} ]]; then
         log_error "'TARGETS' and '--universal' cannot be specified simultaneously."
         exit 1
+    else
+        log_info "Building universal distribution"
     fi
 
-    TARGETS=(x86_64-apple-darwin aarch64-apple-darwin)
+    # Universal builds package targets for both aarch64 and x86_64. We leave the target
+    # corresponding to the host machine empty to avoid rebuilding multiple times.
+    # When the --target flag is provided to cargo it always puts the build in the target/$ENV_TARGET
+    # folder even when it matches you local machine, as opposed to just the target folder.
+    # This causes the cached build not to get used when later running e.g.
+    # 'cargo run --bin mullvad --shell-completions'.
+    case $HOST in
+        x86_64-apple-darwin) TARGETS=("" aarch64-apple-darwin);;
+        aarch64-apple-darwin) TARGETS=("" x86_64-apple-darwin);;
+        x86_64-pc-windows-msvc) TARGETS=("" aarch64-pc-windows-msvc);;
+        aarch64-pc-windows-msvc) TARGETS=("" x86_64-pc-windows-msvc);;
+    esac
+
     NPM_PACK_ARGS+=(--universal)
 fi
 
 if [[ "$OPTIMIZE" == "true" ]]; then
     CARGO_ARGS+=(--release)
     RUST_BUILD_MODE="release"
-    CPP_BUILD_MODE="Release"
     NPM_PACK_ARGS+=(--release)
 else
     RUST_BUILD_MODE="debug"
     NPM_PACK_ARGS+=(--no-compression)
+fi
+# The cargo builds that are part of the C++ builds only enforce `--locked` when built
+# in release mode. And we must enforce `--locked` for all signed builds. So we enable
+# release mode if either optimizations or signing is enabled.
+if [[ "$OPTIMIZE" == "true" || "$SIGN" == "true" ]]; then
+    CPP_BUILD_MODE="Release"
+else
     CPP_BUILD_MODE="Debug"
 fi
 
@@ -96,7 +122,12 @@ if [[ "$SIGN" == "true" ]]; then
         exit 1
     fi
 
-    if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == "MINGW"* ]]; then
+    # Will not allow an outdated lockfile when building with signatures
+    # (The build servers should never build without --locked for
+    # reproducibility and supply chain security)
+    CARGO_ARGS+=(--locked)
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
         log_info "Configuring environment for signing of binaries"
         if [[ -z ${CSC_LINK-} ]]; then
             log_error "The variable CSC_LINK is not set. It needs to point to a file containing the"
@@ -110,13 +141,15 @@ if [[ "$SIGN" == "true" ]]; then
         fi
         # macOS: This needs to be set to 'true' to activate signing, even when CSC_LINK is set.
         export CSC_IDENTITY_AUTO_DISCOVERY=true
-
-        if [[ "$(uname -s)" == "MINGW"* ]]; then
-            CERT_FILE=$CSC_LINK
-            CERT_PASSPHRASE=$CSC_KEY_PASSWORD
-            unset CSC_LINK CSC_KEY_PASSWORD
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
+    elif [[ "$(uname -s)" == "MINGW"* ]]; then
+        if [[ -z ${CERT_HASH-} ]]; then
+            log_error "The variable CERT_HASH is not set. It needs to be set to the thumbprint of"
+            log_error "the signing certificate."
+            exit 1
         fi
+
+        unset CSC_LINK CSC_KEY_PASSWORD
+        export CSC_IDENTITY_AUTO_DISCOVERY=false
     else
         unset CSC_LINK CSC_KEY_PASSWORD
         export CSC_IDENTITY_AUTO_DISCOVERY=false
@@ -127,20 +160,16 @@ else
     export CSC_IDENTITY_AUTO_DISCOVERY=false
 fi
 
+if [[ "$NOTARIZE" == "true" ]]; then
+    NPM_PACK_ARGS+=(--notarize)
+fi
+
 if [[ "$IS_RELEASE" == "true" ]]; then
     log_info "Removing old Rust build artifacts..."
     cargo clean
-
-    # Will not allow an outdated lockfile in releases
-    CARGO_ARGS+=(--locked)
 else
     # Allow dev builds to override which API server to use at runtime.
     CARGO_ARGS+=(--features api-override)
-
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        log_info "Disabling Apple notarization of installer in dev build"
-        NPM_PACK_ARGS+=(--no-apple-notarization)
-    fi
 fi
 
 # Make Windows builds include a manifest in the daemon binary declaring it must
@@ -166,8 +195,7 @@ function sign_win {
                 -tr http://timestamp.digicert.com -td sha256 \
                 -fd sha256 -d "Mullvad VPN" \
                 -du "https://github.com/mullvad/mullvadvpn-app#readme" \
-                -f "$CERT_FILE" \
-                -p "$CERT_PASSPHRASE" "$binary"
+                -sha1 "$CERT_HASH" "$binary"
             then
                 break
             fi
@@ -183,36 +211,26 @@ function sign_win {
 }
 
 # Build the daemon and other Rust/C++ binaries, optionally
-# sign them, strip them of debug symbols and copy to `dist-assets/`.
+# sign them, and copy to `dist-assets/`.
 function build {
-    local current_target=${1:-""}
-    local for_target_string=""
-    local stripbin="strip"
-    if [[ -n $current_target ]]; then
+    local specified_target=${1:-""}
+    local current_target=${specified_target:-"$HOST"}
+    local for_target_string
+    if [[ -n $specified_target ]]; then
         for_target_string=" for $current_target"
-
-        if [[ "$current_target" == "aarch64-unknown-linux-gnu" && "$(uname -m)" != "aarch64" ]]; then
-            stripbin="aarch64-linux-gnu-strip"
-        fi
+    else
+        for_target_string=" for local target $HOST"
     fi
 
     ################################################################################
     # Compile and link all binaries.
     ################################################################################
 
-    log_header "Building wireguard-go$for_target_string"
-
-    ./wireguard/build-wireguard-go.sh "$current_target"
-    if [[ "$SIGN" == "true" && "$(uname -s)" == "MINGW"* ]]; then
-        # Windows can only be built for this one target anyway, so it can be hardcoded.
-        sign_win "build/lib/x86_64-pc-windows-msvc/libwg.dll"
-    fi
-
     log_header "Building Rust code in $RUST_BUILD_MODE mode using $RUSTC_VERSION$for_target_string"
 
     local cargo_target_arg=()
-    if [[ -n $current_target ]]; then
-        cargo_target_arg+=(--target="$current_target")
+    if [[ -n $specified_target ]]; then
+        cargo_target_arg+=(--target="$specified_target")
     fi
     local cargo_crates_to_build=(
         -p mullvad-daemon --bin mullvad-daemon
@@ -255,69 +273,91 @@ function build {
             mullvad-problem-report.exe
             talpid_openvpn_plugin.dll
             mullvad-setup.exe
+            libwg.dll
+            maybenot_ffi.dll
         )
     fi
 
-    if [[ -n $current_target ]]; then
-        local cargo_output_dir="$CARGO_TARGET_DIR/$current_target/$RUST_BUILD_MODE"
+    if [[ -n $specified_target ]]; then
+        local cargo_output_dir="$CARGO_TARGET_DIR/$specified_target/$RUST_BUILD_MODE"
         # To make it easier to package multiple targets, the binaries are
         # located in a directory with the name of the target triple.
-        local destination_dir="dist-assets/$current_target"
+        local destination_dir="dist-assets/$specified_target"
         mkdir -p "$destination_dir"
     else
         local cargo_output_dir="$CARGO_TARGET_DIR/$RUST_BUILD_MODE"
         local destination_dir="dist-assets"
     fi
 
-    for binary in ${BINARIES[*]}; do
+    for binary in "${BINARIES[@]}"; do
         local source="$cargo_output_dir/$binary"
         local destination="$destination_dir/$binary"
 
-        if [[ "$(uname -s)" == "MINGW"* || "$binary" == *.dylib ]]; then
-            log_info "Copying $source => $destination"
-            cp "$source" "$destination"
-        else
-            log_info "Stripping $source => $destination"
-            "${stripbin}" "$source" -o "$destination"
-        fi
+        log_info "Copying $source => $destination"
+        cp "$source" "$destination"
 
         if [[ "$SIGN" == "true" && "$(uname -s)" == "MINGW"* ]]; then
             sign_win "$destination"
         fi
     done
+
+    if [[ "$current_target" == "aarch64-pc-windows-msvc" ]]; then
+        # We ship x64 OpenVPN with ARM64, so we need an x64 talpid-openvpn-plugin
+        # to include in the package.
+        local source="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/$RUST_BUILD_MODE/talpid_openvpn_plugin.dll"
+        local destination
+        if [[ -n "$specified_target" ]]; then
+            destination="dist-assets/$specified_target/talpid_openvpn_plugin.dll"
+        else
+            destination="dist-assets/talpid_openvpn_plugin.dll"
+        fi
+
+        log_info "Workaround: building x64 talpid-openvpn-plugin"
+        cargo build --target x86_64-pc-windows-msvc "${CARGO_ARGS[@]}" -p talpid-openvpn-plugin --lib
+        cp "$source" "$destination"
+        if [[ "$SIGN" == "true" ]]; then
+            sign_win "$destination"
+        fi
+    fi
 }
 
 if [[ "$(uname -s)" == "MINGW"* ]]; then
-    log_header "Building C++ code in $CPP_BUILD_MODE mode"
-    CPP_BUILD_MODES=$CPP_BUILD_MODE IS_RELEASE=$IS_RELEASE ./build-windows-modules.sh
-
-    if [[ "$SIGN" == "true" ]]; then
-        CPP_BINARIES=(
-            "windows/winfw/bin/x64-$CPP_BUILD_MODE/winfw.dll"
-            "windows/driverlogic/bin/x64-$CPP_BUILD_MODE/driverlogic.exe"
-            # The nsis plugin is always built in 32 bit release mode
-            windows/nsis-plugins/bin/Win32-Release/*.dll
-        )
-        sign_win "${CPP_BINARIES[@]}"
-    fi
-fi
-
-# Compile for all defined targets, or the current architecture if unspecified.
-if [[ -n ${TARGETS:-""} ]]; then
-    for t in ${TARGETS[*]}; do
-        source env.sh "$t"
-        build "$t"
-    done
-else
-    source env.sh ""
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        # Provide target for non-universal macOS builds to use the same output location as for
-        # universal builds
-        build "$ENV_TARGET"
+    if [[ "$IS_RELEASE" == "true" ]]; then
+        ./build-windows-modules.sh clean
     else
-        build
+        echo "Will NOT clean intermediate files in ./windows/**/bin/ in dev builds"
     fi
+
+    for t in "${TARGETS[@]:-"$HOST"}"; do
+        case "${t:-"$HOST"}" in
+            x86_64-pc-windows-msvc) CPP_BUILD_TARGET=x64;;
+            aarch64-pc-windows-msvc) CPP_BUILD_TARGET=ARM64;;
+            *)
+                log_error "Unknown Windows target: $t"
+                exit 1
+                ;;
+        esac
+
+        log_header "Building C++ code in $CPP_BUILD_MODE mode for $CPP_BUILD_TARGET"
+        CPP_BUILD_MODES=$CPP_BUILD_MODE CPP_BUILD_TARGETS=$CPP_BUILD_TARGET ./build-windows-modules.sh
+
+        if [[ "$SIGN" == "true" ]]; then
+            CPP_BINARIES=(
+                "windows/winfw/bin/$CPP_BUILD_TARGET-$CPP_BUILD_MODE/winfw.dll"
+                "windows/driverlogic/bin/$CPP_BUILD_TARGET-$CPP_BUILD_MODE/driverlogic.exe"
+                # The nsis plugin is always built in 32 bit release mode
+                windows/nsis-plugins/bin/Win32-Release/*.dll
+            )
+            sign_win "${CPP_BINARIES[@]}"
+        fi
+    done
 fi
+
+for t in "${TARGETS[@]:-""}"; do
+    source env.sh "$t"
+    build "$t"
+done
+
 
 ################################################################################
 # Package app.
@@ -332,16 +372,18 @@ if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == "Linux" ]]; then
         cargo run --bin mullvad "${CARGO_ARGS[@]}" -- shell-completions "$sh" \
             "build/shell-completions/"
     done
+else
+    mkdir -p "build"
 fi
 
 log_info "Updating relays.json..."
-cargo run --bin relay_list "${CARGO_ARGS[@]}" > build/relays.json
+cargo run -p mullvad-api --bin relay_list "${CARGO_ARGS[@]}" > build/relays.json
 
 
 log_header "Installing JavaScript dependencies"
 
-pushd gui
-npm ci
+pushd desktop/packages/mullvad-vpn
+npm ci --no-audit --no-fund
 
 log_header "Packing Mullvad VPN $PRODUCT_VERSION artifact(s)"
 
@@ -358,6 +400,33 @@ if [[ "$SIGN" == "true" && "$(uname -s)" == "MINGW"* ]]; then
         log_info "Signing $installer_path"
         sign_win "$installer_path"
     done
+fi
+
+# pack universal installer on Windows
+if [[ "$UNIVERSAL" == "true" && "$(uname -s)" == "MINGW"* ]]; then
+    WIN_PACK_ARGS=()
+    if [[ "$OPTIMIZE" == "true" ]]; then
+        WIN_PACK_ARGS+=(--optimize)
+    fi
+    ./desktop/scripts/pack-universal-win.sh \
+        --x64-installer "$SCRIPT_DIR/dist/"*"$PRODUCT_VERSION"_x64.exe \
+        --arm64-installer "$SCRIPT_DIR/dist/"*"$PRODUCT_VERSION"_arm64.exe \
+        "${WIN_PACK_ARGS[@]}"
+    if [[ "$SIGN" == "true" ]]; then
+        sign_win "dist/MullvadVPN-${PRODUCT_VERSION}.exe"
+    fi
+fi
+
+# notarize installer on macOS
+if [[ "$NOTARIZE" == "true" && "$(uname -s)" == "Darwin" ]]; then
+    log_info "Notarizing pkg"
+    xcrun notarytool submit dist/*"$PRODUCT_VERSION"*.pkg \
+        --keychain "$NOTARIZE_KEYCHAIN" \
+        --keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE" \
+        --wait
+
+    log_info "Stapling pkg"
+    xcrun stapler staple dist/*"$PRODUCT_VERSION"*.pkg
 fi
 
 log_success "**********************************"

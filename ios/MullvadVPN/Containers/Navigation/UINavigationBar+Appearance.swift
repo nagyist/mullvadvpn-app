@@ -3,12 +3,21 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 22/05/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
 
 extension UINavigationBar {
+    /// Locates the navigation bar prompt label within the view hirarchy and overrides the text color.
+    /// - Note: Navigation bar does not provide the appearance configuration for the prompt.
+    func overridePromptColor() {
+        let promptView = subviews.first { $0.description.contains("Prompt") }
+        let promptLabel = promptView?.subviews.first { $0 is UILabel } as? UILabel
+
+        promptLabel?.textColor = UIColor.NavigationBar.promptColor
+    }
+
     func configureCustomAppeareance() {
         var directionalMargins = directionalLayoutMargins
         directionalMargins.leading = UIMetrics.contentLayoutMargins.leading
@@ -23,7 +32,7 @@ extension UINavigationBar {
 
     private func makeNavigationBarAppearance(isTransparent: Bool) -> UINavigationBarAppearance {
         let backIndicatorImage = UIImage(named: "IconBack")?.withTintColor(
-            UIColor.NavigationBar.backButtonIndicatorColor,
+            UIColor.NavigationBar.buttonColor,
             renderingMode: .alwaysOriginal
         )
         let backIndicatorTransitionMask = UIImage(named: "IconBackTransitionMask")
@@ -62,19 +71,10 @@ extension UINavigationBar {
         navigationBarAppearance.doneButtonAppearance = doneBarButtonAppearance
         navigationBarAppearance.backButtonAppearance = backButtonAppearance
 
-        if #available(iOS 14, *) {
-            navigationBarAppearance.setBackIndicatorImage(
-                backIndicatorImage,
-                transitionMaskImage: backIndicatorTransitionMask
-            )
-        } else {
-            // Bug: on iOS 13 setBackIndicatorImage accepts parameters in backward order
-            // https://stackoverflow.com/a/58171229/351305
-            navigationBarAppearance.setBackIndicatorImage(
-                backIndicatorTransitionMask,
-                transitionMaskImage: backIndicatorImage
-            )
-        }
+        navigationBarAppearance.setBackIndicatorImage(
+            backIndicatorImage,
+            transitionMaskImage: backIndicatorTransitionMask
+        )
 
         return navigationBarAppearance
     }

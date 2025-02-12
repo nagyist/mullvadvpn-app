@@ -21,14 +21,126 @@ Line wrap the file at 100 chars.                                              Th
 * **Fixed**: for any bug fixes.
 * **Security**: in case of vulnerabilities.
 
+## Unreleased
+### Fixed
+- Broken DAITA settings view on iOS 15.
 
-## [Unreleased]
+### Changed
+- Move changelog to settings and add an in-app notification banner for app update.
+- Add different themes for app icons
+
+### Removed
+- Remove Google's resolvers from encrypted DNS proxy.
+
+## [2025.1 - 2025-01-14]
+### Added
+- Update to DAITA v2 - now machines are provided by relays dynamically instead
+  of using bundled ones.
+
+## [2024.11 - 2024-12-12]
+### Added
+- Add WireGuard over Shadowsocks obfuscation. It can be enabled in "VPN settings". This will
+  also be used automatically when connecting fails with other methods.
+- Add new settings views for DAITA and multihop.
+
+### Fixed
+- When loading logs, a spinner will be shown to indicate the app is busy.
+
+## [2024.10 - 2024-11-20]
+### Fixed
+- Removed deadlock when losing connectivity without entering offline state.
+- Improved log reporting.
+
+## [2024.9 - 2024-11-07]
+### Added
+- DAITA everywhere, using multihop.
+
+### Changed
+- Replace the draft key encapsulation mechanism Kyber (round 3) with the standardized
+  ML-KEM (FIPS 203) dito in the handshake for Quantum-resistant tunnels.
+
+### Fixed
+- Fix app going into blocked state on first-time installs.
+
+## [2024.8 - 2024-10-14]
+### Added
+- Add a new access method that uses the encrypted DNS proxy to reach our API.
+
+### Fixed
+- Fix IPv6 parsing in API access
+
+## [2024.7 - 2024-09-16]
+### Added
+- Add DAITA (Defence against AI-guided Traffic Analysis) setting.
+
+## [2024.6 - 2024.09-02]
+### Fixed
+- Fixed multihop in networks that use DNS64 and NAT64.
+
+## [2024.5 - 2024-08-19]
+### Added
+- Add multihop, a feature that routes traffic through two
+  of our relays before it reaches the internet.
+
+## [2024.4 - 2024-06-25]
+### Added
+- Add Post-Quantum secure tunnels.
+
+## [2024.3 - 2024-05-13]
+### Added
+- Add ability to create custom lists.
+
+## [2024.2 - 2024-02-26]
+### Added
+- Add IP Overrides.
+
+## [2024.1 - 2024-01-06]
+### Added
+- Add custom API access methods.
+
+## [2023.8 - 2023-12-08]
+### Added
+- Add UDP-over-TCP WireGuard obfuscation.
+
+## [2023.7 - 2023-11-23]
+### Added
+- Add filtering on ownership and provider to location selection view.
+- Add blocked state.
+- Show exit IP when connected to a relay.
+
+
+## [2023.6 - 2023-10-12]
+### Removed
+- Remove voucher redemption from the app.
+
+
+## [2023.5 - 2023-09-22]
+### Added
+- A new option to block Social media.
+
+### Fixed
+- Fixed crash when deleting an account whilst connected.
+
+
+## [2023.4 - 2023-09-12]
+### Added
+- Allow redeeming vouchers in account view.
+- Allow deleting account in account view.
+- Add new account flow.
+
+### Fixed
+- Invalidate API IP address cache to fix connectivity issues for some of devices updating from
+  2023.2 or earlier.
+
+
+## [2023.3 - 2023-07-15]
 ### Added
 - Add search functionality to location selection view.
 - Wipe all settings on app reinstall.
 - Add a dedicated account button on the main view and remove it from settings.
-- Rotate public key from within packet tunnel when it detects that the key stored on backend does 
+- Rotate public key from within packet tunnel when it detects that the key stored on backend does
   not match the one stored on device.
+- Add WireGuard port selection to settings.
 - Add redeeming voucher code on account view.
 
 ## [2023.2 - 2023-04-03]

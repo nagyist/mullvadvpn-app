@@ -28,32 +28,39 @@ LABEL org.opencontainers.image.licenses=GPL-3.0
 
 ENV CARGO_TARGET_DIR=/cargo-target/target
 
-ARG GOLANG_VERSION=1.18.5 \
-    GOLANG_HASH=9e5de37f9c49942c601b191ac5fba404b868bfc21d446d6960acc12283d6e5f2
+ARG GOLANG_VERSION=1.21.3 \
+    GOLANG_HASH=1241381b2843fae5a9707eec1f8fb2ef94d827990582c7c7c32f5bdfbfd420c8
 
 # The pinned commit has this solved: https://github.com/rui314/mold/issues/1003.
 ARG MOLD_COMMIT_REF=c4722fe5aed96295837d9150b20ef8698c7a28db
+
+# Pinned to commit hash for tag v4.24.3
+ARG PROTOBUF_COMMIT_REF=ee1355459c9ce7ffe264bc40cfdc7b7623d37e99
 
 # === Install/set up the image ===
 
 RUN dpkg --add-architecture arm64 && apt-get update -y && apt-get install -y \
     git \
     curl \
+    make \
     gcc gcc-aarch64-linux-gnu \
     libdbus-1-dev libdbus-1-dev:arm64 \
     rpm \
-    protobuf-compiler \
     # For cross-compiling/linting towards Windows
     gcc-mingw-w64-x86-64 \
+    # For building Arch Linux packages
+    libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # === Rust ===
 
-# Install latest stable Rust toolchain for both x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu,
+ARG RUST_VERSION=stable
+
+# Install the Rust toolchain for both x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu,
 # plus x86_64-pc-windows-gnu for Windows cross-compilation/linting
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y \
-    --default-toolchain stable \
+    --default-toolchain $RUST_VERSION \
     --profile minimal \
     --component clippy \
     --target aarch64-unknown-linux-gnu \
@@ -63,10 +70,20 @@ ENV PATH=/root/.cargo/bin:$PATH
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc" \
     PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu
 
-# Enable Cargo's sparse protocol. Allows fetching the index much faster.
-# Is targeted for being the default in Rust 1.70. If that happens, this can be removed.
-# https://blog.rust-lang.org/2023/03/09/Rust-1.68.0.html#cargos-sparse-protocol
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+# === protobuf (for compiling .proto files) ===
+
+RUN apt-get update -y && \
+    apt-get install -y --mark-auto cmake g++ && \
+    rm -rf /var/lib/apt/lists/* && \
+    git clone https://github.com/protocolbuffers/protobuf.git && \
+    cd protobuf && \
+    git reset --hard "$PROTOBUF_COMMIT_REF" && \
+    git submodule update --init --recursive && \
+    cmake . -DCMAKE_CXX_STANDARD=14 && \
+    cmake --build . -j $(nproc) && \
+    cmake --install . && \
+    cd .. && rm -rf protobuf && \
+    apt-get autoremove -y
 
 # === mold (fast linker) ===
 # Allows linking Rust binaries significantly faster.
@@ -88,7 +105,7 @@ RUN apt-get update -y && \
 ENV PATH=/root/.volta/bin:$PATH
 # volta seemingly does not have a way to explicitly install the toolchain
 # versions from package.json, but `node --version` triggers an install
-COPY gui/package.json .
+COPY desktop/package.json .
 RUN curl https://get.volta.sh | bash && node --version && rm package.json
 
 # === Golang ===

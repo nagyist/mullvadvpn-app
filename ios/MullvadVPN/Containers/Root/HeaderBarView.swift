@@ -3,10 +3,9 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 19/06/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
-import Foundation
 import UIKit
 
 class HeaderBarView: UIView {
@@ -34,6 +33,7 @@ class HeaderBarView: UIView {
         label.font = UIFont.systemFont(ofSize: 14)
         label.textColor = UIColor(white: 1.0, alpha: 0.8)
         label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        label.setAccessibilityIdentifier(.headerDeviceNameLabel)
         return label
     }()
 
@@ -47,7 +47,6 @@ class HeaderBarView: UIView {
 
     private lazy var buttonContainer: UIStackView = {
         let stackView = UIStackView(arrangedSubviews: [accountButton, settingsButton])
-        stackView.spacing = UIMetrics.headerBarButtonSpacing
         return stackView
     }()
 
@@ -57,27 +56,31 @@ class HeaderBarView: UIView {
         return layer
     }()
 
-    let accountButton: IncreasedHitButton = {
+    let accountButton: UIButton = {
         let button = makeHeaderBarButton(with: UIImage(named: "IconAccount"))
-        button.accessibilityIdentifier = "AccountButton"
+        button.setAccessibilityIdentifier(.accountButton)
         button.accessibilityLabel = NSLocalizedString(
             "HEADER_BAR_ACCOUNT_BUTTON_ACCESSIBILITY_LABEL",
             tableName: "HeaderBar",
             value: "Account",
             comment: ""
         )
+        button.heightAnchor.constraint(equalToConstant: UIMetrics.Button.barButtonSize).isActive = true
+        button.widthAnchor.constraint(equalTo: button.heightAnchor, multiplier: 1).isActive = true
         return button
     }()
 
-    let settingsButton: IncreasedHitButton = {
+    let settingsButton: UIButton = {
         let button = makeHeaderBarButton(with: UIImage(named: "IconSettings"))
-        button.accessibilityIdentifier = "SettingsButton"
+        button.setAccessibilityIdentifier(.settingsButton)
         button.accessibilityLabel = NSLocalizedString(
             "HEADER_BAR_SETTINGS_BUTTON_ACCESSIBILITY_LABEL",
             tableName: "HeaderBar",
             value: "Settings",
             comment: ""
         )
+        button.heightAnchor.constraint(equalToConstant: UIMetrics.Button.barButtonSize).isActive = true
+        button.widthAnchor.constraint(equalTo: button.heightAnchor, multiplier: 1).isActive = true
         return button
     }()
 
@@ -106,6 +109,12 @@ class HeaderBarView: UIView {
         }
     }
 
+    var isDeviceInfoHidden = false {
+        didSet {
+            deviceInfoHolder.arrangedSubviews.forEach { $0.isHidden = isDeviceInfoHidden }
+        }
+    }
+
     private var isAccountButtonHidden = false {
         didSet {
             accountButton.isHidden = isAccountButtonHidden
@@ -115,7 +124,6 @@ class HeaderBarView: UIView {
     private var timeLeft: Date? {
         didSet {
             if let timeLeft {
-                timeLeftLabel.isHidden = false
                 let formattedTimeLeft = NSLocalizedString(
                     "TIME_LEFT_HEADER_VIEW",
                     tableName: "Account",
@@ -131,7 +139,7 @@ class HeaderBarView: UIView {
                     ) ?? ""
                 )
             } else {
-                timeLeftLabel.isHidden = true
+                timeLeftLabel.text = ""
             }
         }
     }
@@ -139,7 +147,6 @@ class HeaderBarView: UIView {
     private var deviceName: String? {
         didSet {
             if let deviceName {
-                deviceNameLabel.isHidden = false
                 let formattedDeviceName = NSLocalizedString(
                     "DEVICE_NAME_HEADER_VIEW",
                     tableName: "Account",
@@ -148,7 +155,7 @@ class HeaderBarView: UIView {
                 )
                 deviceNameLabel.text = String(format: formattedDeviceName, deviceName)
             } else {
-                deviceNameLabel.isHidden = true
+                deviceNameLabel.text = ""
             }
         }
     }
@@ -163,9 +170,15 @@ class HeaderBarView: UIView {
         )
 
         accessibilityContainerType = .semanticGroup
+        setAccessibilityIdentifier(.headerBarView)
 
-        let imageSize = brandNameImage?.size ?? .zero
-        let brandNameAspectRatio = imageSize.width / max(imageSize.height, 1)
+        let brandImageSize = brandNameImage?.size ?? .zero
+        let brandNameAspectRatio = brandImageSize.width / max(brandImageSize.height, 1)
+
+        var buttonContainerTrailingAdjustment: CGFloat = 0
+        if let buttonImageWidth = settingsButton.currentImage?.size.width {
+            buttonContainerTrailingAdjustment = max((UIMetrics.Button.barButtonSize - buttonImageWidth) / 2, 0)
+        }
 
         [deviceNameLabel, timeLeftLabel].forEach { deviceInfoHolder.addArrangedSubview($0) }
 
@@ -190,7 +203,10 @@ class HeaderBarView: UIView {
             brandNameImageView.heightAnchor.constraint(equalToConstant: UIMetrics.headerBarBrandNameHeight)
 
             buttonContainer.centerYAnchor.constraint(equalTo: brandNameImageView.centerYAnchor)
-            buttonContainer.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor)
+            buttonContainer.trailingAnchor.constraint(
+                equalTo: layoutMarginsGuide.trailingAnchor,
+                constant: buttonContainerTrailingAdjustment
+            )
 
             deviceInfoHolder.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor)
             deviceInfoHolder.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor)

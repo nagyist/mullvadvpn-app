@@ -16,14 +16,19 @@ shopt -s nullglob
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="$SCRIPT_DIR/mullvadvpn-app"
+# All non-dev builds have their artifacts placed under this directory
+ARTIFACT_DIR="$SCRIPT_DIR/artifacts"
+# Keeps track of which git commit hashes has been built, to not build them again
 LAST_BUILT_DIR="$SCRIPT_DIR/last-built"
-UPLOAD_DIR="$SCRIPT_DIR/upload"
 
 BRANCHES_TO_BUILD=("origin/main")
 
+# shellcheck source=ci/buildserver-config.sh
+source "$SCRIPT_DIR/buildserver-config.sh"
+
 # Ask for the passphrase to the signing keys
 case "$(uname -s)" in
-    Darwin*|MINGW*|MSYS_NT*)
+    Darwin*)
         if [[ -z ${CSC_KEY_PASSWORD-} ]]; then
             read -rsp "CSC_KEY_PASSWORD = " CSC_KEY_PASSWORD
             echo ""
@@ -42,6 +47,22 @@ case "$(uname -s)" in
         ;;
 esac
 
+
+# Automatically copy artifacts to the inbox of the repository builder service
+# for dev and staging (production is pushed manually)
+function publish_linux_repositories {
+    local artifact_dir=$1
+    local version=$2
+
+    "$SCRIPT_DIR/publish-app-to-repositories.sh" --dev "$artifact_dir" "$version"
+
+    # If this is a release build, also push to staging.
+    # Publishing to production is done manually.
+    if [[ $version != *"-dev-"* ]]; then
+        "$SCRIPT_DIR/publish-app-to-repositories.sh" --staging "$artifact_dir" "$version"
+    fi
+}
+
 # Uploads whatever matches the first argument to the Linux build server
 function upload_sftp {
     echo "Uploading Mullvad VPN installers to app-build-linux:upload/"
@@ -56,13 +77,13 @@ function upload {
     version=$1
 
     files=( * )
-    checksums_path="$version+$(hostname).sha256"
+    checksums_path="desktop+$(hostname)+$version.sha256"
     sha256sum "${files[@]}" > "$checksums_path"
 
     case "$(uname -s)" in
-        # Linux is both the build and upload server. Just move directly to target dir
+        # Linux is both the build and upload server. Just copy directly to target dir
         Linux*)
-            mv "${files[@]}" "$checksums_path" "$UPLOAD_DIR/"
+            cp "${files[@]}" "$checksums_path" "$UPLOAD_DIR/"
             ;;
         # Other platforms need to transfer their artifacts to the Linux build machine.
         Darwin*|MINGW*|MSYS_NT*)
@@ -85,6 +106,18 @@ function run_in_build_env {
     fi
 }
 
+# Sign DEB+RPM on Linux
+function sign_linux_packages {
+    for installer_path in dist/MullvadVPN-*.deb; do
+        echo "Signing $installer_path"
+        dpkg-sig --sign builder "$installer_path"
+    done
+    for installer_path in dist/MullvadVPN-*.rpm; do
+        echo "Signing $installer_path"
+        rpm --addsign "$installer_path"
+    done
+}
+
 # Builds the app and test artifacts and move them to the passed in `artifact_dir`.
 # To cross compile pass in `target` as an environment variable
 # to this function. Must also pass `artifact_dir` to show where to move the built artifacts.
@@ -94,9 +127,13 @@ function build {
     local build_args=("${@}")
 
     run_in_build_env TARGETS="$target" ./build.sh "${build_args[@]}" || return 1
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        sign_linux_packages
+    fi
     mv dist/*.{deb,rpm,exe,pkg} "$artifact_dir" || return 1
 
-    (run_in_build_env gui/scripts/build-test-executable.sh "$target" && \
+    (run_in_build_env desktop/packages/mullvad-vpn/scripts/build-test-executable.sh \
+        "$target" && \
         mv "dist/app-e2e-tests-$version"* "$artifact_dir") || \
         true
 }
@@ -122,6 +159,7 @@ function checkout_ref {
     git reset --hard
     git checkout "$ref"
     git submodule update
+    git submodule update --init wireguard-go-rs/libwg/wireguard-go || true
     git clean -df
 }
 
@@ -151,12 +189,21 @@ function build_ref {
     local version=""
     version="$(run_in_build_env cargo run -q --bin mullvad-version | tr -d "\r" || return 1)"
 
-    local artifact_dir="dist/$version"
+    local artifact_dir="$ARTIFACT_DIR/$version"
     mkdir -p "$artifact_dir"
 
     local build_args=(--optimize --sign)
     if [[ "$(uname -s)" == "Darwin" ]]; then
-        build_args+=(--universal)
+        build_args+=(--universal --notarize)
+    fi
+    if [[ "$(uname -s)" == "MINGW"* ]]; then
+        # Check if the windows-installer crate is present, and if so, build a universal installer.
+        # The check is needed for compatibility with older commits that don't have the crate/flag.
+        # It was added in December 2024. The condition can be removed when supporting commits
+        # older than that is no longer necessary.
+        if [[ -d "$BUILD_DIR/windows-installer" ]]; then
+            build_args+=(--universal)
+        fi
     fi
 
     artifact_dir=$artifact_dir build "${build_args[@]}" || return 1
@@ -185,7 +232,7 @@ function build_ref {
         # Pipes all matching names and their new name to mv
         pushd "$artifact_dir"
         for original_file in MullvadVPN-*-dev-*{.deb,.rpm,.exe,.pkg}; do
-            new_file=$(echo "$original_file" | sed -nE "s/^(MullvadVPN-.*-dev-.*)(_amd64\.deb|_x86_64\.rpm|_arm64\.deb|_aarch64\.rpm|\.exe|\.pkg)$/\1$version_suffix\2/p")
+            new_file=$(echo "$original_file" | perl -pe "s/^(MullvadVPN-.*?)(_x64|_arm64|_aarch64|_amd64|_x86_64)?(\.deb|\.rpm|\.exe|\.pkg)$/\1$version_suffix\2\3/p")
             mv "$original_file" "$new_file"
         done
         popd
@@ -195,9 +242,15 @@ function build_ref {
         fi
     fi
 
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        publish_linux_repositories "$artifact_dir" "$version"
+    fi
     (cd "$artifact_dir" && upload "$version") || return 1
-    # shellcheck disable=SC2216
-    yes | rm -r "$artifact_dir"
+    # Remove artifacts from dev builds. They are not really needed and take up lots of space.
+    if [[ $version == *"-dev-"* ]]; then
+        # shellcheck disable=SC2216
+        yes | rm -r "$artifact_dir"
+    fi
 
     touch "$LAST_BUILT_DIR/$current_hash"
 

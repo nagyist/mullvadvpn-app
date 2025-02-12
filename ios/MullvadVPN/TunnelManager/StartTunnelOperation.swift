@@ -3,18 +3,17 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 15/12/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
+import MullvadREST
 import NetworkExtension
 import Operations
-import RelayCache
-import RelaySelector
-import TunnelProviderMessaging
+import PacketTunnelCore
 
-class StartTunnelOperation: ResultOperation<Void> {
+class StartTunnelOperation: ResultOperation<Void>, @unchecked Sendable {
     typealias EncodeErrorHandler = (Error) -> Void
 
     private let interactor: TunnelInteractor
@@ -50,14 +49,8 @@ class StartTunnelOperation: ResultOperation<Void> {
             finish(result: .success(()))
 
         case .disconnected, .pendingReconnect:
-            do {
-                let selectorResult = try interactor.selectRelay()
-
-                makeTunnelProviderAndStartTunnel(selectorResult: selectorResult) { error in
-                    self.finish(result: error.map { .failure($0) } ?? .success(()))
-                }
-            } catch {
-                finish(result: .failure(error))
+            makeTunnelProviderAndStartTunnel { error in
+                self.finish(result: error.map { .failure($0) } ?? .success(()))
             }
 
         default:
@@ -65,18 +58,11 @@ class StartTunnelOperation: ResultOperation<Void> {
         }
     }
 
-    private func makeTunnelProviderAndStartTunnel(
-        selectorResult: RelaySelectorResult,
-        completionHandler: @escaping (Error?) -> Void
-    ) {
+    private func makeTunnelProviderAndStartTunnel(completionHandler: @escaping @Sendable (Error?) -> Void) {
         makeTunnelProvider { result in
             self.dispatchQueue.async {
                 do {
-                    try self.startTunnel(
-                        tunnel: try result.get(),
-                        selectorResult: selectorResult
-                    )
-
+                    try self.startTunnel(tunnel: result.get())
                     completionHandler(nil)
                 } catch {
                     completionHandler(error)
@@ -85,11 +71,14 @@ class StartTunnelOperation: ResultOperation<Void> {
         }
     }
 
-    private func startTunnel(tunnel: Tunnel, selectorResult: RelaySelectorResult) throws {
+    private func startTunnel(tunnel: any TunnelProtocol) throws {
+        let selectedRelays = try? interactor.selectRelays()
         var tunnelOptions = PacketTunnelOptions()
 
         do {
-            try tunnelOptions.setSelectorResult(selectorResult)
+            if let selectedRelays {
+                try tunnelOptions.setSelectedRelays(selectedRelays)
+            }
         } catch {
             logger.error(
                 error: error,
@@ -101,14 +90,20 @@ class StartTunnelOperation: ResultOperation<Void> {
 
         interactor.updateTunnelStatus { tunnelStatus in
             tunnelStatus = TunnelStatus()
-            tunnelStatus.packetTunnelStatus.tunnelRelay = selectorResult.packetTunnelRelay
-            tunnelStatus.state = .connecting(selectorResult.packetTunnelRelay)
+            tunnelStatus.state = .connecting(
+                selectedRelays,
+                isPostQuantum: interactor.settings.tunnelQuantumResistance.isEnabled,
+                isDaita: interactor.settings.daita.daitaState.isEnabled
+            )
         }
 
         try tunnel.start(options: tunnelOptions.rawOptions())
     }
 
-    private func makeTunnelProvider(completionHandler: @escaping (Result<Tunnel, Error>) -> Void) {
+    private func makeTunnelProvider(
+        completionHandler: @escaping @Sendable (Result<any TunnelProtocol, Error>)
+            -> Void
+    ) {
         let persistentTunnels = interactor.getPersistentTunnels()
         let tunnel = persistentTunnels.first ?? interactor.createNewTunnel()
         let configuration = Self.makeTunnelConfiguration()

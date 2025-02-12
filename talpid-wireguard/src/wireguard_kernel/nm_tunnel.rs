@@ -1,6 +1,8 @@
+use crate::config::MULLVAD_INTERFACE_NAME;
+
 use super::{
     super::stats::{Stats, StatsMap},
-    Config, Error as WgKernelError, Handle, Tunnel, TunnelError, MULLVAD_INTERFACE_NAME,
+    Config, Error as WgKernelError, Handle, Tunnel, TunnelError,
 };
 use futures::Future;
 use std::{collections::HashMap, pin::Pin};
@@ -11,21 +13,21 @@ use talpid_dbus::{
         WireguardTunnel,
     },
 };
+use talpid_tunnel_config_client::DaitaSettings;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Error while communicating over Dbus")]
-    Dbus(#[error(source)] dbus::Error),
+    #[error("Error while communicating over Dbus")]
+    Dbus(#[from] dbus::Error),
 
-    #[error(display = "NetworkManager error")]
-    NetworkManager(#[error(source)] NetworkManagerError),
+    #[error("NetworkManager error")]
+    NetworkManager(#[from] NetworkManagerError),
 }
 
 pub struct NetworkManagerTunnel {
     network_manager: NetworkManager,
     tunnel: Option<WireguardTunnel>,
     netlink_connections: Handle,
-    tokio_handle: tokio::runtime::Handle,
     interface_name: String,
 }
 
@@ -55,12 +57,12 @@ impl NetworkManagerTunnel {
             network_manager,
             tunnel: Some(tunnel),
             netlink_connections,
-            tokio_handle,
             interface_name,
         })
     }
 }
 
+#[async_trait::async_trait]
 impl Tunnel for NetworkManagerTunnel {
     fn get_interface_name(&self) -> String {
         self.interface_name.clone()
@@ -70,7 +72,7 @@ impl Tunnel for NetworkManagerTunnel {
         if let Some(tunnel) = self.tunnel.take() {
             if let Err(err) = self.network_manager.remove_tunnel(tunnel) {
                 log::error!("Failed to remove WireGuard tunnel via NM: {}", err);
-                Err(TunnelError::StopWireguardError { status: 0 })
+                Err(TunnelError::StopWireguardError(Box::new(err)))
             } else {
                 Ok(())
             }
@@ -79,22 +81,20 @@ impl Tunnel for NetworkManagerTunnel {
         }
     }
 
-    fn get_tunnel_stats(&self) -> std::result::Result<StatsMap, TunnelError> {
+    async fn get_tunnel_stats(&self) -> std::result::Result<StatsMap, TunnelError> {
         let mut wg = self.netlink_connections.wg_handle.clone();
-        self.tokio_handle.block_on(async move {
-            let device = wg
-                .get_by_name(self.interface_name.clone())
-                .await
-                .map_err(|err| {
-                    log::error!("Failed to fetch WireGuard device config: {}", err);
-                    TunnelError::GetConfigError
-                })?;
-            Ok(Stats::parse_device_message(&device))
-        })
+        let device = wg
+            .get_by_name(self.interface_name.clone())
+            .await
+            .map_err(|err| {
+                log::error!("Failed to fetch WireGuard device config: {}", err);
+                TunnelError::GetConfigError
+            })?;
+        Ok(Stats::parse_device_message(&device))
     }
 
     fn set_config(
-        &self,
+        &mut self,
         config: Config,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), TunnelError>> + Send>> {
         let interface_name = self.interface_name.clone();
@@ -109,6 +109,11 @@ impl Tunnel for NetworkManagerTunnel {
                 TunnelError::SetConfigError
             })
         })
+    }
+
+    /// Outright fail to start - this tunnel type does not support DAITA.
+    fn start_daita(&mut self, _: DaitaSettings) -> std::result::Result<(), TunnelError> {
+        Err(TunnelError::DaitaNotSupported)
     }
 }
 
@@ -130,7 +135,7 @@ fn convert_config_to_dbus(config: &Config) -> DeviceConfig {
     );
     wireguard_config.insert("private-key-flags".into(), Variant(Box::new(0x0u32)));
 
-    for peer in config.peers.iter() {
+    for peer in config.peers() {
         let mut peer_config: VariantMap = HashMap::new();
         let allowed_ips = peer
             .allowed_ips
@@ -222,12 +227,12 @@ fn iface_index(name: &str) -> std::result::Result<libc::c_uint, IfaceIndexLookup
 }
 
 /// Failure to lookup an interfaces index by its name.
-#[derive(Debug, err_derive::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum IfaceIndexLookupError {
     /// The interface name is invalid -  contains null bytes or is too long.
-    #[error(display = "Invalid network interface name: {}", _0)]
-    InvalidInterfaceName(String, #[error(source)] std::ffi::NulError),
+    #[error("Invalid network interface name: {0}")]
+    InvalidInterfaceName(String, #[source] std::ffi::NulError),
     /// Interface wasn't found by its name.
-    #[error(display = "Failed to get index for interface {}", _0)]
-    InterfaceLookupError(String, #[error(source)] std::io::Error),
+    #[error("Failed to get index for interface {0}")]
+    InterfaceLookupError(String, #[source] std::io::Error),
 }

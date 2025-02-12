@@ -3,13 +3,15 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 20/03/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
+import MullvadSettings
+import Routing
 import UIKit
 
-protocol SettingsViewControllerDelegate: AnyObject {
+protocol SettingsViewControllerDelegate: AnyObject, Sendable {
     func settingsViewControllerDidFinish(_ controller: SettingsViewController)
     func settingsViewController(
         _ controller: SettingsViewController,
@@ -17,17 +19,20 @@ protocol SettingsViewControllerDelegate: AnyObject {
     )
 }
 
-class SettingsViewController: UITableViewController, SettingsDataSourceDelegate {
+class SettingsViewController: UITableViewController {
     weak var delegate: SettingsViewControllerDelegate?
     private var dataSource: SettingsDataSource?
     private let interactor: SettingsInteractor
+    private let alertPresenter: AlertPresenter
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         .lightContent
     }
 
-    init(interactor: SettingsInteractor) {
+    init(interactor: SettingsInteractor, alertPresenter: AlertPresenter) {
         self.interactor = interactor
+        self.alertPresenter = alertPresenter
+
         super.init(style: .grouped)
     }
 
@@ -44,12 +49,19 @@ class SettingsViewController: UITableViewController, SettingsDataSourceDelegate 
             value: "Settings",
             comment: ""
         )
-        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, actionHandler: { [weak self] in
-            guard let self else { return }
 
-            delegate?.settingsViewControllerDidFinish(self)
-        })
+        let doneButton = UIBarButtonItem(
+            systemItem: .done,
+            primaryAction: UIAction(handler: { [weak self] _ in
+                guard let self else { return }
 
+                delegate?.settingsViewControllerDidFinish(self)
+            })
+        )
+        doneButton.setAccessibilityIdentifier(.settingsDoneButton)
+        navigationItem.rightBarButtonItem = doneButton
+
+        tableView.setAccessibilityIdentifier(.settingsTableView)
         tableView.backgroundColor = .secondaryColor
         tableView.separatorColor = .secondaryColor
         tableView.rowHeight = UITableView.automaticDimension
@@ -57,31 +69,58 @@ class SettingsViewController: UITableViewController, SettingsDataSourceDelegate 
 
         dataSource = SettingsDataSource(tableView: tableView, interactor: interactor)
         dataSource?.delegate = self
+
+        interactor.didUpdateTunnelSettings = { [weak self] newSettings in
+            self?.dataSource?.reload(from: newSettings)
+        }
+    }
+}
+
+extension SettingsViewController: @preconcurrency SettingsDataSourceDelegate {
+    func didSelectItem(item: SettingsDataSource.Item) {
+        guard let route = item.navigationRoute else { return }
+        delegate?.settingsViewController(self, didRequestRoutePresentation: route)
     }
 
-    // MARK: - SettingsDataSourceDelegate
+    func showInfo(for item: SettingsInfoButtonItem) {
+        let presentation = AlertPresentation(
+            id: "settings-info-alert",
+            icon: .info,
+            message: item.description,
+            buttons: [
+                AlertAction(
+                    title: NSLocalizedString(
+                        "SETTINGS_INFO_ALERT_OK_ACTION",
+                        tableName: "Settings",
+                        value: "Got it!",
+                        comment: ""
+                    ),
+                    style: .default
+                ),
+            ]
+        )
 
-    func settingsDataSource(
-        _ dataSource: SettingsDataSource,
-        didSelectItem item: SettingsDataSource.Item
-    ) {
-        guard let route = item.navigationRoute else { return }
-
-        delegate?.settingsViewController(self, didRequestRoutePresentation: route)
+        alertPresenter.showAlert(presentation: presentation, animated: true)
     }
 }
 
 extension SettingsDataSource.Item {
     var navigationRoute: SettingsNavigationRoute? {
         switch self {
-        case .preferences:
-            return .preferences
-        case .version:
-            return nil
+        case .vpnSettings:
+            return .vpnSettings
+        case .changelog:
+            return .changelog
         case .problemReport:
             return .problemReport
         case .faq:
             return .faq
+        case .apiAccess:
+            return .apiAccess
+        case .daita:
+            return .daita
+        case .multihop:
+            return .multihop
         }
     }
 }

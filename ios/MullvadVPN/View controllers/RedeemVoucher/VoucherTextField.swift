@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by Andreas Lif on 2022-08-05.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -23,6 +23,10 @@ class VoucherTextField: CustomTextField, UITextFieldDelegate {
         return maxGroups * groupSize + (maxGroups - 1)
     }
 
+    var parsedToken: String {
+        inputFormatter.string
+    }
+
     var isVoucherLengthSatisfied: Bool {
         let length = text?.count ?? 0
         return length >= voucherLength
@@ -39,8 +43,7 @@ class VoucherTextField: CustomTextField, UITextFieldDelegate {
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        if #available(iOS 15.0, *),
-           action == #selector(captureTextFromCamera(_:)) { return false }
+        if action == #selector(captureTextFromCamera(_:)) { return false }
         return super.canPerformAction(action, withSender: sender)
     }
 

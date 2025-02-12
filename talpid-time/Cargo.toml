@@ -1,12 +1,22 @@
 [package]
 name = "talpid-time"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
 description = "Time functions"
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# This feature should only be enabled for testing (in dev-dependencies). When enabled, timers will
+# use the standard tokio `Instant`, making it possible to advance/pause timers as expected in tests.
+test = []
 
 [dependencies]
-tokio = { version = "1.8", features = ["time"] }
+tokio = { workspace = true, features = ["time"] }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

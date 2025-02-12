@@ -1,6 +1,6 @@
-use std::{env, fmt, net::IpAddr};
+use std::{env, fmt};
 
-use super::DnsMonitorT;
+use super::{DnsMonitorT, ResolvedDnsConfig};
 
 mod auto;
 mod dnsapi;
@@ -9,19 +9,19 @@ mod netsh;
 mod tcpip;
 
 /// Errors that can happen when configuring DNS on Windows.
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to set DNS config using the iphlpapi module.
-    #[error(display = "Error in iphlpapi module")]
-    Iphlpapi(#[error(source)] iphlpapi::Error),
+    #[error("Error in iphlpapi module")]
+    Iphlpapi(#[from] iphlpapi::Error),
 
     /// Failed to set DNS config using the netsh module.
-    #[error(display = "Error in netsh module")]
-    Netsh(#[error(source)] netsh::Error),
+    #[error("Error in netsh module")]
+    Netsh(#[from] netsh::Error),
 
     /// Failed to set DNS config using the tcpip module.
-    #[error(display = "Error in tcpip module")]
-    Tcpip(#[error(source)] tcpip::Error),
+    #[error("Error in tcpip module")]
+    Tcpip(#[from] tcpip::Error),
 }
 
 pub struct DnsMonitor {
@@ -46,12 +46,12 @@ impl DnsMonitorT for DnsMonitor {
         Ok(DnsMonitor { inner })
     }
 
-    fn set(&mut self, interface: &str, servers: &[IpAddr]) -> Result<(), Error> {
+    fn set(&mut self, interface: &str, config: ResolvedDnsConfig) -> Result<(), Error> {
         match self.inner {
-            DnsMonitorHolder::Auto(ref mut inner) => inner.set(interface, servers)?,
-            DnsMonitorHolder::Iphlpapi(ref mut inner) => inner.set(interface, servers)?,
-            DnsMonitorHolder::Netsh(ref mut inner) => inner.set(interface, servers)?,
-            DnsMonitorHolder::Tcpip(ref mut inner) => inner.set(interface, servers)?,
+            DnsMonitorHolder::Auto(ref mut inner) => inner.set(interface, config)?,
+            DnsMonitorHolder::Iphlpapi(ref mut inner) => inner.set(interface, config)?,
+            DnsMonitorHolder::Netsh(ref mut inner) => inner.set(interface, config)?,
+            DnsMonitorHolder::Tcpip(ref mut inner) => inner.set(interface, config)?,
         }
         Ok(())
     }

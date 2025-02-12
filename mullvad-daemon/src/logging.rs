@@ -2,24 +2,28 @@ use fern::{
     colors::{Color, ColoredLevelConfig},
     Output,
 };
-use std::{fmt, io, path::PathBuf};
+use std::{
+    fmt, io,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use talpid_core::logging::rotate_log;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Unable to open log file for writing
-    #[error(display = "Unable to open log file for writing: {}", path)]
+    #[error("Unable to open log file for writing: {path}")]
     WriteFile {
         path: String,
-        #[error(source)]
+        #[source]
         source: io::Error,
     },
 
-    #[error(display = "Unable to rotate daemon log file")]
-    RotateLog(#[error(source)] talpid_core::logging::RotateLogError),
+    #[error("Unable to rotate daemon log file")]
+    RotateLog(#[from] talpid_core::logging::RotateLogError),
 
-    #[error(display = "Unable to set logger")]
-    SetLoggerError(#[error(source)] log::SetLoggerError),
+    #[error("Unable to set logger")]
+    SetLoggerError(#[from] log::SetLoggerError),
 }
 
 pub const WARNING_SILENCED_CRATES: &[&str] = &["netlink_proto"];
@@ -40,9 +44,10 @@ pub const SILENCED_CRATES: &[&str] = &[
     "rustls",
     "netlink_sys",
     "tracing",
-    "trust_dns_proto",
-    "trust_dns_server",
-    "trust_dns_resolver",
+    "hickory_proto",
+    "hickory_server",
+    "hickory_resolver",
+    "shadowsocks::relay::udprelay",
 ];
 const SLIGHTLY_SILENCED_CRATES: &[&str] = &["mnl", "nftnl", "udp_over_tcp"];
 
@@ -61,6 +66,15 @@ const LINE_SEPARATOR: &str = "\n";
 const LINE_SEPARATOR: &str = "\r\n";
 
 const DATE_TIME_FORMAT_STR: &str = "[%Y-%m-%d %H:%M:%S%.3f]";
+
+/// Whether a [log] logger has been initialized.
+// the log crate doesn't provide a nice way to tell if a logger has been initialized :(
+static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Check whether logging has been enabled, i.e. if [init_logger] has been called successfully.
+pub fn is_enabled() -> bool {
+    LOG_ENABLED.load(Ordering::SeqCst)
+}
 
 pub fn init_logger(
     log_level: log::LevelFilter,
@@ -111,6 +125,9 @@ pub fn init_logger(
         top_dispatcher = top_dispatcher.chain(logger);
     }
     top_dispatcher.apply().map_err(Error::SetLoggerError)?;
+
+    LOG_ENABLED.store(true, Ordering::SeqCst);
+
     Ok(())
 }
 

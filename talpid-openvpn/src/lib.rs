@@ -1,36 +1,29 @@
 //! Manage OpenVPN tunnels.
 
 #![deny(missing_docs)]
-#![deny(rust_2018_idioms)]
 
-use crate::proxy::{ProxyMonitor, ProxyResourceData};
-use futures::channel::oneshot;
-#[cfg(windows)]
-use lazy_static::lazy_static;
-use process::{
-    openvpn::{OpenVpnCommand, OpenVpnProcHandle},
-    stoppable_process::StoppableProcess,
-};
+use crate::proxy::ProxyMonitor;
+use process::openvpn::{OpenVpnCommand, OpenVpnProcHandle};
 #[cfg(target_os = "linux")]
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
-use std::ffi::OsString;
+use std::sync::LazyLock;
+#[cfg(target_os = "windows")]
+use std::{ffi::OsString, sync::Arc};
 use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitStatus,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
-    thread,
     time::Duration,
 };
 #[cfg(target_os = "linux")]
-use talpid_routing::{self, RequiredRoute};
-use talpid_tunnel::TunnelEvent;
-use talpid_types::{net::openvpn, ErrorExt};
+use talpid_routing::RequiredRoute;
+use talpid_tunnel::EventHook;
+use talpid_types::{
+    net::{openvpn, proxy::CustomProxy},
+    ErrorExt,
+};
 use tokio::task;
 
 #[cfg(windows)]
@@ -46,10 +39,11 @@ mod process;
 mod proxy;
 
 #[cfg(windows)]
-lazy_static! {
-    static ref ADAPTER_ALIAS: U16CString = U16CString::from_str("Mullvad").unwrap();
-    static ref ADAPTER_TUNNEL_TYPE: U16CString = U16CString::from_str("Mullvad").unwrap();
-}
+static ADAPTER_ALIAS: LazyLock<U16CString> =
+    LazyLock::new(|| U16CString::from_str("Mullvad").unwrap());
+#[cfg(windows)]
+static ADAPTER_TUNNEL_TYPE: LazyLock<U16CString> =
+    LazyLock::new(|| U16CString::from_str("Mullvad").unwrap());
 
 #[cfg(windows)]
 const ADAPTER_GUID: GUID = GUID {
@@ -63,84 +57,94 @@ const ADAPTER_GUID: GUID = GUID {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can happen when using the OpenVPN tunnel.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to initialize the tokio runtime.
-    #[error(display = "Failed to initialize the tokio runtime")]
-    RuntimeError(#[error(source)] io::Error),
+    #[error("Failed to initialize the tokio runtime")]
+    RuntimeError(#[source] io::Error),
 
     /// Unable to start, wait for or kill the OpenVPN process.
-    #[error(display = "Error in OpenVPN process management: {}", _0)]
-    ChildProcessError(&'static str, #[error(source)] io::Error),
+    #[error("Error in OpenVPN process management: {0}")]
+    ChildProcessError(&'static str, #[source] io::Error),
 
     /// Unable to start the IPC server.
-    #[error(display = "Unable to start the event dispatcher IPC server")]
-    EventDispatcherError(#[error(source)] event_server::Error),
+    #[error("Unable to start the event dispatcher IPC server")]
+    EventDispatcherError(#[source] event_server::Error),
 
     /// The OpenVPN event dispatcher exited unexpectedly
-    #[error(display = "The OpenVPN event dispatcher exited unexpectedly")]
+    #[error("The OpenVPN event dispatcher exited unexpectedly")]
     EventDispatcherExited,
 
     /// cannot load wintun.dll
     #[cfg(windows)]
-    #[error(display = "Failed to load wintun.dll")]
-    WintunDllError(#[error(source)] io::Error),
+    #[error("Failed to load wintun.dll")]
+    WintunDllError(#[source] io::Error),
 
     /// cannot create a wintun interface
     #[cfg(windows)]
-    #[error(display = "Failed to create Wintun adapter")]
-    WintunCreateAdapterError(#[error(source)] io::Error),
+    #[error("Failed to create Wintun adapter")]
+    WintunCreateAdapterError(#[source] io::Error),
 
     /// OpenVPN process died unexpectedly
-    #[error(display = "OpenVPN process died unexpectedly")]
+    #[error("OpenVPN process died unexpectedly")]
     ChildProcessDied,
 
     /// Failed before OpenVPN started
-    #[error(display = "Failed to start OpenVPN")]
+    #[error("Failed to start OpenVPN")]
     StartProcessError,
 
     /// The OpenVPN binary was not found.
-    #[error(display = "No OpenVPN binary found at {}", _0)]
+    #[error("No OpenVPN binary found at {0}")]
     OpenVpnNotFound(String),
 
     /// The OpenVPN plugin was not found.
-    #[error(display = "No OpenVPN plugin found at {}", _0)]
+    #[error("No OpenVPN plugin found at {0}")]
     PluginNotFound(String),
 
     /// Error while writing credentials to temporary file.
-    #[error(display = "Error while writing credentials to temporary file")]
-    CredentialsWriteError(#[error(source)] io::Error),
+    #[error("Error while writing credentials to temporary file")]
+    CredentialsWriteError(#[source] io::Error),
 
     /// Failures related to the proxy service.
-    #[error(display = "Unable to start the proxy service")]
-    StartProxyError(#[error(source)] proxy::Error),
-
-    /// Error while monitoring proxy service
-    #[error(display = "Error while monitoring proxy service")]
-    MonitorProxyError(#[error(source)] io::Error),
-
-    /// The proxy exited unexpectedly
-    #[error(
-        display = "The proxy exited unexpectedly providing these details: {}",
-        _0
-    )]
-    ProxyExited(String),
+    #[error("Proxy service failed")]
+    ProxyError(#[source] proxy::Error),
 
     /// The map is missing 'dev'
     #[cfg(target_os = "linux")]
-    #[error(display = "Failed to obtain tunnel interface name")]
+    #[error("Failed to obtain tunnel interface name")]
     MissingTunnelInterface,
 
     /// The map has no 'route_n' entries
     #[cfg(target_os = "linux")]
-    #[error(display = "Failed to obtain OpenVPN server")]
+    #[error("Failed to obtain OpenVPN server")]
     MissingRemoteHost,
 
     /// Cannot parse the remote_n in the provided map
     #[cfg(target_os = "linux")]
-    #[error(display = "Cannot parse remote host string")]
-    ParseRemoteHost(#[error(source)] std::net::AddrParseError),
+    #[error("Cannot parse remote host string")]
+    ParseRemoteHost(#[source] std::net::AddrParseError),
+}
+
+impl Error {
+    /// Return whether retrying the operation that caused this error is likely to succeed.
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            #[cfg(windows)]
+            _ => self.get_tunnel_device_error().is_some(),
+
+            #[cfg(not(windows))]
+            _ => false,
+        }
+    }
+
+    /// Get the inner tunnel device error, if there is one
+    #[cfg(target_os = "windows")]
+    pub fn get_tunnel_device_error(&self) -> Option<&io::Error> {
+        match self {
+            Error::WintunCreateAdapterError(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -163,24 +167,19 @@ const OPENVPN_BIN_FILENAME: &str = "openvpn.exe";
 /// Struct for monitoring an OpenVPN process.
 #[derive(Debug)]
 pub struct OpenVpnMonitor<C: OpenVpnBuilder = OpenVpnCommand> {
-    spawn_task: Option<
-        tokio::task::JoinHandle<
-            std::result::Result<io::Result<C::ProcessHandle>, futures::future::Aborted>,
-        >,
-    >,
-    abort_spawn: futures::future::AbortHandle,
+    prepare_task: tokio::task::JoinHandle<io::Result<C::ProcessHandle>>,
 
-    child: Arc<Mutex<Option<Arc<C::ProcessHandle>>>>,
     proxy_monitor: Option<Box<dyn ProxyMonitor>>,
-    closed: Arc<AtomicBool>,
     /// Keep the `TempFile` for the user-pass file in the struct, so it's removed on drop.
     _user_pass_file: mktemp::TempFile,
     /// Keep the 'TempFile' for the proxy user-pass file in the struct, so it's removed on drop.
     _proxy_auth_file: Option<mktemp::TempFile>,
 
-    runtime: tokio::runtime::Handle,
     event_server_abort_tx: triggered::Trigger,
-    server_join_handle: Option<task::JoinHandle<std::result::Result<(), event_server::Error>>>,
+    server_join_handle: task::JoinHandle<std::result::Result<(), event_server::Error>>,
+
+    monitor_abort_tx: triggered::Trigger,
+    monitor_abort_rx: triggered::Listener,
 
     #[cfg(windows)]
     _wintun: Arc<Box<dyn WintunContext>>,
@@ -228,7 +227,7 @@ impl WintunContext for WintunContextImpl {
 
     async fn wait_for_interfaces(&self) -> io::Result<()> {
         let luid = self.adapter.luid();
-        talpid_windows_net::wait_for_interfaces(luid, true, self.wait_v6_interface).await
+        talpid_windows::net::wait_for_interfaces(luid, true, self.wait_v6_interface).await
     }
 
     fn prepare_interface(&self) {
@@ -246,20 +245,13 @@ impl WintunContextImpl {
 impl OpenVpnMonitor<OpenVpnCommand> {
     /// Creates a new `OpenVpnMonitor` with the given listener and using the plugin at the given
     /// path.
-    pub async fn start<L>(
-        on_event: L,
+    pub async fn start(
+        event_hook: EventHook,
         params: &openvpn::TunnelParameters,
         log_path: Option<PathBuf>,
         resource_dir: &Path,
-        tunnel_close_rx: oneshot::Receiver<()>,
-        #[cfg(target_os = "linux")] route_manager: talpid_routing::RouteManagerHandle,
-    ) -> Result<Self>
-    where
-        L: (Fn(TunnelEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
-            + Send
-            + Sync
-            + 'static,
-    {
+        route_manager: talpid_routing::RouteManagerHandle,
+    ) -> Result<Self> {
         let user_pass_file =
             Self::create_credentials_file(&params.config.username, &params.config.password)
                 .map_err(Error::CredentialsWriteError)?;
@@ -268,19 +260,12 @@ impl OpenVpnMonitor<OpenVpnCommand> {
         let user_pass_file_path = user_pass_file.to_path_buf();
         let proxy_auth_file_path = proxy_auth_file.as_ref().map(|file| file.to_path_buf());
 
-        let log_dir = log_path.as_ref().map(|log_path| {
-            log_path
-                .parent()
-                .expect("log_path has no parent")
-                .to_path_buf()
-        });
-
-        let proxy_resources = proxy::ProxyResourceData {
-            resource_dir: resource_dir.to_path_buf(),
-            log_dir,
-        };
-
-        let proxy_monitor = Self::start_proxy(&params.proxy, &proxy_resources).await?;
+        let proxy_monitor = Self::start_proxy(
+            &params.proxy,
+            #[cfg(target_os = "linux")]
+            params.fwmark,
+        )
+        .await?;
 
         #[cfg(windows)]
         let wintun = Self::new_wintun_context(params, resource_dir)?;
@@ -310,7 +295,6 @@ impl OpenVpnMonitor<OpenVpnCommand> {
             user_pass_file,
             proxy_auth_file,
             proxy_monitor,
-            tunnel_close_rx,
             #[cfg(target_os = "linux")]
             fwmark: params.fwmark,
         };
@@ -318,19 +302,19 @@ impl OpenVpnMonitor<OpenVpnCommand> {
             cmd,
             openvpn_init_args,
             event_server::OpenvpnEventProxyImpl {
-                on_event,
+                event_hook,
                 user_pass_file_path: user_pass_file_path.clone(),
                 proxy_auth_file_path: proxy_auth_file_path.clone(),
                 abort_server_tx: event_server_abort_tx,
-                #[cfg(target_os = "linux")]
-                route_manager_handle: route_manager,
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                proxy: params.proxy.clone(),
+                route_manager,
                 #[cfg(target_os = "linux")]
                 ipv6_enabled,
             },
             #[cfg(windows)]
             Box::new(wintun),
         )
-        .await
     }
 
     #[cfg(windows)]
@@ -376,13 +360,12 @@ struct OpenVpnTunnelInitArgs {
     user_pass_file: mktemp::TempFile,
     proxy_auth_file: Option<mktemp::TempFile>,
     proxy_monitor: Option<Box<dyn ProxyMonitor>>,
-    tunnel_close_rx: oneshot::Receiver<()>,
     #[cfg(target_os = "linux")]
     fwmark: u32,
 }
 
 impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
-    async fn new_internal<L>(
+    fn new_internal<L>(
         mut cmd: C,
         init_args: OpenVpnTunnelInitArgs,
         on_event: L,
@@ -398,10 +381,8 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
         let user_pass_file = init_args.user_pass_file;
         let proxy_auth_file = init_args.proxy_auth_file;
         let proxy_monitor = init_args.proxy_monitor;
-        let tunnel_close_rx = init_args.tunnel_close_rx;
 
         let (server_join_handle, ipc_path) = event_server::start(on_event, event_server_abort_rx)
-            .await
             .map_err(Error::EventDispatcherError)?;
 
         #[cfg(windows)]
@@ -412,45 +393,29 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
 
         cmd.plugin(plugin_path, vec![ipc_path])
             .log(log_path.as_deref());
-        let (spawn_task, abort_spawn) = futures::future::abortable(Self::prepare_process(
+        let prepare_task = tokio::spawn(Self::prepare_process(
             cmd,
             #[cfg(windows)]
             wintun.clone(),
         ));
-        let spawn_task = tokio::spawn(spawn_task);
+
+        let (monitor_abort_tx, monitor_abort_rx) = triggered::trigger();
 
         let monitor = OpenVpnMonitor {
-            spawn_task: Some(spawn_task),
-            abort_spawn,
-            child: Arc::new(Mutex::new(None)),
+            prepare_task,
             proxy_monitor,
-            closed: Arc::new(AtomicBool::new(false)),
             _user_pass_file: user_pass_file,
             _proxy_auth_file: proxy_auth_file,
 
-            runtime: tokio::runtime::Handle::current(),
             event_server_abort_tx,
-            server_join_handle: Some(server_join_handle),
+            server_join_handle,
+
+            monitor_abort_tx,
+            monitor_abort_rx,
 
             #[cfg(windows)]
             _wintun: wintun,
         };
-
-        let close_handle = monitor.close_handle();
-        tokio::spawn(async move {
-            if tunnel_close_rx.await.is_ok() {
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = close_handle.close() {
-                        log::error!(
-                            "{}",
-                            error.display_chain_with_msg("Failed to close the tunnel")
-                        );
-                    }
-                })
-                .await
-                .expect("close handle panic");
-            }
-        });
 
         Ok(monitor)
     }
@@ -471,61 +436,41 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
 
     /// Creates a handle to this monitor, allowing the tunnel to be closed while some other
     /// thread is blocked in `wait`.
-    fn close_handle(&self) -> OpenVpnCloseHandle<C::ProcessHandle> {
+    pub fn close_handle(&self) -> OpenVpnCloseHandle {
         OpenVpnCloseHandle {
-            child: self.child.clone(),
-            abort_spawn: self.abort_spawn.clone(),
-            closed: self.closed.clone(),
+            monitor_abort_tx: self.monitor_abort_tx.clone(),
+            prepare_task: self.prepare_task.abort_handle(),
         }
     }
 
     /// Consumes the monitor and waits for both proxy and tunnel, as applicable.
-    pub fn wait(mut self) -> Result<()> {
+    pub async fn wait(mut self) -> Result<()> {
         if let Some(mut proxy_monitor) = self.proxy_monitor.take() {
-            let (tx_tunnel, rx) = mpsc::channel();
-            let tx_proxy = tx_tunnel.clone();
             let tunnel_close_handle = self.close_handle();
             let proxy_close_handle = proxy_monitor.close_handle();
 
-            enum Stopped {
-                Tunnel(Result<()>),
-                Proxy(proxy::Result<()>),
-            }
-
-            let handle = self.runtime.clone();
-
-            thread::spawn(move || {
-                tx_tunnel.send(Stopped::Tunnel(self.wait_tunnel())).unwrap();
+            let tunnel_task = async move {
+                let result = self.wait_tunnel().await;
                 let _ = proxy_close_handle.close();
-            });
+                result
+            };
 
-            thread::spawn(move || {
-                tx_proxy
-                    .send(Stopped::Proxy(handle.block_on(proxy_monitor.wait())))
-                    .unwrap();
-                let _ = tunnel_close_handle.close();
-            });
+            let proxy_task = async move {
+                let result = proxy_monitor.wait().await;
+                tunnel_close_handle.close();
+                result.map_err(Error::ProxyError)
+            };
 
-            let result = rx.recv().expect("wait got no result");
-            let _ = rx.recv();
-
-            match result {
-                Stopped::Tunnel(tunnel_result) => tunnel_result,
-                Stopped::Proxy(proxy_result) => proxy_result.map_err(|error| match error {
-                    proxy::Error::UnexpectedExit(details) => Error::ProxyExited(details),
-                    proxy::Error::Io(error) => Error::MonitorProxyError(error),
-                }),
-            }
+            join_return_first(tunnel_task, proxy_task).await
         } else {
             // No proxy active, wait only for the tunnel.
-            self.wait_tunnel()
+            self.wait_tunnel().await
         }
     }
 
     /// Supplement `inner_wait_tunnel()` with logging and error handling.
-    fn wait_tunnel(self) -> Result<()> {
-        let result = self.inner_wait_tunnel();
-        match result {
+    async fn wait_tunnel(self) -> Result<()> {
+        match self.inner_wait_tunnel().await {
             WaitResult::Preparation(result) => match result {
                 Err(error) => {
                     log::debug!(
@@ -536,8 +481,8 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
                 }
                 _ => Ok(()),
             },
-            WaitResult::Child(Ok(exit_status), closed) => {
-                if exit_status.success() || closed {
+            WaitResult::Child(Ok(exit_status)) => {
+                if exit_status.success() {
                     log::debug!(
                         "OpenVPN exited, as expected, with exit status: {}",
                         exit_status
@@ -548,7 +493,7 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
                     Err(Error::ChildProcessDied)
                 }
             }
-            WaitResult::Child(Err(e), _) => {
+            WaitResult::Child(Err(e)) => {
                 log::error!("OpenVPN process wait error: {}", e);
                 Err(Error::ChildProcessError("Error when waiting", e))
             }
@@ -561,67 +506,47 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
 
     /// Waits for both the child process and the event dispatcher in parallel. After both have
     /// returned this returns the earliest result.
-    fn inner_wait_tunnel(mut self) -> WaitResult {
-        let child = match self
-            .runtime
-            .block_on(self.spawn_task.take().unwrap())
-            .expect("spawn task panicked")
-        {
-            Ok(Ok(child)) => Arc::new(child),
+    async fn inner_wait_tunnel(self) -> WaitResult {
+        let mut child = match self.prepare_task.await {
+            Ok(Ok(child)) => child,
             Ok(Err(error)) => {
-                self.closed.swap(true, Ordering::SeqCst);
                 return WaitResult::Preparation(Err(error));
             }
             Err(_) => return WaitResult::Preparation(Ok(())),
         };
 
-        if self.closed.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            return WaitResult::Preparation(Ok(()));
-        }
+        let kill_child = async move {
+            let result = tokio::select! {
+                result = child.wait() => {
+                    log::debug!("OpenVPN process exited");
+                    result
+                }
+                _ = self.monitor_abort_rx => {
+                    log::debug!("Killing OpenVPN process");
+                    child.kill();
+                    child.wait().await
+                }
+            };
 
-        {
-            self.child.lock().unwrap().replace(child.clone());
-        }
+            self.event_server_abort_tx.trigger();
+            WaitResult::Child(result)
+        };
+        let kill_event_dispatcher = async move {
+            let _ = self.server_join_handle.await;
+            WaitResult::EventDispatcher
+        };
 
-        let closed_handle = self.closed.clone();
-        let child_close_handle = self.close_handle();
-
-        let (child_tx, rx) = mpsc::channel();
-        let dispatcher_tx = child_tx.clone();
-
-        let event_server_abort_tx = self.event_server_abort_tx.clone();
-
-        thread::spawn(move || {
-            let result = child.wait();
-            let closed = closed_handle.load(Ordering::SeqCst);
-            child_tx.send(WaitResult::Child(result, closed)).unwrap();
-            event_server_abort_tx.trigger();
-        });
-
-        let server_join_handle = self
-            .server_join_handle
-            .take()
-            .expect("No event server quit handle");
-        self.runtime.spawn(async move {
-            let _ = server_join_handle.await;
-            dispatcher_tx.send(WaitResult::EventDispatcher).unwrap();
-            let _ = child_close_handle.close();
-        });
-
-        let result = rx.recv().expect("inner_wait_tunnel no result");
-        let _ = rx.recv().expect("inner_wait_tunnel no second result");
-        result
+        join_return_first(kill_child, kill_event_dispatcher).await
     }
 
     fn create_proxy_auth_file(
-        proxy_settings: &Option<openvpn::ProxySettings>,
+        proxy_settings: &Option<CustomProxy>,
     ) -> std::result::Result<Option<mktemp::TempFile>, io::Error> {
-        if let Some(openvpn::ProxySettings::Remote(ref remote_proxy)) = proxy_settings {
+        if let Some(CustomProxy::Socks5Remote(remote_proxy)) = proxy_settings {
             if let Some(ref proxy_auth) = remote_proxy.auth {
                 return Ok(Some(Self::create_credentials_file(
-                    &proxy_auth.username,
-                    &proxy_auth.password,
+                    proxy_auth.username(),
+                    proxy_auth.password(),
                 )?));
             }
         }
@@ -630,13 +555,17 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
 
     /// Starts a proxy service, as applicable.
     async fn start_proxy(
-        proxy_settings: &Option<openvpn::ProxySettings>,
-        proxy_resources: &ProxyResourceData,
+        proxy_settings: &Option<CustomProxy>,
+        #[cfg(target_os = "linux")] fwmark: u32,
     ) -> Result<Option<Box<dyn ProxyMonitor>>> {
-        if let Some(ref settings) = proxy_settings {
-            let proxy_monitor = proxy::start_proxy(settings, proxy_resources)
-                .await
-                .map_err(Error::StartProxyError)?;
+        if let Some(settings) = proxy_settings {
+            let proxy_monitor = proxy::start_proxy(
+                settings,
+                #[cfg(target_os = "linux")]
+                fwmark,
+            )
+            .await
+            .map_err(Error::ProxyError)?;
             return Ok(Some(proxy_monitor));
         }
         Ok(None)
@@ -692,7 +621,7 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
             .ca(resource_dir.join("ca.crt"));
         #[cfg(windows)]
         cmd.tunnel_alias(Some(alias));
-        if let Some(proxy_settings) = params.proxy.clone().take() {
+        if let Some(proxy_settings) = params.proxy.clone() {
             cmd.proxy_settings(proxy_settings);
         }
         if let Some(proxy_auth_file) = proxy_auth_file {
@@ -726,26 +655,17 @@ impl<C: OpenVpnBuilder + Send + 'static> OpenVpnMonitor<C> {
 }
 
 /// A handle to an `OpenVpnMonitor` for closing it.
-#[derive(Debug, Clone)]
-pub struct OpenVpnCloseHandle<H: ProcessHandle = OpenVpnProcHandle> {
-    child: Arc<Mutex<Option<Arc<H>>>>,
-    abort_spawn: futures::future::AbortHandle,
-    closed: Arc<AtomicBool>,
+#[derive(Debug)]
+pub struct OpenVpnCloseHandle {
+    monitor_abort_tx: triggered::Trigger,
+    prepare_task: tokio::task::AbortHandle,
 }
 
-impl<H: ProcessHandle> OpenVpnCloseHandle<H> {
-    /// Kills the underlying OpenVPN process, making the `OpenVpnMonitor::wait` method return.
-    pub fn close(self) -> io::Result<()> {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.abort_spawn.abort();
-            if let Some(child) = self.child.lock().unwrap().as_ref() {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        } else {
-            Ok(())
-        }
+impl OpenVpnCloseHandle {
+    /// Begin killing the OpenVPN monitor, making the `OpenVpnMonitor::wait` method return.
+    pub fn close(self) {
+        self.prepare_task.abort();
+        self.monitor_abort_tx.trigger();
     }
 }
 
@@ -753,7 +673,7 @@ impl<H: ProcessHandle> OpenVpnCloseHandle<H> {
 #[derive(Debug)]
 enum WaitResult {
     Preparation(io::Result<()>),
-    Child(io::Result<ExitStatus>, bool),
+    Child(io::Result<ExitStatus>),
     EventDispatcher,
 }
 
@@ -777,12 +697,13 @@ pub trait OpenVpnBuilder {
 }
 
 /// Trait for types acting as handles to subprocesses for `OpenVpnMonitor`
+#[async_trait::async_trait]
 pub trait ProcessHandle: Send + Sync + 'static {
     /// Block until the subprocess exits or there is an error in the wait syscall.
-    fn wait(&self) -> io::Result<ExitStatus>;
+    async fn wait(&mut self) -> io::Result<ExitStatus>;
 
-    /// Kill the subprocess.
-    fn kill(&self) -> io::Result<()>;
+    /// Kill the subprocess without waiting for it to complete.
+    fn kill(&mut self);
 }
 
 impl OpenVpnBuilder for OpenVpnCommand {
@@ -801,7 +722,7 @@ impl OpenVpnBuilder for OpenVpnCommand {
     }
 
     fn start(&self) -> io::Result<OpenVpnProcHandle> {
-        OpenVpnProcHandle::new(self.build())
+        OpenVpnProcHandle::new(&mut self.build())
     }
 
     #[cfg(target_os = "linux")]
@@ -811,13 +732,34 @@ impl OpenVpnBuilder for OpenVpnCommand {
     }
 }
 
+#[async_trait::async_trait]
 impl ProcessHandle for OpenVpnProcHandle {
-    fn wait(&self) -> io::Result<ExitStatus> {
-        self.inner.wait().map(|output| output.status)
+    async fn wait(&mut self) -> io::Result<ExitStatus> {
+        OpenVpnProcHandle::wait(self).await
     }
 
-    fn kill(&self) -> io::Result<()> {
-        self.nice_kill(OPENVPN_DIE_TIMEOUT)
+    fn kill(&mut self) {
+        OpenVpnProcHandle::kill(self, OPENVPN_DIE_TIMEOUT)
+    }
+}
+
+/// Join two futures and return the result of the first one to complete.
+async fn join_return_first<R>(
+    future1: impl std::future::Future<Output = R>,
+    future2: impl std::future::Future<Output = R>,
+) -> R {
+    futures::pin_mut!(future1);
+    futures::pin_mut!(future2);
+
+    match futures::future::select(future1, future2).await {
+        futures::future::Either::Left((result, other)) => {
+            let _ = other.await;
+            result
+        }
+        futures::future::Either::Right((result, other)) => {
+            let _ = other.await;
+            result
+        }
     }
 }
 
@@ -825,16 +767,16 @@ mod event_server {
     use futures::stream::TryStreamExt;
     use parity_tokio_ipc::Endpoint as IpcEndpoint;
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         pin::Pin,
         task::{Context, Poll},
     };
-    use talpid_tunnel::TunnelMetadata;
-    #[cfg(any(target_os = "linux", windows))]
+    use talpid_tunnel::{EventHook, TunnelMetadata};
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use talpid_types::net::proxy::CustomProxy;
     use talpid_types::ErrorExt;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tonic::{
-        self,
         transport::{server::Connected, Server},
         Request, Response,
     };
@@ -848,56 +790,43 @@ mod event_server {
         EventDetails,
     };
 
-    #[derive(err_derive::Error, Debug)]
+    #[derive(thiserror::Error, Debug)]
     pub enum Error {
         /// Failure to set up the IPC server.
-        #[error(display = "Failed to create pipe or Unix socket")]
-        StartServer(#[error(source)] std::io::Error),
+        #[error("Failed to create pipe or Unix socket")]
+        StartServer(#[from] std::io::Error),
 
         /// An error occurred while the server was running.
-        #[error(display = "Tonic error")]
-        TonicError(#[error(source)] tonic::transport::Error),
+        #[error("Tonic error")]
+        TonicError(#[from] tonic::transport::Error),
     }
 
     /// Implements a gRPC service used to process events sent to by OpenVPN.
-    pub struct OpenvpnEventProxyImpl<
-        L: (Fn(
-                talpid_tunnel::TunnelEvent,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
-            + Send
-            + Sync
-            + 'static,
-    > {
-        pub on_event: L,
+    pub struct OpenvpnEventProxyImpl {
+        pub event_hook: EventHook,
         pub user_pass_file_path: super::PathBuf,
         pub proxy_auth_file_path: Option<super::PathBuf>,
         pub abort_server_tx: triggered::Trigger,
-        #[cfg(target_os = "linux")]
-        pub route_manager_handle: talpid_routing::RouteManagerHandle,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        pub proxy: Option<CustomProxy>,
+        pub route_manager: talpid_routing::RouteManagerHandle,
         #[cfg(target_os = "linux")]
         pub ipv6_enabled: bool,
     }
 
-    impl<
-            L: (Fn(
-                    talpid_tunnel::TunnelEvent,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
-                + Send
-                + Sync
-                + 'static,
-        > OpenvpnEventProxyImpl<L>
-    {
+    impl OpenvpnEventProxyImpl {
         async fn up_inner(
             &self,
             request: Request<EventDetails>,
         ) -> std::result::Result<Response<()>, tonic::Status> {
             let env = request.into_inner().env;
-            (self.on_event)(talpid_tunnel::TunnelEvent::InterfaceUp(
-                Self::get_tunnel_metadata(&env)?,
-                talpid_types::net::AllowedTunnelTraffic::All,
-            ))
-            .await;
+            self.event_hook
+                .clone()
+                .on_event(talpid_tunnel::TunnelEvent::InterfaceUp(
+                    Self::get_tunnel_metadata(&env)?,
+                    talpid_types::net::AllowedTunnelTraffic::All,
+                ))
+                .await;
             Ok(Response::new(()))
         }
 
@@ -908,32 +837,37 @@ mod event_server {
             let env = request.into_inner().env;
 
             let _ = tokio::fs::remove_file(&self.user_pass_file_path).await;
-            if let Some(ref file_path) = &self.proxy_auth_file_path {
+            if let Some(file_path) = &self.proxy_auth_file_path {
                 let _ = tokio::fs::remove_file(file_path).await;
             }
 
+            let mut routes = HashSet::new();
+            #[cfg(not(target_os = "linux"))]
+            if let Some(CustomProxy::Socks5Local(proxy_settings)) = &self.proxy {
+                let network = proxy_settings.remote_endpoint.address.ip().into();
+                let node = talpid_routing::NetNode::DefaultNode;
+                let route = talpid_routing::RequiredRoute::new(network, node);
+                routes.insert(route);
+            }
+            let route_handle = self.route_manager.clone();
+
             #[cfg(target_os = "linux")]
             {
-                let route_handle = self.route_manager_handle.clone();
                 let ipv6_enabled = self.ipv6_enabled;
 
-                let routes = super::extract_routes(&env)
+                if let Err(error) = route_handle.create_routing_rules(ipv6_enabled).await {
+                    log::error!("{}", error.display_chain());
+                    return Err(tonic::Status::failed_precondition("Failed to add routes"));
+                }
+
+                let extracted_routes = super::extract_routes(&env)
                     .map_err(|err| {
                         log::error!("{}", err.display_chain_with_msg("Failed to obtain routes"));
                         tonic::Status::failed_precondition("Failed to obtain routes")
                     })?
                     .into_iter()
-                    .filter(|route| route.prefix.is_ipv4() || ipv6_enabled)
-                    .collect();
-
-                if let Err(error) = route_handle.add_routes(routes).await {
-                    log::error!("{}", error.display_chain());
-                    return Err(tonic::Status::failed_precondition("Failed to add routes"));
-                }
-                if let Err(error) = route_handle.create_routing_rules(ipv6_enabled).await {
-                    log::error!("{}", error.display_chain());
-                    return Err(tonic::Status::failed_precondition("Failed to add routes"));
-                }
+                    .filter(|route| route.prefix.is_ipv4() || ipv6_enabled);
+                routes.extend(extracted_routes);
             }
 
             let metadata = Self::get_tunnel_metadata(&env)?;
@@ -941,11 +875,12 @@ mod event_server {
             #[cfg(windows)]
             {
                 let tunnel_device = metadata.interface.clone();
-                let luid = talpid_windows_net::luid_from_alias(tunnel_device).map_err(|error| {
-                    log::error!("{}", error.display_chain_with_msg("luid_from_alias failed"));
-                    tonic::Status::unavailable("failed to obtain interface luid")
-                })?;
-                talpid_windows_net::wait_for_addresses(luid)
+                let luid =
+                    talpid_windows::net::luid_from_alias(tunnel_device).map_err(|error| {
+                        log::error!("{}", error.display_chain_with_msg("luid_from_alias failed"));
+                        tonic::Status::unavailable("failed to obtain interface luid")
+                    })?;
+                talpid_windows::net::wait_for_addresses(luid)
                     .await
                     .map_err(|error| {
                         log::error!(
@@ -956,7 +891,15 @@ mod event_server {
                     })?;
             }
 
-            (self.on_event)(talpid_tunnel::TunnelEvent::Up(metadata)).await;
+            if let Err(error) = route_handle.add_routes(routes).await {
+                log::error!("{}", error.display_chain());
+                return Err(tonic::Status::failed_precondition("Failed to add routes"));
+            }
+
+            self.event_hook
+                .clone()
+                .on_event(talpid_tunnel::TunnelEvent::Up(metadata))
+                .await;
 
             Ok(Response::new(()))
         }
@@ -1010,25 +953,18 @@ mod event_server {
     }
 
     #[tonic::async_trait]
-    impl<
-            L: (Fn(
-                    talpid_tunnel::TunnelEvent,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>)
-                + Send
-                + Sync
-                + 'static,
-        > OpenvpnEventProxy for OpenvpnEventProxyImpl<L>
-    {
+    impl OpenvpnEventProxy for OpenvpnEventProxyImpl {
         async fn auth_failed(
             &self,
             request: Request<EventDetails>,
         ) -> std::result::Result<Response<()>, tonic::Status> {
             let env = request.into_inner().env;
-            (self.on_event)(talpid_tunnel::TunnelEvent::AuthFailed(
-                env.get("auth_failed_reason").cloned(),
-            ))
-            .await;
+            self.event_hook
+                .clone()
+                .on_event(talpid_tunnel::TunnelEvent::AuthFailed(
+                    env.get("auth_failed_reason").cloned(),
+                ))
+                .await;
             Ok(Response::new(()))
         }
 
@@ -1036,9 +972,8 @@ mod event_server {
             &self,
             request: Request<EventDetails>,
         ) -> std::result::Result<Response<()>, tonic::Status> {
-            self.up_inner(request).await.map_err(|error| {
+            self.up_inner(request).await.inspect_err(|_| {
                 self.abort_server_tx.trigger();
-                error
             })
         }
 
@@ -1046,9 +981,8 @@ mod event_server {
             &self,
             request: Request<EventDetails>,
         ) -> std::result::Result<Response<()>, tonic::Status> {
-            self.route_up_inner(request).await.map_err(|error| {
+            self.route_up_inner(request).await.inspect_err(|_| {
                 self.abort_server_tx.trigger();
-                error
             })
         }
 
@@ -1056,12 +990,15 @@ mod event_server {
             &self,
             _request: Request<EventDetails>,
         ) -> std::result::Result<Response<()>, tonic::Status> {
-            (self.on_event)(talpid_tunnel::TunnelEvent::Down).await;
+            self.event_hook
+                .clone()
+                .on_event(talpid_tunnel::TunnelEvent::Down)
+                .await;
             Ok(Response::new(()))
         }
     }
 
-    pub async fn start<L>(
+    pub fn start<L>(
         event_proxy: L,
         abort_rx: triggered::Listener,
     ) -> std::result::Result<(tokio::task::JoinHandle<Result<(), Error>>, String), Error>
@@ -1133,11 +1070,7 @@ mod event_server {
 mod tests {
     use super::*;
     use crate::mktemp::TempFile;
-    use parking_lot::Mutex;
-    use std::{
-        path::{Path, PathBuf},
-        sync::Arc,
-    };
+    use std::sync::{Arc, Mutex};
 
     #[cfg(windows)]
     #[derive(Debug)]
@@ -1198,12 +1131,12 @@ mod tests {
         type ProcessHandle = TestProcessHandle;
 
         fn plugin(&mut self, path: impl AsRef<Path>, _args: Vec<String>) -> &mut Self {
-            *self.plugin.lock() = Some(path.as_ref().to_path_buf());
+            *self.plugin.lock().unwrap() = Some(path.as_ref().to_path_buf());
             self
         }
 
         fn log(&mut self, log: Option<impl AsRef<Path>>) -> &mut Self {
-            *self.log.lock() = log.as_ref().map(|path| path.as_ref().to_path_buf());
+            *self.log.lock().unwrap() = log.as_ref().map(|path| path.as_ref().to_path_buf());
             self
         }
 
@@ -1219,39 +1152,56 @@ mod tests {
     }
 
     #[derive(Debug, Copy, Clone)]
-    struct TestProcessHandle(i32);
+    struct TestProcessHandle {
+        exit_code: i32,
+        forever: bool,
+    }
 
-    impl ProcessHandle for TestProcessHandle {
-        #[cfg(unix)]
-        fn wait(&self) -> io::Result<ExitStatus> {
-            use std::os::unix::process::ExitStatusExt;
-            Ok(ExitStatus::from_raw(self.0))
+    impl TestProcessHandle {
+        pub fn immediate(exit_code: i32) -> Self {
+            Self {
+                exit_code,
+                forever: false,
+            }
         }
 
-        #[cfg(windows)]
-        fn wait(&self) -> io::Result<ExitStatus> {
-            use std::os::windows::process::ExitStatusExt;
-            Ok(ExitStatus::from_raw(self.0 as u32))
+        pub fn run_forever() -> Self {
+            Self {
+                exit_code: 0,
+                forever: true,
+            }
         }
 
-        fn kill(&self) -> io::Result<()> {
-            Ok(())
+        fn status(&self) -> ExitStatus {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::ExitStatusExt;
+                ExitStatus::from_raw(self.exit_code as u32)
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                ExitStatus::from_raw(self.exit_code)
+            }
         }
     }
 
-    fn new_runtime() -> Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(Error::RuntimeError)
+    #[async_trait::async_trait]
+    impl ProcessHandle for TestProcessHandle {
+        async fn wait(&mut self) -> io::Result<ExitStatus> {
+            if self.forever {
+                let _: () = futures::future::pending().await;
+            }
+            Ok(self.status())
+        }
+
+        fn kill(&mut self) {}
     }
 
     fn create_init_args_plugin_log(
         plugin_path: PathBuf,
         log_path: Option<PathBuf>,
     ) -> OpenVpnTunnelInitArgs {
-        let (_close_tx, close_rx) = oneshot::channel();
         let (event_server_abort_tx, event_server_abort_rx) = triggered::trigger();
         OpenVpnTunnelInitArgs {
             event_server_abort_tx,
@@ -1261,7 +1211,6 @@ mod tests {
             user_pass_file: TempFile::new(),
             proxy_auth_file: None,
             proxy_monitor: None,
-            tunnel_close_rx: close_rx,
             #[cfg(target_os = "linux")]
             fwmark: 0,
         }
@@ -1271,119 +1220,115 @@ mod tests {
         create_init_args_plugin_log("".into(), None)
     }
 
-    #[test]
-    fn sets_plugin() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sets_plugin() {
         let builder = TestOpenVpnBuilder::default();
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args = create_init_args_plugin_log("./my_test_plugin".into(), None);
-        let _ = runtime.block_on(OpenVpnMonitor::new_internal(
+        let _ = OpenVpnMonitor::new_internal(
             builder.clone(),
             openvpn_init_args,
             TestOpenvpnEventProxy {},
             #[cfg(windows)]
             Box::new(TestWintunContext {}),
-        ));
+        );
         assert_eq!(
             Some(PathBuf::from("./my_test_plugin")),
-            *builder.plugin.lock()
+            *builder.plugin.lock().unwrap()
         );
     }
 
-    #[test]
-    fn sets_log() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sets_log() {
         let builder = TestOpenVpnBuilder::default();
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args =
             create_init_args_plugin_log("".into(), Some(PathBuf::from("./my_test_log_file")));
-        let _ = runtime.block_on(OpenVpnMonitor::new_internal(
+        let _ = OpenVpnMonitor::new_internal(
             builder.clone(),
             openvpn_init_args,
             TestOpenvpnEventProxy {},
             #[cfg(windows)]
             Box::new(TestWintunContext {}),
-        ));
+        );
         assert_eq!(
             Some(PathBuf::from("./my_test_log_file")),
-            *builder.log.lock()
+            *builder.log.lock().unwrap()
         );
     }
 
-    #[test]
-    fn exit_successfully() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_successfully() {
         let builder = TestOpenVpnBuilder {
-            process_handle: Some(TestProcessHandle(0)),
+            process_handle: Some(TestProcessHandle::immediate(0)),
             ..Default::default()
         };
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args = create_init_args();
-        let testee = runtime
-            .block_on(OpenVpnMonitor::new_internal(
-                builder,
-                openvpn_init_args,
-                TestOpenvpnEventProxy {},
-                #[cfg(windows)]
-                Box::new(TestWintunContext {}),
-            ))
-            .unwrap();
-        assert!(testee.wait().is_ok());
+        let testee = OpenVpnMonitor::new_internal(
+            builder,
+            openvpn_init_args,
+            TestOpenvpnEventProxy {},
+            #[cfg(windows)]
+            Box::new(TestWintunContext {}),
+        )
+        .unwrap();
+        assert!(testee.wait().await.is_ok());
     }
 
-    #[test]
-    fn exit_error() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_error() {
         let builder = TestOpenVpnBuilder {
-            process_handle: Some(TestProcessHandle(1)),
+            process_handle: Some(TestProcessHandle::immediate(1)),
             ..Default::default()
         };
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args = create_init_args();
-        let testee = runtime
-            .block_on(OpenVpnMonitor::new_internal(
-                builder,
-                openvpn_init_args,
-                TestOpenvpnEventProxy {},
-                #[cfg(windows)]
-                Box::new(TestWintunContext {}),
-            ))
-            .unwrap();
-        assert!(testee.wait().is_err());
+        let testee = OpenVpnMonitor::new_internal(
+            builder,
+            openvpn_init_args,
+            TestOpenvpnEventProxy {},
+            #[cfg(windows)]
+            Box::new(TestWintunContext {}),
+        )
+        .unwrap();
+        assert!(testee.wait().await.is_err());
     }
 
-    #[test]
-    fn wait_closed() {
+    /// Test that the `OpenVpnMonitor` stops when the close handle closes it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn wait_closed() {
         let builder = TestOpenVpnBuilder {
-            process_handle: Some(TestProcessHandle(1)),
+            process_handle: Some(TestProcessHandle::run_forever()),
             ..Default::default()
         };
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args = create_init_args();
-        let testee = runtime
-            .block_on(OpenVpnMonitor::new_internal(
-                builder,
-                openvpn_init_args,
-                TestOpenvpnEventProxy {},
-                #[cfg(windows)]
-                Box::new(TestWintunContext {}),
-            ))
-            .unwrap();
-        testee.close_handle().close().unwrap();
-        assert!(testee.wait().is_ok());
+        let testee = OpenVpnMonitor::new_internal(
+            builder,
+            openvpn_init_args,
+            TestOpenvpnEventProxy {},
+            #[cfg(windows)]
+            Box::new(TestWintunContext {}),
+        )
+        .unwrap();
+
+        testee.close_handle().close();
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), testee.wait())
+            .await
+            .expect("expected close handle to stop monitor")
+            .expect("expected successful result");
     }
 
-    #[test]
-    fn failed_process_start() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_process_start() {
         let builder = TestOpenVpnBuilder::default();
-        let runtime = new_runtime().unwrap();
         let openvpn_init_args = create_init_args();
-        let result = runtime
-            .block_on(OpenVpnMonitor::new_internal(
-                builder,
-                openvpn_init_args,
-                TestOpenvpnEventProxy {},
-                #[cfg(windows)]
-                Box::new(TestWintunContext {}),
-            ))
-            .unwrap();
-        match result.wait() {
+        let result = OpenVpnMonitor::new_internal(
+            builder,
+            openvpn_init_args,
+            TestOpenvpnEventProxy {},
+            #[cfg(windows)]
+            Box::new(TestWintunContext {}),
+        )
+        .unwrap();
+        match result.wait().await {
             Err(Error::StartProcessError) => (),
             _ => panic!("Wrong error"),
         }

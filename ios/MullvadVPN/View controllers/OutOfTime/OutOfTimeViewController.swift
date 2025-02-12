@@ -3,31 +3,32 @@
 //  MullvadVPN
 //
 //  Created by Andreas Lif on 2022-07-25.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadREST
 import Operations
-import StoreKit
+@preconcurrency import StoreKit
 import UIKit
 
-protocol OutOfTimeViewControllerDelegate: AnyObject {
+protocol OutOfTimeViewControllerDelegate: AnyObject, Sendable {
     func outOfTimeViewControllerDidBeginPayment(_ controller: OutOfTimeViewController)
     func outOfTimeViewControllerDidEndPayment(_ controller: OutOfTimeViewController)
+    func outOfTimeViewControllerDidRequestShowPurchaseOptions(
+        _ controller: OutOfTimeViewController,
+        products: [SKProduct],
+        didRequestPurchase: @escaping (SKProduct) -> Void
+    )
+    func outOfTimeViewControllerDidFailToFetchProducts(_ controller: OutOfTimeViewController)
 }
 
+@MainActor
 class OutOfTimeViewController: UIViewController, RootContainment {
     weak var delegate: OutOfTimeViewControllerDelegate?
 
     private let interactor: OutOfTimeInteractor
     private let errorPresenter: PaymentAlertPresenter
-
-    private var productState: ProductState = .none {
-        didSet {
-            applyViewState()
-        }
-    }
 
     private var paymentState: PaymentState = .none {
         didSet {
@@ -38,11 +39,13 @@ class OutOfTimeViewController: UIViewController, RootContainment {
 
     private lazy var contentView = OutOfTimeContentView()
 
+    private var isFetchingProducts = false
+
     override var preferredStatusBarStyle: UIStatusBarStyle {
         .lightContent
     }
 
-    var preferredHeaderBarPresentation: HeaderBarPresentation {
+    nonisolated(unsafe) var preferredHeaderBarPresentation: HeaderBarPresentation {
         let tunnelState = interactor.tunnelStatus.state
 
         return HeaderBarPresentation(
@@ -53,6 +56,10 @@ class OutOfTimeViewController: UIViewController, RootContainment {
 
     var prefersHeaderBarHidden: Bool {
         false
+    }
+
+    var prefersNotificationBarHidden: Bool {
+        true
     }
 
     init(interactor: OutOfTimeInteractor, errorPresenter: PaymentAlertPresenter) {
@@ -85,7 +92,7 @@ class OutOfTimeViewController: UIViewController, RootContainment {
         )
         contentView.purchaseButton.addTarget(
             self,
-            action: #selector(doPurchase),
+            action: #selector(requestStoreProducts),
             for: .touchUpInside
         )
         contentView.restoreButton.addTarget(
@@ -95,37 +102,31 @@ class OutOfTimeViewController: UIViewController, RootContainment {
         )
 
         interactor.didReceivePaymentEvent = { [weak self] event in
-            self?.didReceivePaymentEvent(event)
+            Task { @MainActor in
+                self?.didReceivePaymentEvent(event)
+            }
         }
 
-        interactor.didReceiveTunnelStatus = { [weak self] tunnelStatus in
-            self?.setNeedsHeaderBarStyleAppearanceUpdate()
-            self?.applyViewState()
+        interactor.didReceiveTunnelStatus = { [weak self] _ in
+            Task { @MainActor in
+                self?.setNeedsHeaderBarStyleAppearanceUpdate()
+                self?.applyViewState()
+            }
         }
+        applyViewState()
+    }
 
-        if StorePaymentManager.canMakePayments {
-            requestStoreProducts()
-        } else {
-            productState = .cannotMakePurchases
-        }
-
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
         interactor.startAccountUpdateTimer()
     }
 
-    // MARK: - Private
-
-    private func requestStoreProducts() {
-        let productKind = StoreSubscription.thirtyDays
-
-        productState = .fetching(productKind)
-
-        _ = interactor.requestProducts(with: [productKind]) { [weak self] completion in
-            let productState: ProductState = completion.value?.products.first
-                .map { .received($0) } ?? .failed
-
-            self?.productState = productState
-        }
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        interactor.stopAccountUpdateTimer()
     }
+
+    // MARK: - Private
 
     private func applyViewState() {
         let tunnelState = interactor.tunnelStatus.state
@@ -134,10 +135,9 @@ class OutOfTimeViewController: UIViewController, RootContainment {
 
         let isOutOfTime = interactor.deviceState.accountData.map { $0.expiry < Date() } ?? false
 
-        purchaseButton.setTitle(productState.purchaseButtonTitle, for: .normal)
-        contentView.purchaseButton.isLoading = productState.isFetching
+        contentView.purchaseButton.isLoading = isFetchingProducts
 
-        purchaseButton.isEnabled = productState.isReceived && isInteractionEnabled && !tunnelState
+        purchaseButton.isEnabled = !isFetchingProducts && isInteractionEnabled && !tunnelState
             .isSecured
         contentView.restoreButton.isEnabled = isInteractionEnabled
 
@@ -148,7 +148,10 @@ class OutOfTimeViewController: UIViewController, RootContainment {
                 NSLocalizedString(
                     "OUT_OF_TIME_BODY_CONNECTED",
                     tableName: "OutOfTime",
-                    value: "You have no more VPN time left on this account. To add more, you will need to disconnect and access the Internet with an unsecure connection.",
+                    value: """
+                    You have no more VPN time left on this account. To add more, you will need to \
+                    disconnect and access the Internet with an unsecure connection.
+                    """,
                     comment: ""
                 )
             )
@@ -157,7 +160,10 @@ class OutOfTimeViewController: UIViewController, RootContainment {
                 NSLocalizedString(
                     "OUT_OF_TIME_BODY_DISCONNECTED",
                     tableName: "OutOfTime",
-                    value: "You have no more VPN time left on this account. Either buy credit on our website or make an in-app purchase via the **Add 30 days time** button below.",
+                    value: """
+                    You have no more VPN time left on this account. Either buy credit on our website \
+                    or make an in-app purchase via the **Add time** button below.
+                    """,
                     comment: ""
                 )
             )
@@ -190,8 +196,8 @@ class OutOfTimeViewController: UIViewController, RootContainment {
               payment == event.payment else { return }
 
         switch event {
-        case .finished:
-            break
+        case let .finished(completion):
+            errorPresenter.showAlertForResponse(completion.serverResponse, context: .purchase)
 
         case let .failure(paymentFailure):
             switch paymentFailure.error {
@@ -208,12 +214,8 @@ class OutOfTimeViewController: UIViewController, RootContainment {
         paymentState = .none
     }
 
-    // MARK: - Actions
-
-    @objc private func doPurchase() {
-        guard case let .received(product) = productState,
-              let accountData = interactor.deviceState.accountData
-        else {
+    private func doPurchase(product: SKProduct) {
+        guard let accountData = interactor.deviceState.accountData else {
             return
         }
 
@@ -223,6 +225,39 @@ class OutOfTimeViewController: UIViewController, RootContainment {
         paymentState = .makingPayment(payment)
     }
 
+    // MARK: - Actions
+
+    @objc private func requestStoreProducts() {
+        guard interactor.deviceState.accountData != nil else {
+            return
+        }
+        let productIdentifiers = Set(StoreSubscription.allCases)
+        isFetchingProducts = true
+        applyViewState()
+        _ = interactor.requestProducts(with: productIdentifiers) { [weak self] result in
+            guard let self else { return }
+            Task { @MainActor in
+                switch result {
+                case let .success(success):
+                    let products = success.products
+                    if !products.isEmpty {
+                        delegate?.outOfTimeViewControllerDidRequestShowPurchaseOptions(
+                            self,
+                            products: products,
+                            didRequestPurchase: self.doPurchase
+                        )
+                    } else {
+                        delegate?.outOfTimeViewControllerDidFailToFetchProducts(self)
+                    }
+                case .failure:
+                    delegate?.outOfTimeViewControllerDidFailToFetchProducts(self)
+                }
+                isFetchingProducts = false
+                applyViewState()
+            }
+        }
+    }
+
     @objc func restorePurchases() {
         guard let accountData = interactor.deviceState.accountData else {
             return
@@ -230,22 +265,25 @@ class OutOfTimeViewController: UIViewController, RootContainment {
 
         paymentState = .restoringPurchases
 
+        /// Safe to assume `@MainActor` isolation because `SendStoreReceiptOperation` sets both its
+        /// `dispatchQueue` and `completionQueue` to `.main`
         _ = interactor.restorePurchases(for: accountData.number) { [weak self] result in
             guard let self else { return }
+            MainActor.assumeIsolated {
+                switch result {
+                case let .success(response):
+                    errorPresenter.showAlertForResponse(response, context: .restoration) {
+                        self.paymentState = .none
+                    }
 
-            switch result {
-            case let .success(response):
-                errorPresenter.showAlertForResponse(response, context: .restoration) {
-                    self.paymentState = .none
+                case let .failure(error as StorePaymentManagerError):
+                    errorPresenter.showAlertForError(error, context: .restoration) {
+                        self.paymentState = .none
+                    }
+
+                default:
+                    paymentState = .none
                 }
-
-            case let .failure(error as StorePaymentManagerError):
-                errorPresenter.showAlertForError(error, context: .restoration) {
-                    self.paymentState = .none
-                }
-
-            default:
-                paymentState = .none
             }
         }
     }

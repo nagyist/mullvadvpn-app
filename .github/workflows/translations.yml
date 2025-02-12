@@ -5,41 +5,33 @@ on:
     paths:
       - .github/workflows/translations.yml
       - android/translations-converter/**
-      - android/app/src/**/plurals.xml
-      - android/app/src/**/strings.xml
-      - gui/**
+      - android/lib/resource/src/**/plurals.xml
+      - android/lib/resource/src/**/strings.xml
+      - desktop/packages/mullvad-vpn/**
+      - '!**/osv-scanner.toml'
   workflow_dispatch:
+
+permissions: {}
+
 jobs:
   check-translations:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Setup volta
-        uses: volta-cli/action@v4
-
-      - name: Get npm cache directory path
-        id: npm-cache-dir-path
-        run: echo "::set-output name=dir::$(npm config get cache)"
-
-      - name: Cache npm dependencies
-        uses: actions/cache@v3
+      - name: Setup node
+        uses: actions/setup-node@v4
         with:
-          path: ${{ steps.npm-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          node-version-file: desktop/package.json
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
 
       - name: Install JS dependencies
-        working-directory: gui
+        working-directory: desktop
+        shell: bash
         run: npm ci
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1.0.6
-        with:
-          toolchain: stable
-          default: true
-
       - name: Verify translations
+        shell: bash
         run: scripts/localization verify

@@ -3,23 +3,24 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 15/12/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
-import class WireGuardKitTypes.PrivateKey
+import WireGuardKitTypes
 
-class RotateKeyOperation: ResultOperation<Void> {
+class RotateKeyOperation: ResultOperation<Void>, @unchecked Sendable {
     private let logger = Logger(label: "RotateKeyOperation")
     private let interactor: TunnelInteractor
-    private let devicesProxy: REST.DevicesProxy
+    private let devicesProxy: DeviceHandling
     private var task: Cancellable?
 
-    init(dispatchQueue: DispatchQueue, interactor: TunnelInteractor, devicesProxy: REST.DevicesProxy) {
+    init(dispatchQueue: DispatchQueue, interactor: TunnelInteractor, devicesProxy: DeviceHandling) {
         self.interactor = interactor
         self.devicesProxy = devicesProxy
 
@@ -34,7 +35,7 @@ class RotateKeyOperation: ResultOperation<Void> {
         }
 
         // Create key rotation.
-        var keyRotation = WgKeyRotation(data: deviceData)
+        nonisolated(unsafe) var keyRotation = WgKeyRotation(data: deviceData)
 
         // Check if key rotation can take place.
         guard keyRotation.shouldRotate else {

@@ -3,10 +3,22 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 18/02/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+import MullvadTypes
 import UIKit
+struct FormSheetPresentationOptions {
+    /**
+     Indicates whether the presentation controller should use a fullscreen presentation when in a compact width environment
+     */
+    var useFullScreenPresentationInCompactWidth = false
+
+    /**
+     Indicates whether the presentation controller should handle keyboard notifications
+     */
+    var adjustViewWhenKeyboardAppears = false
+}
 
 /**
  Custom implementation of a formsheet presentation controller.
@@ -29,6 +41,9 @@ class FormSheetPresentationController: UIPresentationController {
      */
     private var lastKnownIsInFullScreen: Bool?
 
+    /**
+     Change the position of `presentedView` if `FormSheetPresentationOptions.adjustViewWhenKeyboardAppears` is `true`
+     */
     private var keyboardResponder: AutomaticKeyboardResponder?
 
     private let dimmingView: UIView = {
@@ -42,22 +57,23 @@ class FormSheetPresentationController: UIPresentationController {
     }
 
     /**
-     Flag indicating whether presentation controller should use fullscreen presentation when in
-     compact width environment
-     */
-    var useFullScreenPresentationInCompactWidth = false
-
-    /**
      Returns `true` if presentation controller is in fullscreen presentation.
      */
     var isInFullScreenPresentation: Bool {
-        useFullScreenPresentationInCompactWidth &&
+        options.useFullScreenPresentationInCompactWidth &&
             traitCollection.horizontalSizeClass == .compact
     }
 
-    override init(presentedViewController: UIViewController, presenting presentingViewController: UIViewController?) {
+    private let options: FormSheetPresentationOptions
+
+    init(
+        presentedViewController: UIViewController,
+        presenting presentingViewController: UIViewController?,
+        options: FormSheetPresentationOptions
+    ) {
+        self.options = options
         super.init(presentedViewController: presentedViewController, presenting: presentingViewController)
-        addKeyboardResponder()
+        addKeyboardResponderIfNeeded()
     }
 
     override var frameOfPresentedViewInContainerView: CGRect {
@@ -99,7 +115,7 @@ class FormSheetPresentationController: UIPresentationController {
         }
 
         if let transitionCoordinator = presentingViewController.transitionCoordinator {
-            transitionCoordinator.animate { context in
+            transitionCoordinator.animate { _ in
                 revealDimmingView()
             }
         } else {
@@ -121,7 +137,7 @@ class FormSheetPresentationController: UIPresentationController {
         }
 
         if let transitionCoordinator = presentingViewController.transitionCoordinator {
-            transitionCoordinator.animate { context in
+            transitionCoordinator.animate { _ in
                 fadeDimmingView()
             }
         } else {
@@ -151,12 +167,13 @@ class FormSheetPresentationController: UIPresentationController {
         NotificationCenter.default.post(
             name: Self.willChangeFullScreenPresentation,
             object: presentedViewController,
-            userInfo: [Self.isFullScreenUserInfoKey: NSNumber(booleanLiteral: currentIsInFullScreen)]
+            userInfo: [Self.isFullScreenUserInfoKey: NSNumber(value: currentIsInFullScreen)]
         )
     }
 
-    private func addKeyboardResponder() {
-        guard let presentedView else { return }
+    private func addKeyboardResponderIfNeeded() {
+        guard options.adjustViewWhenKeyboardAppears,
+              let presentedView else { return }
         keyboardResponder = AutomaticKeyboardResponder(
             targetView: presentedView,
             handler: { [weak self] view, adjustment in
@@ -164,7 +181,7 @@ class FormSheetPresentationController: UIPresentationController {
                       let containerView,
                       !isInFullScreenPresentation else { return }
                 let frame = view.frame
-                let bottomMarginFromKeyboard = adjustment > 0 ? UIMetrics.sectionSpacing : 0
+                let bottomMarginFromKeyboard = adjustment > 0 ? UIMetrics.TableView.sectionSpacing : 0
                 view.frame = CGRect(
                     origin: CGPoint(
                         x: frame.origin.x,
@@ -180,6 +197,12 @@ class FormSheetPresentationController: UIPresentationController {
 }
 
 class FormSheetTransitioningDelegate: NSObject, UIViewControllerTransitioningDelegate {
+    let options: FormSheetPresentationOptions
+
+    init(options: FormSheetPresentationOptions = FormSheetPresentationOptions()) {
+        self.options = options
+    }
+
     func animationController(
         forPresented presented: UIViewController,
         presenting: UIViewController,
@@ -200,7 +223,8 @@ class FormSheetTransitioningDelegate: NSObject, UIViewControllerTransitioningDel
     ) -> UIPresentationController? {
         FormSheetPresentationController(
             presentedViewController: presented,
-            presenting: source
+            presenting: source,
+            options: options
         )
     }
 }
@@ -208,7 +232,7 @@ class FormSheetTransitioningDelegate: NSObject, UIViewControllerTransitioningDel
 class FormSheetPresentationAnimator: NSObject, UIViewControllerAnimatedTransitioning {
     func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?)
         -> TimeInterval {
-        (transitionContext?.isAnimated ?? true) ? UIMetrics.FormSheetTransition.duration : 0
+        (transitionContext?.isAnimated ?? true) ? UIMetrics.FormSheetTransition.duration.timeInterval : 0
     }
 
     func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
@@ -236,7 +260,7 @@ class FormSheetPresentationAnimator: NSObject, UIViewControllerAnimatedTransitio
         if transitionContext.isAnimated {
             UIView.animate(
                 withDuration: duration,
-                delay: UIMetrics.FormSheetTransition.delay,
+                delay: UIMetrics.FormSheetTransition.delay.timeInterval,
                 options: UIMetrics.FormSheetTransition.animationOptions,
                 animations: {
                     destinationView.frame = transitionContext.finalFrame(for: destinationController)
@@ -262,7 +286,7 @@ class FormSheetPresentationAnimator: NSObject, UIViewControllerAnimatedTransitio
         if transitionContext.isAnimated {
             UIView.animate(
                 withDuration: duration,
-                delay: UIMetrics.FormSheetTransition.delay,
+                delay: UIMetrics.FormSheetTransition.delay.timeInterval,
                 options: UIMetrics.FormSheetTransition.animationOptions,
                 animations: {
                     sourceView.frame = initialFrame

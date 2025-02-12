@@ -10,7 +10,10 @@ XCASSETS_DIR = File.join(SCRIPT_DIR, "MullvadVPN/Supporting Files/Assets.xcasset
 
 # graphical assets sources
 APPICON_PATH = File.join(ROOT_DIR, "graphics/icon-square.svg")
-GRAPHICAL_ASSETS_DIR = File.join(ROOT_DIR, "gui/assets/images")
+GRAPHICAL_ASSETS_DIR = File.join(
+  ROOT_DIR,
+  "desktop/packages/mullvad-vpn/assets/images"
+)
 ADDITIONAL_ASSETS_DIR = File.join(SCRIPT_DIR, "AdditionalAssets")
 
 # app icon output
@@ -29,7 +32,6 @@ GRAPHICAL_ASSETS = [
   "icon-extLink.svg",
   "icon-fail.svg",
   "icon-info.svg",
-  "icon-reload.svg",
   "icon-settings.svg",
   "icon-spinner.svg",
   "icon-success.svg",
@@ -42,7 +44,7 @@ GRAPHICAL_ASSETS = [
   "icon-close-sml.svg",
   "icon-copy.svg",
   "icon-obscure.svg",
-  "icon-unobscure.svg",
+  "icon-unobscure.svg"
 ]
 
 # graphical assets to resize.

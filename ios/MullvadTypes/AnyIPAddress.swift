@@ -3,7 +3,7 @@
 //  MullvadTypes
 //
 //  Created by pronebird on 05/10/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -69,6 +69,10 @@ public enum AnyIPAddress: IPAddress, Codable, Equatable, CustomDebugStringConver
     }
 
     public init?(_ string: String) {
+        // Arbitrary integers should not be allowed by us and need to be handled separately
+        // since Apple allows them.
+        guard Int(string) == nil else { return nil }
+
         if let ipv4Address = IPv4Address(string) {
             self = .ipv4(ipv4Address)
         } else if let ipv6Address = IPv6Address(string) {

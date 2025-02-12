@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 05/06/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -11,23 +11,33 @@ import MullvadLogging
 import MullvadREST
 import MullvadTypes
 import Operations
-import RelayCache
 import UIKit
 
-final class RelayCacheTracker {
-    /// Relay update interval (in seconds).
-    static let relayUpdateInterval: TimeInterval = 60 * 60
+protocol RelayCacheTrackerProtocol: Sendable {
+    func startPeriodicUpdates()
+    func stopPeriodicUpdates()
+    func updateRelays(completionHandler: ((sending Result<RelaysFetchResult, Error>) -> Void)?) -> Cancellable
+    func getCachedRelays() throws -> CachedRelays
+    func getNextUpdateDate() -> Date
+    func addObserver(_ observer: RelayCacheTrackerObserver)
+    func removeObserver(_ observer: RelayCacheTrackerObserver)
+    func refreshCachedRelays() throws
+}
+
+final class RelayCacheTracker: RelayCacheTrackerProtocol, @unchecked Sendable {
+    /// Relay update interval.
+    static let relayUpdateInterval: Duration = .hours(1)
 
     /// Tracker log.
-    private let logger = Logger(label: "RelayCacheTracker")
+    nonisolated(unsafe) private let logger = Logger(label: "RelayCacheTracker")
 
     /// Relay cache.
-    private let cache: RelayCache
+    private let cache: RelayCacheProtocol
 
-    private let application: UIApplication
+    private let backgroundTaskProvider: BackgroundTaskProviding
 
     /// Lock used for synchronization.
-    private let nslock = NSLock()
+    private let relayCacheLock = NSLock()
 
     /// Internal operation queue.
     private let operationQueue = AsyncOperationQueue.makeSerial()
@@ -39,7 +49,7 @@ final class RelayCacheTracker {
     private var isPeriodicUpdatesEnabled = false
 
     /// API proxy.
-    private let apiProxy: REST.APIProxy
+    private let apiProxy: APIQuerying
 
     /// Observers.
     private let observerList = ObserverList<RelayCacheTrackerObserver>()
@@ -47,13 +57,14 @@ final class RelayCacheTracker {
     /// Memory cache.
     private var cachedRelays: CachedRelays?
 
-    init(relayCache: RelayCache, application: UIApplication, apiProxy: REST.APIProxy) {
-        self.application = application
+    init(relayCache: RelayCacheProtocol, backgroundTaskProvider: BackgroundTaskProviding, apiProxy: APIQuerying) {
+        self.backgroundTaskProvider = backgroundTaskProvider
         self.apiProxy = apiProxy
         cache = relayCache
 
         do {
-            cachedRelays = try cache.read()
+            cachedRelays = try cache.read().cachedRelays
+            try hotfixRelaysThatDoNotHaveDaita()
         } catch {
             logger.error(
                 error: error,
@@ -64,9 +75,69 @@ final class RelayCacheTracker {
         }
     }
 
+    /// This method updates the cached relay to include daita information
+    ///
+    /// This is a hotfix meant to upgrade clients shipped with 2024.5 or before that did not have
+    /// daita information in their representation of `ServerRelay`.
+    /// If a version <= 2024.5 is installed less than an hour before a new upgrade,
+    /// no servers will be shown in locations when filtering for daita relays.
+    ///
+    /// > Info: `relayCacheLock` does not need to be accessed here, this method should be ran from `init` only.
+    private func hotfixRelaysThatDoNotHaveDaita() throws {
+        guard let cachedRelays else { return }
+        let daitaPropertyMissing = cachedRelays.relays.wireguard.relays.first { $0.daita ?? false } == nil
+        // If the cached relays already have daita information, this fix is not necessary
+        guard daitaPropertyMissing else { return }
+
+        let preBundledRelays = try cache.readPrebundledRelays().relays
+        let preBundledDaitaRelays = preBundledRelays.wireguard.relays.filter { $0.daita == true }
+        var cachedRelaysWithFixedDaita = cachedRelays.relays.wireguard.relays
+
+        // For each daita enabled relay in the prebundled relays
+        // Find the corresponding relay in the cache by matching relay hostnames
+        // Then update it to toggle daita
+        for index in 0 ..< cachedRelaysWithFixedDaita.endIndex {
+            let relay = cachedRelaysWithFixedDaita[index]
+            preBundledDaitaRelays.forEach {
+                if $0.hostname == relay.hostname {
+                    cachedRelaysWithFixedDaita[index] = relay.override(daita: true)
+                }
+            }
+        }
+
+        let wireguard = REST.ServerWireguardTunnels(
+            ipv4Gateway:
+            cachedRelays.relays.wireguard.ipv4Gateway,
+            ipv6Gateway: cachedRelays.relays.wireguard.ipv6Gateway,
+            portRanges: cachedRelays.relays.wireguard.portRanges,
+            relays: cachedRelaysWithFixedDaita,
+            shadowsocksPortRanges: cachedRelays.relays.wireguard.shadowsocksPortRanges
+        )
+
+        let updatedRelays = REST.ServerRelaysResponse(
+            locations: cachedRelays.relays.locations,
+            wireguard: wireguard,
+            bridge: cachedRelays.relays.bridge
+        )
+
+        let updatedRawRelayData = try REST.Coding.makeJSONEncoder().encode(updatedRelays)
+        let updatedCachedRelays = try StoredRelays(
+            etag: cachedRelays.etag,
+            rawData: updatedRawRelayData,
+            updatedAt: cachedRelays.updatedAt
+        )
+
+        try cache.write(record: updatedCachedRelays)
+        self.cachedRelays = CachedRelays(
+            etag: cachedRelays.etag,
+            relays: updatedRelays,
+            updatedAt: cachedRelays.updatedAt
+        )
+    }
+
     func startPeriodicUpdates() {
-        nslock.lock()
-        defer { nslock.unlock() }
+        relayCacheLock.lock()
+        defer { relayCacheLock.unlock() }
 
         guard !isPeriodicUpdatesEnabled else { return }
 
@@ -80,8 +151,8 @@ final class RelayCacheTracker {
     }
 
     func stopPeriodicUpdates() {
-        nslock.lock()
-        defer { nslock.unlock() }
+        relayCacheLock.lock()
+        defer { relayCacheLock.unlock() }
 
         guard isPeriodicUpdatesEnabled else { return }
 
@@ -93,7 +164,7 @@ final class RelayCacheTracker {
         timerSource = nil
     }
 
-    func updateRelays(completionHandler: ((Result<RelaysFetchResult, Error>) -> Void)? = nil)
+    func updateRelays(completionHandler: ((sending Result<RelaysFetchResult, Error>) -> Void)? = nil)
         -> Cancellable {
         let operation = ResultBlockOperation<RelaysFetchResult> { finish in
             let cachedRelays = try? self.getCachedRelays()
@@ -110,7 +181,7 @@ final class RelayCacheTracker {
 
         operation.addObserver(
             BackgroundObserver(
-                application: application,
+                backgroundTaskProvider: backgroundTaskProvider,
                 name: "Update relays",
                 cancelUponExpiration: true
             )
@@ -125,8 +196,8 @@ final class RelayCacheTracker {
     }
 
     func getCachedRelays() throws -> CachedRelays {
-        nslock.lock()
-        defer { nslock.unlock() }
+        relayCacheLock.lock()
+        defer { relayCacheLock.unlock() }
 
         if let cachedRelays {
             return cachedRelays
@@ -135,9 +206,23 @@ final class RelayCacheTracker {
         }
     }
 
+    func refreshCachedRelays() throws {
+        let newCachedRelays = try cache.read().cachedRelays
+
+        relayCacheLock.lock()
+        cachedRelays = newCachedRelays
+        relayCacheLock.unlock()
+
+        DispatchQueue.main.async {
+            self.observerList.notify { observer in
+                observer.relayCacheTracker(self, didUpdateCachedRelays: newCachedRelays)
+            }
+        }
+    }
+
     func getNextUpdateDate() -> Date {
-        nslock.lock()
-        defer { nslock.unlock() }
+        relayCacheLock.lock()
+        defer { relayCacheLock.unlock() }
 
         return _getNextUpdateDate()
     }
@@ -161,7 +246,7 @@ final class RelayCacheTracker {
             return now
         }
 
-        let nextUpdate = cachedRelays.updatedAt.addingTimeInterval(Self.relayUpdateInterval)
+        let nextUpdate = cachedRelays.updatedAt.addingTimeInterval(Self.relayUpdateInterval.timeInterval)
 
         return max(nextUpdate, Date())
     }
@@ -170,8 +255,8 @@ final class RelayCacheTracker {
         -> Result<RelaysFetchResult, Error> {
         result.tryMap { response -> RelaysFetchResult in
             switch response {
-            case let .newContent(etag, relays):
-                try self.storeResponse(etag: etag, relays: relays)
+            case let .newContent(etag, rawData):
+                try self.storeResponse(etag: etag, rawData: rawData)
 
                 return .newContent
 
@@ -188,28 +273,15 @@ final class RelayCacheTracker {
         }
     }
 
-    private func storeResponse(etag: String?, relays: REST.ServerRelaysResponse) throws {
-        let numRelays = relays.wireguard.relays.count
-
-        logger.info("Downloaded \(numRelays) relays.")
-
-        let newCachedRelays = CachedRelays(
+    private func storeResponse(etag: String?, rawData: Data) throws {
+        let newCachedData = try StoredRelays(
             etag: etag,
-            relays: relays,
+            rawData: rawData,
             updatedAt: Date()
         )
 
-        nslock.lock()
-        cachedRelays = newCachedRelays
-        nslock.unlock()
-
-        try cache.write(record: newCachedRelays)
-
-        DispatchQueue.main.async {
-            self.observerList.forEach { observer in
-                observer.relayCacheTracker(self, didUpdateCachedRelays: newCachedRelays)
-            }
-        }
+        try cache.write(record: newCachedData)
+        try refreshCachedRelays()
     }
 
     private func scheduleRepeatingTimer(startTime: DispatchWallTime) {
@@ -220,7 +292,7 @@ final class RelayCacheTracker {
 
         timerSource.schedule(
             wallDeadline: startTime,
-            repeating: .seconds(Int(Self.relayUpdateInterval))
+            repeating: Self.relayUpdateInterval.timeInterval
         )
         timerSource.activate()
 

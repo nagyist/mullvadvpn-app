@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 26/10/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -22,7 +22,7 @@ final class RevokedDeviceInteractor {
         self.tunnelManager = tunnelManager
 
         let tunnelObserver =
-            TunnelBlockObserver(didUpdateTunnelStatus: { [weak self] manager, tunnelStatus in
+            TunnelBlockObserver(didUpdateTunnelStatus: { [weak self] _, tunnelStatus in
                 self?.didUpdateTunnelStatus?(tunnelStatus)
             })
 

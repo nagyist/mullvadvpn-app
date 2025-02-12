@@ -8,6 +8,10 @@ This document does not describe in detail *how* we reach and uphold these proper
 they are. See the [architecture](architecture.md) document for details on how the firewall
 integration is implemented.
 
+For known security and privacy issues, that might cause the app to not uphold the
+properties described in this document under certain conditions, please see the
+[known issues] document.
+
 The main purpose of the app is to allow the user to make all network/internet traffic to and
 from the device travel via an encrypted VPN tunnel.
 
@@ -24,31 +28,42 @@ secure as possible with the limitations of the OS APIs.
 
 ### Android
 
-On Android, the only way an app can filter network traffic is essentially via the VPN service API.
-This API allows all traffic, except some [exempt by the system](#exempt-traffic), to and from the
-phone to flow though a third party app. This API is of course what the app uses for the tunnel
-itself as well, but apart from that it is also what the leak protection is built on.
+> ⚠️  When we say *all traffic* in this chapter it does not include traffic exempt by the system
+or traffic affected by [known issues].
 
-An app with permission to act as a VPN service can request to open a VPN tunnel on the device and
-provide a set of IP networks it would like to have routed via itself. Doing so and specifying
-the routes `0/0` and `::0/0` forces all traffic, except some
-[exempt by the system](#exempt-traffic), to go via the app. That is what this app does both when it
-has a VPN tunnel up, but also when in a state where it would like to block all network traffic. Such
-as the [connecting], [disconnecting] and [error] states. In these states, all outgoing packets are
-simply dropped, but incoming traffic is still allowed due to the limitations of Android.
+The only way an android app can filter network traffic is via the VPN Service API. This API allows
+*all traffic* to and from the device to be routed through a third party app. This API is what the
+Mullvad VPN app uses for the tunnel itself and for leak protection.
+
+When establishing a VPN connection using the default settings* the app will set the routes `0/0` and
+`::0/0` in order to force *all traffic* to be routed through the app. This also applies when the app is
+in a state where it blocks *all traffic*, such as the [connecting], [disconnecting] and [error]
+states. Additionally the android system has a setting called *Block connections without VPN* that
+enables the Android OS to block *all traffic* that is not routed through the Mullvad VPN.
+
+Besides the [known issues], Android has many variants and flavors that may introduce variances to
+the default [Android Open Source Project](https://source.android.com/) behavior. This means that
+the Mullvad VPN app, like all other VPN apps, is subject to the limitations of the VPN Service API.
+
+> **\*:** Local Network Sharing affects the routes and Split Tunneling will allow apps to bypass the
+tunnel.
 
 #### Exempt traffic
 
-Even though not being properly documented by Google, some traffic is exempt by the system from using
-the VPN, which means that the traffic will leak and therefore potentially impact user privacy. This
-applies even if *Block connections without VPN* is enabled. The exempt traffic includes:
-* Connectivity checks (DNS lookups and HTTP(S) connections)
-* Network provided time (NTP)
+Even though not being properly documented by Google, some traffic is exempt by the system from
+using the VPN, which means that the traffic will leak and therefore potentially impact user
+privacy. This applies even if Block connections without VPN is enabled. The exempt traffic includes:
+
+- Connectivity checks (DNS lookups and HTTP(S) connections)
+- Network provided time (NTP)
+- Traffic to and from hotspot clients.
 
 The following issues have been reported by Mullvad in the Android issue tracker in order to improve
 documentation and user privacy:
-* [Incorrect VPN lockdown documentation](https://issuetracker.google.com/issues/249990229)
-* [Add option to disable connectivity checks when VPN lockdown is enabled](https://issuetracker.google.com/issues/250529027)
+
+- [Incorrect VPN lockdown documentation](https://issuetracker.google.com/issues/249990229)
+- [Add option to disable connectivity checks when VPN lockdown is enabled](https://issuetracker.google.com/issues/250529027)
+
 
 ### iOS
 
@@ -57,7 +72,6 @@ delegates the traffic handling to wireguard-go, which works directly with the tu
 The network configuration set up by the packet tunnel extension specifies the routing rules
 that all traffic should flow through the tunnel, the same way it works on Android.
 
-The iOS app currently does not support blocking in the app's blocked state.
 
 ## App states
 
@@ -280,7 +294,7 @@ during app install and is then always running in the background, even when the u
 quits the GUI and when no tunnels are running.
 
 This system service can be controlled via a management interface, exposed locally
-via unix domain sockets (UDS) on Linux and macOS and via named pipes on Windows.
+via Unix domain sockets (UDS) on Linux and macOS and via named pipes on Windows.
 This management interface can be reached by any process running on the device.
 Locally running malicious programs are outside of the app's threat model.
 
@@ -299,7 +313,6 @@ removed.
 
 
 ### Windows
-
 On Windows, persistent firewall filters may be added when the service exits, in case the service
 decides to continue to enforce a blocking policy. These filters block any traffic occurring before
 the service has started back up again during boot, including before the BFE service has started.
@@ -314,18 +327,10 @@ started early enough to prevent leaks. To prevent this, another system unit is
 started during early boot that applies a blocking policy that persists until the
 `mullvad-daemon` is started.
 
-
-### macOS
-
-Due to the inability to specify dependencies of system services in `launchd` there is no way to
-ensure that our daemon is started before any other service  or program is started.  Thus, whilst our
-daemon will start as soon as it possibly can, there's nothing that can be done about the order in
-which launch daemons get started, so some leaks may still occur.
-
 ## Desktop Electron GUI
 
 The graphical frontend for the app on desktop is an Electron app. This app only ever loads
-local resources in the form of html, CSS and Javascript directly from the installation
+local resources in the form of html, CSS and JavaScript directly from the installation
 directory of the app, and never from remote sources.
 
 The GUI only communicates with the system service (`mullvad-daemon`), it makes no other
@@ -339,3 +344,4 @@ network connections. Except when the user sends a problem report, then it spawn 
 [disconnecting]: #disconnecting
 [error]: #error
 [GUI]: #desktop-electron-gui
+[known issues]: ./known-issues.md

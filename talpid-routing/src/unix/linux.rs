@@ -16,12 +16,11 @@ use futures::{
     StreamExt, TryStream, TryStreamExt,
 };
 use ipnetwork::IpNetwork;
-use lazy_static::lazy_static;
 use libc::{AF_INET, AF_INET6};
 use netlink_packet_route::{
     constants::{ARPHRD_LOOPBACK, FIB_RULE_INVERT, FR_ACT_TO_TBL, NLM_F_REQUEST},
     link::{nlas::Nla as LinkNla, LinkMessage},
-    route::{nlas::Nla as RouteNla, RouteHeader, RouteMessage},
+    route::{nlas::Nla as RouteNla, Metrics, RouteHeader, RouteMessage},
     rtnl::{
         constants::{
             RTN_UNSPEC, RTPROT_UNSPEC, RT_SCOPE_LINK, RT_SCOPE_UNIVERSE, RT_TABLE_COMPAT,
@@ -37,25 +36,24 @@ use rtnetlink::{
     sys::SocketAddr,
     Handle, IpVersion,
 };
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref SUPPRESS_RULE_V4: RuleMessage = RuleMessage {
-        header: RuleHeader {
-            family: AF_INET as u8,
-            action: FR_ACT_TO_TBL,
-            ..RuleHeader::default()
-        },
-        nlas: vec![
-            RuleNla::SuppressPrefixLen(0),
-            RuleNla::Table(RT_TABLE_MAIN as u32),
-        ],
-    };
-    static ref SUPPRESS_RULE_V6: RuleMessage = {
-        let mut v6_rule = SUPPRESS_RULE_V4.clone();
-        v6_rule.header.family = AF_INET6 as u8;
-        v6_rule
-    };
-}
+static SUPPRESS_RULE_V4: LazyLock<RuleMessage> = LazyLock::new(|| RuleMessage {
+    header: RuleHeader {
+        family: AF_INET as u8,
+        action: FR_ACT_TO_TBL,
+        ..RuleHeader::default()
+    },
+    nlas: vec![
+        RuleNla::SuppressPrefixLen(0),
+        RuleNla::Table(RT_TABLE_MAIN as u32),
+    ],
+});
+static SUPPRESS_RULE_V6: LazyLock<RuleMessage> = LazyLock::new(|| {
+    let mut v6_rule = SUPPRESS_RULE_V4.clone();
+    v6_rule.header.family = AF_INET6 as u8;
+    v6_rule
+});
 
 fn all_rules(fwmark: u32, table: u32) -> [RuleMessage; 4] {
     [
@@ -87,47 +85,47 @@ fn no_fwmark_rule_v6(fwmark: u32, table: u32) -> RuleMessage {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can happen in the Linux routing integration
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
+#[allow(missing_docs)]
 pub enum Error {
-    #[error(display = "Failed to open a netlink connection")]
-    Connect(#[error(source)] io::Error),
+    #[error("Failed to open a netlink connection")]
+    Connect(#[source] io::Error),
 
-    #[error(display = "Failed to bind netlink socket")]
-    Bind(#[error(source)] io::Error),
+    #[error("Failed to bind netlink socket")]
+    Bind(#[source] io::Error),
 
-    #[error(display = "Netlink error")]
-    Netlink(#[error(source)] rtnetlink::Error),
+    #[error("Netlink error")]
+    Netlink(#[source] rtnetlink::Error),
 
-    #[error(display = "Route without a valid node")]
+    #[error("Route without a valid node")]
     InvalidRoute,
 
-    #[error(display = "Invalid length of byte buffer for IP address")]
+    #[error("Invalid length of byte buffer for IP address")]
     InvalidIpBytes,
 
-    #[error(display = "Invalid network prefix")]
-    InvalidNetworkPrefix(#[error(source)] ipnetwork::IpNetworkError),
+    #[error("Invalid network prefix")]
+    InvalidNetworkPrefix(#[source] ipnetwork::IpNetworkError),
 
-    #[error(display = "Unknown device index: {}", _0)]
+    #[error("Unknown device index: {0}")]
     UnknownDeviceIndex(u32),
 
-    #[error(display = "Failed to get a route for the given IP address")]
-    GetRoute(#[error(source)] rtnetlink::Error),
+    #[error("Failed to get a route for the given IP address")]
+    GetRoute(#[source] rtnetlink::Error),
 
-    #[error(display = "No netlink response for route query")]
+    #[error("No netlink response for route query")]
     NoRoute,
 
-    #[error(display = "Route node was malformed")]
+    #[error("Route node was malformed")]
     InvalidRouteNode,
 
-    #[error(display = "No link found")]
+    #[error("No link found")]
     LinkNotFound,
 
     /// Unable to create routing table for tagged connections and packets.
-    #[error(display = "Cannot find a free routing table ID")]
+    #[error("Cannot find a free routing table ID")]
     NoFreeRoutingTableId,
 
-    #[error(display = "Shutting down route manager")]
+    #[error("Shutting down route manager")]
     Shutdown,
 }
 
@@ -295,7 +293,9 @@ impl RouteManagerImpl {
                     } else {
                         self.table_id
                     };
-                    required_normal_routes.insert(Route::new(node, route.prefix).table(table));
+                    let mut new_route = Route::new(node, route.prefix).table(table);
+                    new_route.mtu = route.mtu.map(u32::from);
+                    required_normal_routes.insert(new_route);
                 }
             }
         }
@@ -452,12 +452,13 @@ impl RouteManagerImpl {
             destination_length,
         )
         .map_err(Error::InvalidNetworkPrefix)?;
+
         let mut node_addr = None;
         let mut device = None;
         let mut metric = None;
         let mut gateway: Option<IpAddr> = None;
-
         let mut table_id = u32::from(msg.header.table);
+        let mut route_mtu = None;
 
         for nla in msg.nlas.iter() {
             match nla {
@@ -503,6 +504,10 @@ impl RouteManagerImpl {
                 RouteNla::Table(id) => {
                     table_id = *id;
                 }
+
+                RouteNla::Metrics(Metrics::Mtu(mtu)) => {
+                    route_mtu = Some(*mtu);
+                }
                 _ => continue,
             }
         }
@@ -521,6 +526,7 @@ impl RouteManagerImpl {
             prefix,
             metric,
             table_id,
+            mtu: route_mtu,
         }))
     }
 
@@ -702,6 +708,11 @@ impl RouteManagerImpl {
             add_message.nlas.push(RouteNla::Priority(metric));
         }
 
+        // Set route MTU
+        if let Some(mtu) = route.mtu {
+            add_message.nlas.push(RouteNla::Metrics(Metrics::Mtu(mtu)));
+        }
+
         // Need to modify the request in place to set the correct flags to be able to replace any
         // existing routes - self.handle.route().add_v4().execute() sets the NLM_F_EXCL flag which
         // will make the request fail if a route with the same destination already exists.
@@ -745,6 +756,7 @@ impl RouteManagerImpl {
     async fn get_mtu_for_route(&self, ip: IpAddr) -> Result<u16> {
         // RECURSION_LIMIT controls how many times we recurse to find the device name by looking up
         // an IP with `get_destination_route`.
+        // TODO: Check route MTU first
         const RECURSION_LIMIT: usize = 10;
         const STANDARD_MTU: u16 = 1500;
         let mut attempted_ip = ip;

@@ -1,5 +1,6 @@
 use super::{Error, Result};
 use mullvad_types::settings::SettingsVersion;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 // ======================================================
@@ -79,7 +80,7 @@ pub fn migrate(settings: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn version_matches(settings: &mut serde_json::Value) -> bool {
+fn version_matches(settings: &serde_json::Value) -> bool {
     settings
         .get("settings_version")
         .map(|version| version == SettingsVersion::V3 as u64)
@@ -218,7 +219,7 @@ mod test {
     fn test_v3_migration() {
         let mut old_settings = serde_json::from_str(V3_SETTINGS).unwrap();
 
-        assert!(version_matches(&mut old_settings));
+        assert!(version_matches(&old_settings));
 
         migrate(&mut old_settings).unwrap();
         let new_settings: serde_json::Value = serde_json::from_str(V4_SETTINGS).unwrap();

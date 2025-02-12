@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 02/08/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -15,14 +15,6 @@ public struct CustomFormatLogHandler: LogHandler {
 
     private let label: String
     private let streams: [TextOutputStream]
-
-    private let dateFormatter = Self.makeDateFormatter()
-
-    public static func makeDateFormatter() -> DateFormatter {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "YYYY-MM-dd HH:mm:ss.SSS"
-        return dateFormatter
-    }
 
     public init(label: String, streams: [TextOutputStream]) {
         self.label = label
@@ -38,6 +30,7 @@ public struct CustomFormatLogHandler: LogHandler {
         }
     }
 
+    // swiftlint:disable:next function_parameter_count
     public func log(
         level: Logger.Level,
         message: Logger.Message,
@@ -48,12 +41,12 @@ public struct CustomFormatLogHandler: LogHandler {
         line: UInt
     ) {
         let mergedMetadata = self.metadata
-            .merging(metadata ?? [:]) { lhs, rhs -> Logger.MetadataValue in
+            .merging(metadata ?? [:]) { _, rhs -> Logger.MetadataValue in
                 rhs
             }
         let prettyMetadata = Self.formatMetadata(mergedMetadata)
         let metadataOutput = prettyMetadata.isEmpty ? "" : " \(prettyMetadata)"
-        let timestamp = dateFormatter.string(from: Date())
+        let timestamp = Date().logFormatted
         let formattedMessage = "[\(timestamp)][\(label)][\(level)]\(metadataOutput) \(message)\n"
 
         for var stream in streams {

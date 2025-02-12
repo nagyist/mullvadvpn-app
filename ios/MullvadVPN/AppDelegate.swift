@@ -3,23 +3,25 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 19/03/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import BackgroundTasks
 import MullvadLogging
+import MullvadMockData
 import MullvadREST
-import MullvadTransport
+import MullvadRustRuntime
+import MullvadSettings
 import MullvadTypes
 import Operations
-import RelayCache
 import StoreKit
 import UIKit
 import UserNotifications
 
-@UIApplicationMain
-class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate, StorePaymentManagerDelegate {
-    private var logger: Logger!
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate, StorePaymentManagerDelegate,
+    @unchecked Sendable {
+    nonisolated(unsafe) private var logger: Logger!
 
     #if targetEnvironment(simulator)
     private var simulatorTunnelProviderHost: SimulatorTunnelProviderHost?
@@ -28,90 +30,133 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     private let operationQueue = AsyncOperationQueue.makeSerial()
 
     private(set) var tunnelStore: TunnelStore!
-    private(set) var tunnelManager: TunnelManager!
+    nonisolated(unsafe) private(set) var tunnelManager: TunnelManager!
     private(set) var addressCache: REST.AddressCache!
 
-    private var proxyFactory: REST.ProxyFactory!
-    private(set) var apiProxy: REST.APIProxy!
-    private(set) var accountsProxy: REST.AccountsProxy!
-    private(set) var devicesProxy: REST.DevicesProxy!
+    private var proxyFactory: ProxyFactoryProtocol!
+    private(set) var apiProxy: APIQuerying!
+    private(set) var accountsProxy: RESTAccountHandling!
+    nonisolated(unsafe) private(set) var devicesProxy: DeviceHandling!
 
     private(set) var addressCacheTracker: AddressCacheTracker!
-    private(set) var relayCacheTracker: RelayCacheTracker!
-    private(set) var storePaymentManager: StorePaymentManager!
-    private var transportMonitor: TransportMonitor!
+    nonisolated(unsafe) private(set) var relayCacheTracker: RelayCacheTracker!
+    nonisolated(unsafe) private(set) var storePaymentManager: StorePaymentManager!
+    nonisolated(unsafe) private var transportMonitor: TransportMonitor!
+    private var settingsObserver: TunnelBlockObserver!
+    private var migrationManager: MigrationManager!
+
+    nonisolated(unsafe) private(set) var accessMethodRepository = AccessMethodRepository()
+    private(set) var appPreferences = AppPreferences()
+    private(set) var shadowsocksLoader: ShadowsocksLoaderProtocol!
+    private(set) var configuredTransportProvider: ProxyConfigurationTransportProvider!
+    private(set) var ipOverrideRepository = IPOverrideRepository()
+    private var launchArguments = LaunchArguments()
+    private var encryptedDNSTransport: EncryptedDNSTransport!
 
     // MARK: - Application lifecycle
 
+    // swiftlint:disable:next function_body_length
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        configureLogging()
+        if let overriddenLaunchArguments = try? ProcessInfo.processInfo.decode(LaunchArguments.self) {
+            launchArguments = overriddenLaunchArguments
+        }
 
-        logger = Logger(label: "AppDelegate")
+        if launchArguments.areAnimationsDisabled {
+            UIView.setAnimationsEnabled(false)
+        }
 
         let containerURL = ApplicationConfiguration.containerURL
+        migrationManager = MigrationManager(cacheDirectory: containerURL)
+        configureLogging()
 
         addressCache = REST.AddressCache(canWriteToCache: true, cacheDirectory: containerURL)
         addressCache.loadFromFile()
 
-        proxyFactory = REST.ProxyFactory.makeProxyFactory(
-            transportProvider: { [weak self] in self?.transportMonitor },
-            addressCache: addressCache
+        setUpProxies(containerURL: containerURL)
+
+        let ipOverrideWrapper = IPOverrideWrapper(
+            relayCache: RelayCache(cacheDirectory: containerURL),
+            ipOverrideRepository: ipOverrideRepository
         )
 
-        apiProxy = proxyFactory.createAPIProxy()
-        accountsProxy = proxyFactory.createAccountsProxy()
-        devicesProxy = proxyFactory.createDevicesProxy()
+        let tunnelSettingsListener = TunnelSettingsListener()
+        let tunnelSettingsUpdater = SettingsUpdater(listener: tunnelSettingsListener)
 
-        let relayCache = RelayCache(cacheDirectory: containerURL)
-        relayCacheTracker = RelayCacheTracker(relayCache: relayCache, application: application, apiProxy: apiProxy)
+        let backgroundTaskProvider = BackgroundTaskProvider(
+            backgroundTimeRemaining: application.backgroundTimeRemaining,
+            application: application
+        )
+
+        relayCacheTracker = RelayCacheTracker(
+            relayCache: ipOverrideWrapper,
+            backgroundTaskProvider: backgroundTaskProvider,
+            apiProxy: apiProxy
+        )
 
         addressCacheTracker = AddressCacheTracker(
-            application: application,
+            backgroundTaskProvider: backgroundTaskProvider,
             apiProxy: apiProxy,
             store: addressCache
         )
 
-        tunnelStore = TunnelStore(application: application)
+        tunnelStore = TunnelStore(application: backgroundTaskProvider)
 
-        tunnelManager = TunnelManager(
-            application: application,
-            tunnelStore: tunnelStore,
-            relayCacheTracker: relayCacheTracker,
-            accountsProxy: accountsProxy,
-            devicesProxy: devicesProxy,
-            apiProxy: apiProxy
+        let relaySelector = RelaySelectorWrapper(
+            relayCache: ipOverrideWrapper
         )
+        tunnelManager = createTunnelManager(
+            backgroundTaskProvider: backgroundTaskProvider,
+            relaySelector: relaySelector
+        )
+
+        settingsObserver = TunnelBlockObserver(didUpdateTunnelSettings: { _, settings in
+            tunnelSettingsListener.onNewSettings?(settings)
+        })
+        tunnelManager.addObserver(settingsObserver)
 
         storePaymentManager = StorePaymentManager(
-            application: application,
+            backgroundTaskProvider: backgroundTaskProvider,
             queue: .default(),
             apiProxy: apiProxy,
-            accountsProxy: accountsProxy
+            accountsProxy: accountsProxy,
+            transactionLog: .default
+        )
+        let urlSessionTransport = URLSessionTransport(urlSession: REST.makeURLSession(addressCache: addressCache))
+        let shadowsocksCache = ShadowsocksConfigurationCache(cacheDirectory: containerURL)
+        let shadowsocksRelaySelector = ShadowsocksRelaySelector(
+            relayCache: ipOverrideWrapper
         )
 
-        let urlSessionTransport = URLSessionTransport(urlSession: REST.makeURLSession())
-        let shadowsocksCache = ShadowsocksConfigurationCache(cacheDirectory: containerURL)
+        shadowsocksLoader = ShadowsocksLoader(
+            cache: shadowsocksCache,
+            relaySelector: shadowsocksRelaySelector,
+            settingsUpdater: tunnelSettingsUpdater
+        )
+
+        encryptedDNSTransport = EncryptedDNSTransport(urlSession: urlSessionTransport.urlSession)
+
+        configuredTransportProvider = ProxyConfigurationTransportProvider(
+            shadowsocksLoader: shadowsocksLoader,
+            addressCache: addressCache,
+            encryptedDNSTransport: encryptedDNSTransport
+        )
+
+        let transportStrategy = TransportStrategy(
+            datasource: accessMethodRepository,
+            shadowsocksLoader: shadowsocksLoader
+        )
+
         let transportProvider = TransportProvider(
             urlSessionTransport: urlSessionTransport,
-            relayCache: relayCache,
             addressCache: addressCache,
-            shadowsocksCache: shadowsocksCache
+            transportStrategy: transportStrategy,
+            encryptedDNSTransport: encryptedDNSTransport
         )
-
-        transportMonitor = TransportMonitor(
-            tunnelManager: tunnelManager,
-            tunnelStore: tunnelStore,
-            transportProvider: transportProvider
-        )
-
-        #if targetEnvironment(simulator)
-        // Configure mock tunnel provider on simulator
-        simulatorTunnelProviderHost = SimulatorTunnelProviderHost(relayCacheTracker: relayCacheTracker)
-        SimulatorTunnelProvider.shared.delegate = simulatorTunnelProviderHost
-        #endif
+        setUpTransportMonitor(transportProvider: transportProvider)
+        setUpSimulatorHost(transportProvider: transportProvider, relaySelector: relaySelector)
 
         registerBackgroundTasks()
         setupPaymentHandler()
@@ -121,6 +166,65 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         startInitialization(application: application)
 
         return true
+    }
+
+    private func createTunnelManager(
+        backgroundTaskProvider: BackgroundTaskProviding,
+        relaySelector: RelaySelectorProtocol
+    ) -> TunnelManager {
+        return TunnelManager(
+            backgroundTaskProvider: backgroundTaskProvider,
+            tunnelStore: tunnelStore,
+            relayCacheTracker: relayCacheTracker,
+            accountsProxy: accountsProxy,
+            devicesProxy: devicesProxy,
+            apiProxy: apiProxy,
+            accessTokenManager: proxyFactory.configuration.accessTokenManager,
+            relaySelector: relaySelector
+        )
+    }
+
+    private func setUpProxies(containerURL: URL) {
+        if launchArguments.target == .screenshots {
+            proxyFactory = MockProxyFactory.makeProxyFactory(
+                transportProvider: REST.AnyTransportProvider { [weak self] in
+                    return self?.transportMonitor.makeTransport()
+                },
+                addressCache: addressCache
+            )
+        } else {
+            proxyFactory = REST.ProxyFactory.makeProxyFactory(
+                transportProvider: REST.AnyTransportProvider { [weak self] in
+                    return self?.transportMonitor.makeTransport()
+                },
+                addressCache: addressCache
+            )
+        }
+        apiProxy = proxyFactory.createAPIProxy()
+        accountsProxy = proxyFactory.createAccountsProxy()
+        devicesProxy = proxyFactory.createDevicesProxy()
+    }
+
+    private func setUpTransportMonitor(transportProvider: TransportProvider) {
+        transportMonitor = TransportMonitor(
+            tunnelManager: tunnelManager,
+            tunnelStore: tunnelStore,
+            transportProvider: transportProvider
+        )
+    }
+
+    private func setUpSimulatorHost(
+        transportProvider: TransportProvider,
+        relaySelector: RelaySelectorWrapper
+    ) {
+        #if targetEnvironment(simulator)
+        // Configure mock tunnel provider on simulator
+        simulatorTunnelProviderHost = SimulatorTunnelProviderHost(
+            relaySelector: relaySelector,
+            transportProvider: transportProvider
+        )
+        SimulatorTunnelProvider.shared.delegate = simulatorTunnelProviderHost
+        #endif
     }
 
     // MARK: - UISceneSession lifecycle
@@ -173,13 +277,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     private func registerAppRefreshTask() {
         let isRegistered = BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTask.appRefresh.identifier,
-            using: nil
+            using: .main
         ) { [self] task in
-            let handle = relayCacheTracker.updateRelays { result in
+
+            nonisolated(unsafe) let handle = relayCacheTracker.updateRelays { result in
                 task.setTaskCompleted(success: result.isSuccess)
             }
 
-            task.expirationHandler = {
+            task.expirationHandler = { @Sendable in
                 handle.cancel()
             }
 
@@ -196,15 +301,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     private func registerKeyRotationTask() {
         let isRegistered = BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTask.privateKeyRotation.identifier,
-            using: nil
+            using: .main
         ) { [self] task in
-            let handle = tunnelManager.rotatePrivateKey { [self] error in
+            nonisolated(unsafe) let handle = tunnelManager.rotatePrivateKey { [self] error in
                 scheduleKeyRotationTask()
-
                 task.setTaskCompleted(success: error == nil)
             }
 
-            task.expirationHandler = {
+            task.expirationHandler = { @Sendable in
                 handle.cancel()
             }
         }
@@ -219,15 +323,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     private func registerAddressCacheUpdateTask() {
         let isRegistered = BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTask.addressCacheUpdate.identifier,
-            using: nil
+            using: .main
         ) { [self] task in
-            let handle = addressCacheTracker.updateEndpoints { [self] result in
+            nonisolated(unsafe) let handle = addressCacheTracker.updateEndpoints { [self] result in
                 scheduleAddressCacheUpdateTask()
-
                 task.setTaskCompleted(success: result.isSuccess)
             }
 
-            task.expirationHandler = {
+            task.expirationHandler = { @Sendable in
                 handle.cancel()
             }
         }
@@ -252,7 +355,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
             let request = BGAppRefreshTaskRequest(identifier: BackgroundTask.appRefresh.identifier)
             request.earliestBeginDate = date
 
-            logger.debug("Schedule app refresh task at \(date.logFormatDate()).")
+            logger.debug("Schedule app refresh task at \(date.logFormatted).")
 
             try BGTaskScheduler.shared.submit(request)
         } catch {
@@ -270,7 +373,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
             request.requiresNetworkConnectivity = true
             request.earliestBeginDate = date
 
-            logger.debug("Schedule key rotation task at \(date.logFormatDate()).")
+            logger.debug("Schedule key rotation task at \(date.logFormatted).")
 
             try BGTaskScheduler.shared.submit(request)
         } catch {
@@ -286,7 +389,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
             request.requiresNetworkConnectivity = true
             request.earliestBeginDate = date
 
-            logger.debug("Schedule address cache update task at \(date.logFormatDate()).")
+            logger.debug("Schedule address cache update task at \(date.logFormatted).")
 
             try BGTaskScheduler.shared.submit(request)
         } catch {
@@ -297,12 +400,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     // MARK: - Private
 
     private func configureLogging() {
-        var loggerBuilder = LoggerBuilder()
-        loggerBuilder.addFileOutput(fileURL: ApplicationConfiguration.logFileURL(for: .mainApp))
+        var loggerBuilder = LoggerBuilder(header: "MullvadVPN version \(Bundle.main.productVersion)")
+        loggerBuilder.addFileOutput(
+            fileURL: ApplicationConfiguration.newLogFileURL(for: .mainApp, in: ApplicationConfiguration.containerURL)
+        )
         #if DEBUG
         loggerBuilder.addOSLogOutput(subsystem: ApplicationTarget.mainApp.bundleIdentifier)
         #endif
         loggerBuilder.install()
+
+        logger = Logger(label: "AppDelegate")
     }
 
     private func addApplicationNotifications(application: UIApplication) {
@@ -335,72 +442,22 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     private func setupNotifications() {
         NotificationManager.shared.notificationProviders = [
+            LatestChangesNotificationProvider(appPreferences: appPreferences),
             TunnelStatusNotificationProvider(tunnelManager: tunnelManager),
             AccountExpirySystemNotificationProvider(tunnelManager: tunnelManager),
             AccountExpiryInAppNotificationProvider(tunnelManager: tunnelManager),
-            RegisteredDeviceInAppNotificationProvider(tunnelManager: tunnelManager),
+            NewDeviceNotificationProvider(tunnelManager: tunnelManager),
         ]
         UNUserNotificationCenter.current().delegate = self
     }
 
     private func startInitialization(application: UIApplication) {
         let wipeSettingsOperation = getWipeSettingsOperation()
+        let loadTunnelStoreOperation = getLoadTunnelStoreOperation()
+        let migrateSettingsOperation = getMigrateSettingsOperation(application: application)
+        let initTunnelManagerOperation = getInitTunnelManagerOperation()
 
-        let loadTunnelStoreOperation = AsyncBlockOperation(dispatchQueue: .main) { [self] finish in
-            tunnelStore.loadPersistentTunnels { [self] error in
-                if let error {
-                    logger.error(
-                        error: error,
-                        message: "Failed to load persistent tunnels."
-                    )
-                }
-                finish(nil)
-            }
-        }
-
-        let migrateSettingsOperation = AsyncBlockOperation(dispatchQueue: .main) { [self] finish in
-            SettingsManager.migrateStore(with: proxyFactory) { [self] migrationResult in
-                switch migrationResult {
-                case .success:
-                    // Tell the tunnel to re-read tunnel configuration after migration.
-                    logger.debug("Reconnect the tunnel after settings migration.")
-                    tunnelManager.reconnectTunnel(selectNewRelay: true)
-                    fallthrough
-
-                case .nothing:
-                    finish(nil)
-
-                case let .failure(error):
-                    let migrationUIHandler = application.connectedScenes.first { $0 is SettingsMigrationUIHandler }
-                        as? SettingsMigrationUIHandler
-
-                    if let migrationUIHandler {
-                        migrationUIHandler.showMigrationError(error) {
-                            finish(error)
-                        }
-                    } else {
-                        finish(error)
-                    }
-                }
-            }
-        }
         migrateSettingsOperation.addDependencies([wipeSettingsOperation, loadTunnelStoreOperation])
-
-        let initTunnelManagerOperation = AsyncBlockOperation(dispatchQueue: .main) { finish in
-            self.tunnelManager.loadConfiguration { error in
-                // TODO: avoid throwing fatal error and show the problem report UI instead.
-                if let error {
-                    fatalError(error.localizedDescription)
-                }
-
-                self.logger.debug("Finished initialization.")
-
-                NotificationManager.shared.updateNotifications()
-                self.storePaymentManager.startPaymentQueueMonitoring()
-
-                finish(nil)
-            }
-        }
         initTunnelManagerOperation.addDependency(migrateSettingsOperation)
 
         operationQueue.addOperations(
@@ -414,7 +471,79 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         )
     }
 
-    /// Returns an operation that acts on two conditions:
+    private func getLoadTunnelStoreOperation() -> AsyncBlockOperation {
+        AsyncBlockOperation(dispatchQueue: .main) { [self] finish in
+            MainActor.assumeIsolated {
+                tunnelStore.loadPersistentTunnels { [self] error in
+                    if let error {
+                        logger.error(
+                            error: error,
+                            message: "Failed to load persistent tunnels."
+                        )
+                    }
+                    finish(nil)
+                }
+            }
+        }
+    }
+
+    private func getMigrateSettingsOperation(application: UIApplication) -> AsyncBlockOperation {
+        AsyncBlockOperation(dispatchQueue: .main, block: { [self] (finish: @escaping @Sendable (Error?) -> Void) in
+            MainActor.assumeIsolated {
+                migrationManager
+                    .migrateSettings(store: SettingsManager.store) { [self] migrationResult in
+                        switch migrationResult {
+                        case .success:
+                            // Tell the tunnel to re-read tunnel configuration after migration.
+                            logger.debug("Successful migration from UI Process")
+                            tunnelManager.reconnectTunnel(selectNewRelay: true)
+                            fallthrough
+
+                        case .nothing:
+                            logger.debug("Attempted migration from UI Process, but found nothing to do")
+                            finish(nil)
+
+                        case let .failure(error):
+                            logger.error("Failed migration from UI Process: \(error)")
+                            MainActor.assumeIsolated {
+                                let migrationUIHandler = application.connectedScenes
+                                    .first { $0 is SettingsMigrationUIHandler } as? SettingsMigrationUIHandler
+
+                                if let migrationUIHandler {
+                                    migrationUIHandler.showMigrationError(error) {
+                                        MainActor.assumeIsolated {
+                                            finish(error)
+                                        }
+                                    }
+                                } else {
+                                    finish(error)
+                                }
+                            }
+                        }
+                    }
+            }
+        })
+    }
+
+    private func getInitTunnelManagerOperation() -> AsyncBlockOperation {
+        // This operation is always treated as successful no matter what the configuration load yields.
+        // If the tunnel settings or device state can't be read, we simply pretend they are not there
+        // and leave user in logged out state. VPN config will be removed as well.
+        AsyncBlockOperation(dispatchQueue: .main) { finish in
+            self.tunnelManager.loadConfiguration {
+                self.logger.debug("Finished initialization.")
+
+                NotificationManager.shared.updateNotifications()
+                self.storePaymentManager.start()
+
+                finish(nil)
+            }
+        }
+    }
+
+    /// Returns an operation that acts on the following conditions:
+    /// 1. If the app has never been launched, preload with default settings.
+    /// - or -
     /// 1. Has the app been launched at least once after install? (`FirstTimeLaunch.hasFinished`)
     /// 2. Has the app - at some point in time - been updated from a version compatible with wiping settings?
     /// (`SettingsManager.getShouldWipeSettings()`)
@@ -422,7 +551,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     /// compatible, thus triggering a settings wipe.
     private func getWipeSettingsOperation() -> AsyncBlockOperation {
         AsyncBlockOperation {
-            if !FirstTimeLaunch.hasFinished, SettingsManager.getShouldWipeSettings() {
+            let appHasNeverBeenLaunched = !FirstTimeLaunch.hasFinished && !SettingsManager.getShouldWipeSettings()
+            let appWasLaunchedAfterReinstall = !FirstTimeLaunch.hasFinished && SettingsManager.getShouldWipeSettings()
+
+            if appHasNeverBeenLaunched {
+                try? SettingsManager.writeSettings(LatestTunnelSettings())
+            } else if appWasLaunchedAfterReinstall {
                 if let deviceState = try? SettingsManager.readDeviceState(),
                    let accountData = deviceState.accountData,
                    let deviceData = deviceState.deviceData {
@@ -436,6 +570,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
                 }
 
                 SettingsManager.resetStore(completely: true)
+                try? SettingsManager.writeSettings(LatestTunnelSettings())
+
+                // Default access methods need to be repopulated again after settings wipe.
+                self.accessMethodRepository.addDefaultsMethods()
+                // At app startup, the relay cache tracker will get populated with a list of overriden IPs.
+                // The overriden IPs will get wiped, therefore, the cache needs to be pruned as well.
+                try? self.relayCacheTracker.refreshCachedRelays()
             }
 
             FirstTimeLaunch.setHasFinished()
@@ -445,7 +586,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     // MARK: - StorePaymentManagerDelegate
 
-    func storePaymentManager(_ manager: StorePaymentManager, didRequestAccountTokenFor payment: SKPayment) -> String? {
+    nonisolated func storePaymentManager(
+        _ manager: StorePaymentManager,
+        didRequestAccountTokenFor payment: SKPayment
+    ) -> String? {
         // Since we do not persist the relation between payment and account number between the
         // app launches, we assume that all successful purchases belong to the active account
         // number.
@@ -454,29 +598,30 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     // MARK: - UNUserNotificationCenterDelegate
 
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let blockOperation = AsyncBlockOperation(dispatchQueue: .main) {
-            NotificationManager.shared.handleSystemNotificationResponse(response)
+        nonisolated(unsafe) let nonisolatedResponse = response
+        nonisolated(unsafe) let nonisolatedCompletionHandler = completionHandler
 
-            completionHandler()
+        let blockOperation = AsyncBlockOperation(dispatchQueue: .main) {
+            NotificationManager.shared.handleSystemNotificationResponse(nonisolatedResponse)
+
+            nonisolatedCompletionHandler()
         }
 
         operationQueue.addOperation(blockOperation)
     }
 
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        if #available(iOS 14.0, *) {
-            completionHandler([.list, .banner, .sound])
-        } else {
-            completionHandler([.sound, .alert])
-        }
+        completionHandler([.list, .banner, .sound])
     }
+
+    // swiftlint:disable:next file_length
 }

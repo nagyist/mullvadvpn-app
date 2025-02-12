@@ -1,10 +1,14 @@
+use std::time::Duration;
+
 use futures::join;
-use mullvad_api::{
-    self,
-    rest::{Error, RequestServiceHandle},
-};
-use mullvad_types::location::{AmIMullvad, GeoIpLocation};
+use mullvad_api::rest::{Error, RequestServiceHandle};
+use mullvad_types::location::{AmIMullvad, GeoIpLocation, LocationEventData};
+use std::sync::LazyLock;
+use talpid_core::mpsc::Sender;
+use talpid_future::retry::{retry_future, ExponentialBackoff, Jittered};
 use talpid_types::ErrorExt;
+
+use crate::{DaemonEventSender, InternalDaemonEvent};
 
 // Define the Mullvad connection checking api endpoint.
 //
@@ -15,29 +19,95 @@ use talpid_types::ErrorExt;
 // production build, a warning will be logged and the env variable *won´t* have
 // any effect on the api call. The default host name `am.i.mullvad.net` will
 // always be used in release mode.
-lazy_static::lazy_static! {
-    static ref MULLVAD_CONNCHECK_HOST: String = {
-        const DEFAULT_CONNCHECK_HOST: &str = "am.i.mullvad.net";
-        let conncheck_host_var = std::env::var("MULLVAD_CONNCHECK_HOST").ok();
-        let host = if cfg!(feature = "api-override") {
-            match conncheck_host_var.as_deref() {
-                Some(host) => {
-                    log::debug!("Overriding conncheck endpoint. Using {}", &host);
-                    host
-                },
-                None => DEFAULT_CONNCHECK_HOST,
+static MULLVAD_CONNCHECK_HOST: LazyLock<String> = LazyLock::new(|| {
+    const DEFAULT_CONNCHECK_HOST: &str = "am.i.mullvad.net";
+    let conncheck_host_var = std::env::var("MULLVAD_CONNCHECK_HOST").ok();
+    let host = if cfg!(feature = "api-override") {
+        match conncheck_host_var.as_deref() {
+            Some(host) => {
+                log::debug!("Overriding conncheck endpoint. Using {}", &host);
+                host
             }
-        } else {
-            if conncheck_host_var.is_some() {
-                log::warn!("These variables are ignored in production builds: MULLVAD_CONNCHECK_HOST");
-            };
-            DEFAULT_CONNCHECK_HOST
+            None => DEFAULT_CONNCHECK_HOST,
+        }
+    } else {
+        if conncheck_host_var.is_some() {
+            log::warn!("These variables are ignored in production builds: MULLVAD_CONNCHECK_HOST");
         };
-        host.to_string()
+        DEFAULT_CONNCHECK_HOST
     };
+    host.to_string()
+});
+
+const LOCATION_RETRY_STRATEGY: Jittered<ExponentialBackoff> =
+    Jittered::jitter(ExponentialBackoff::new(Duration::from_secs(1), 4));
+
+/// Handler for request to am.i.mullvad.net, manages in-flight request and validity of responses.
+pub(crate) struct GeoIpHandler {
+    /// Unique ID for each request. If the ID attached to the
+    /// [`InternalDaemonEvent::LocationEvent`] used by [`crate::Daemon::handle_location_event`] to
+    /// determine if the location belongs to the current tunnel state.
+    pub request_id: usize,
+    rest_service: RequestServiceHandle,
+    location_sender: DaemonEventSender,
 }
 
-pub async fn send_location_request(
+impl GeoIpHandler {
+    pub fn new(rest_service: RequestServiceHandle, location_sender: DaemonEventSender) -> Self {
+        Self {
+            request_id: 0,
+            rest_service,
+            location_sender,
+        }
+    }
+
+    /// Send a location request to am.i.mullvad.net. When it arrives, send an
+    /// [`InternalDaemonEvent::LocationEvent`], which triggers an update of the current
+    /// tunnel state with the `ipv4` and/or `ipv6` fields filled in.
+    pub fn send_geo_location_request(&mut self, use_ipv6: bool) {
+        // Increment request ID
+        self.request_id = self.request_id.wrapping_add(1);
+
+        self.abort_current_request();
+
+        let request_id = self.request_id;
+        let rest_service = self.rest_service.clone();
+        let location_sender = self.location_sender.clone();
+        tokio::spawn(async move {
+            if let Ok(location) = get_geo_location_with_retry(use_ipv6, rest_service).await {
+                let _ =
+                    location_sender.send(InternalDaemonEvent::LocationEvent(LocationEventData {
+                        request_id,
+                        location,
+                    }));
+            }
+        });
+    }
+
+    /// Abort any ongoing call to am.i.mullvad.net
+    pub fn abort_current_request(&mut self) {
+        self.rest_service.reset();
+    }
+}
+
+/// Fetch the current `GeoIpLocation` from am.i.mullvad.net. Handles retries on network errors.
+async fn get_geo_location_with_retry(
+    use_ipv6: bool,
+    rest_service: RequestServiceHandle,
+) -> Result<GeoIpLocation, Error> {
+    log::debug!("Fetching GeoIpLocation");
+    retry_future(
+        move || send_location_request(rest_service.clone(), use_ipv6),
+        move |result| match result {
+            Err(error) => error.is_network_error(),
+            _ => false,
+        },
+        LOCATION_RETRY_STRATEGY,
+    )
+    .await
+}
+
+async fn send_location_request(
     request_sender: RequestServiceHandle,
     use_ipv6: bool,
 ) -> Result<GeoIpLocation, Error> {
@@ -84,29 +154,13 @@ async fn send_location_request_internal(
     service: RequestServiceHandle,
 ) -> Result<AmIMullvad, Error> {
     let future_service = service.clone();
-    let request = mullvad_api::rest::RestRequest::get(uri)?;
-    let response = future_service.request(request).await?;
-    mullvad_api::rest::deserialize_body(response).await
+    let request = mullvad_api::rest::get(uri)?;
+    future_service.request(request).await?.deserialize().await
 }
 
 fn log_network_error(err: Error, version: &'static str) {
-    let err_message = &format!("Unable to fetch {version} GeoIP location");
-    match err {
-        Error::HyperError(hyper_err) if hyper_err.is_connect() => {
-            if let Some(cause) = hyper_err.into_cause() {
-                if let Some(err) = cause.downcast_ref::<std::io::Error>() {
-                    // Don't log ENETUNREACH errors, they are not informative.
-                    if err.raw_os_error() == Some(libc::ENETUNREACH) {
-                        return;
-                    }
-                    log::debug!("{}: Hyper connect error: {}", err_message, cause);
-                }
-            } else {
-                log::error!("Hyper Connection error did not contain a cause!");
-            }
-        }
-        any_other_error => {
-            log::debug!("{}", any_other_error.display_chain_with_msg(err_message));
-        }
-    };
+    if !err.is_offline() {
+        let err_message = &format!("Unable to fetch {version} GeoIP location");
+        log::debug!("{}", err.display_chain_with_msg(err_message));
+    }
 }

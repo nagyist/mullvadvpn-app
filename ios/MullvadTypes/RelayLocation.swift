@@ -3,12 +3,12 @@
 //  MullvadTypes
 //
 //  Created by pronebird on 21/10/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 
-public enum RelayLocation: Codable, Hashable, CustomDebugStringConvertible {
+public enum RelayLocation: Codable, Hashable, CustomDebugStringConvertible, Sendable {
     case country(String)
     case city(String, String)
     case hostname(String, String, String)
@@ -63,7 +63,7 @@ public enum RelayLocation: Codable, Hashable, CustomDebugStringConvertible {
     }
 
     /// A list of `RelayLocation` items preceding the given one in the relay tree
-    public var ascendants: [RelayLocation] {
+    public var ancestors: [RelayLocation] {
         switch self {
         case let .hostname(country, city, _):
             return [.country(country), .city(country, city)]
@@ -104,5 +104,40 @@ public enum RelayLocation: Codable, Hashable, CustomDebugStringConvertible {
         case let .hostname(country, city, host):
             return "\(country)-\(city)-\(host)"
         }
+    }
+}
+
+public struct UserSelectedRelays: Codable, Equatable, Sendable {
+    public let locations: [RelayLocation]
+    public let customListSelection: CustomListSelection?
+
+    public init(locations: [RelayLocation], customListSelection: CustomListSelection? = nil) {
+        self.locations = locations
+        self.customListSelection = customListSelection
+    }
+}
+
+extension UserSelectedRelays {
+    public struct CustomListSelection: Codable, Equatable, Sendable {
+        /// The ID of the custom list that the selected relays belong to.
+        public let listId: UUID
+        /// Whether the selected relays are subnodes or the custom list itself.
+        public let isList: Bool
+
+        public init(listId: UUID, isList: Bool) {
+            self.listId = listId
+            self.isList = isList
+        }
+    }
+}
+
+@available(*, deprecated, message: "Use UserSelectedRelays instead.")
+public struct RelayLocations: Codable, Equatable {
+    public let locations: [RelayLocation]
+    public let customListId: UUID?
+
+    public init(locations: [RelayLocation], customListId: UUID? = nil) {
+        self.locations = locations
+        self.customListId = customListId
     }
 }

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 07/07/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -27,20 +27,19 @@ class RevokedDeviceViewController: UIViewController, RootContainment {
             value: "Device is inactive",
             comment: ""
         )
-        titleLabel.font = UIFont.systemFont(ofSize: 32)
         return titleLabel
     }()
 
     private lazy var bodyLabel: UILabel = {
         let bodyLabel = UILabel()
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
-        bodyLabel.font = UIFont.systemFont(ofSize: 17)
+        bodyLabel.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
         bodyLabel.numberOfLines = 0
         bodyLabel.textColor = .white
         bodyLabel.text = NSLocalizedString(
             "DESCRIPTION_LABEL",
             tableName: "RevokedDevice",
-            value: "You have revoked this device. To connect again, you will need to log back in.",
+            value: "You have removed this device. To connect again, you will need to log back in.",
             comment: ""
         )
         return bodyLabel
@@ -49,7 +48,7 @@ class RevokedDeviceViewController: UIViewController, RootContainment {
     private lazy var footerLabel: UILabel = {
         let bodyLabel = UILabel()
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
-        bodyLabel.font = UIFont.systemFont(ofSize: 17)
+        bodyLabel.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
         bodyLabel.numberOfLines = 0
         bodyLabel.textColor = .white
         bodyLabel.text = NSLocalizedString(
@@ -63,6 +62,7 @@ class RevokedDeviceViewController: UIViewController, RootContainment {
 
     private lazy var logoutButton: AppButton = {
         let button = AppButton(style: .default)
+        button.setAccessibilityIdentifier(.revokedDeviceLoginButton)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setTitle(
             NSLocalizedString(
@@ -109,6 +109,7 @@ class RevokedDeviceViewController: UIViewController, RootContainment {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        view.setAccessibilityIdentifier(.revokedDeviceView)
         view.backgroundColor = .secondaryColor
         view.directionalLayoutMargins = UIMetrics.contentLayoutMargins
 

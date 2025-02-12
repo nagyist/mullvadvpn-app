@@ -1,41 +1,132 @@
+[workspace.package]
+authors = ["Mullvad VPN"]
+repository = "https://github.com/mullvad/mullvadvpn-app/"
+license = "GPL-3.0"
+edition = "2021"
+# Must be less than or equal to `channel` in `rust-toolchain.toml`
+rust-version = "1.83.0"
+
 [workspace]
 resolver = "2"
 members = [
-    "android/translations-converter",
-    "ios/MullvadTransport/shadowsocks-proxy",
-    "mullvad-daemon",
-    "mullvad-cli",
-    "mullvad-fs",
-    "mullvad-setup",
-    "mullvad-problem-report",
-    "mullvad-jni",
-    "mullvad-paths",
-    "mullvad-relay-selector",
-    "mullvad-types",
-    "mullvad-api",
-    "mullvad-exclude",
-    "mullvad-version",
-    "mullvad-nsis",
-    "talpid-openvpn-plugin",
-    "talpid-core",
-    "talpid-dbus",
-    "talpid-openvpn",
-    "talpid-platform-metadata",
-    "talpid-routing",
-    "talpid-time",
-    "talpid-tunnel",
-    "talpid-tunnel-config-client",
-    "talpid-windows-net",
-    "talpid-wireguard",
-    "mullvad-management-interface",
-    "tunnel-obfuscation",
+  "android/translations-converter",
+  "desktop/packages/nseventforwarder",
+  "desktop/packages/win-shortcuts",
+  "mullvad-api",
+  "mullvad-cli",
+  "mullvad-daemon",
+  "mullvad-encrypted-dns-proxy",
+  "mullvad-exclude",
+  "mullvad-fs",
+  "mullvad-ios",
+  "mullvad-jni",
+  "mullvad-leak-checker",
+  "mullvad-management-interface",
+  "mullvad-nsis",
+  "mullvad-paths",
+  "mullvad-problem-report",
+  "mullvad-relay-selector",
+  "mullvad-setup",
+  "mullvad-types",
+  "mullvad-types/intersection-derive",
+  "mullvad-version",
+  "talpid-core",
+  "talpid-dbus",
+  "talpid-future",
+  "talpid-macos",
+  "talpid-net",
+  "talpid-openvpn",
+  "talpid-openvpn-plugin",
+  "talpid-platform-metadata",
+  "talpid-routing",
+  "talpid-time",
+  "talpid-tunnel",
+  "talpid-tunnel-config-client",
+  "talpid-windows",
+  "talpid-wireguard",
+  "tunnel-obfuscation",
+  "wireguard-go-rs",
+  "windows-installer",
 ]
+# Default members dictate what is built when running `cargo build` in the root directory.
+# This is set to a minimal set of packages to speed up the build process and avoid building
+# crates which might not compile without additional input, such as the `windows-installer` crate.
+# To build or test everything, add `--workspace` to your cargo commands.
+default-members = ["mullvad-cli", "mullvad-daemon", "mullvad-version"]
+
+# Keep all lints in sync with `test/Cargo.toml`
+[workspace.lints.rust]
+# Security
+non_ascii_idents = "forbid"
+
+# Deny old style Rust
+rust_2018_idioms = { level = "deny", priority = -1 }
+macro_use_extern_crate = "deny"
+absolute_paths_not_starting_with_crate = "deny"
+
+# Easy to read style and opinionated best practices
+explicit_outlives_requirements = "warn"
+missing_abi = "deny"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+single_use_lifetimes = "warn"
+
+
+[workspace.lints.clippy]
+unused_async = "deny"
+
+[workspace.dependencies]
+hickory-proto = "0.24.3"
+hickory-resolver = "0.24.3"
+hickory-server = { version = "0.24.3", features = ["resolver"] }
+tokio = { version = "1.42" }
+parity-tokio-ipc = "0.9"
+futures = "0.3.15"
+
+# Tonic and related crates
+tonic = "0.12.3"
+tonic-build = { version = "0.10.0", default-features = false }
+tower = { version = "0.5.1", features = ["util"] }
+prost = "0.13.3"
+prost-types = "0.13.3"
+hyper-util = { version = "0.1.8", features = [
+  "client",
+  "client-legacy",
+  "http2",
+  "http1",
+] }
+
+env_logger = "0.10.0"
+thiserror = "2.0"
+anyhow = "1.0"
+log = "0.4"
+
+shadowsocks = "1.20.3"
+shadowsocks-service = "1.20.3"
+
+windows-sys = "0.52.0"
+
+chrono = { version = "0.4.26", default-features = false }
+clap = { version = "4.4.18", features = ["cargo", "derive"] }
+once_cell = "1.16"
+serde = "1.0.204"
+serde_json = "1.0.122"
+
+pnet_packet = "0.35.0"
+ipnetwork = "0.20"
+tun = { version = "0.7", features = ["async"] }
+socket2 = "0.5.7"
+
+# Test dependencies
+proptest = "1.4"
 
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
+strip = true
 
-# Key generation may take over one minute without optimizations
-# enabled.
+# Key generation may take over one minute without optimizations enabled.
 [profile.dev.package."classic-mceliece-rust"]
+opt-level = 3
+[profile.release.package."classic-mceliece-rust"]
 opt-level = 3

@@ -3,17 +3,19 @@
 //  TunnelState
 //
 //  Created by pronebird on 11/08/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
+import MullvadREST
 import MullvadTypes
-import TunnelProviderMessaging
+import PacketTunnelCore
+@preconcurrency import WireGuardKitTypes
 
 /// A struct describing the tunnel status.
-struct TunnelStatus: Equatable, CustomStringConvertible {
+struct TunnelStatus: Equatable, CustomStringConvertible, Sendable {
     /// Tunnel status returned by tunnel process.
-    var packetTunnelStatus = PacketTunnelStatus()
+    var observedState: ObservedState = .disconnected
 
     /// Tunnel state.
     var state: TunnelState = .disconnected
@@ -21,10 +23,14 @@ struct TunnelStatus: Equatable, CustomStringConvertible {
     var description: String {
         var s = "\(state), network "
 
-        if packetTunnelStatus.isNetworkReachable {
-            s += "reachable"
+        if let connectionState = observedState.connectionState {
+            if connectionState.isNetworkReachable {
+                s += "reachable"
+            } else {
+                s += "unreachable"
+            }
         } else {
-            s += "unreachable"
+            s += "reachability unknown"
         }
 
         return s
@@ -32,7 +38,7 @@ struct TunnelStatus: Equatable, CustomStringConvertible {
 }
 
 /// An enum that describes the tunnel state.
-enum TunnelState: Equatable, CustomStringConvertible {
+enum TunnelState: Equatable, CustomStringConvertible, Sendable {
     enum WaitingForConnectionReason {
         /// Tunnel connection is down.
         case noConnection
@@ -44,10 +50,13 @@ enum TunnelState: Equatable, CustomStringConvertible {
     case pendingReconnect
 
     /// Connecting the tunnel.
-    case connecting(PacketTunnelRelay?)
+    case connecting(SelectedRelays?, isPostQuantum: Bool, isDaita: Bool)
+
+    /// Negotiating an ephemeral peer either for post-quantum resistance or Daita
+    case negotiatingEphemeralPeer(SelectedRelays, PrivateKey, isPostQuantum: Bool, isDaita: Bool)
 
     /// Connected the tunnel
-    case connected(PacketTunnelRelay)
+    case connected(SelectedRelays, isPostQuantum: Bool, isDaita: Bool)
 
     /// Disconnecting the tunnel
     case disconnecting(ActionAfterDisconnect)
@@ -57,54 +66,83 @@ enum TunnelState: Equatable, CustomStringConvertible {
 
     /// Reconnecting the tunnel.
     /// Transition to this state happens when:
-    /// 1. Asking the running tunnel to reconnect to new relay via IPC.
-    /// 2. Tunnel attempts to reconnect to new relay as the current relay appears to be
+    /// 1. Asking the running tunnel to reconnect to new relays via IPC.
+    /// 2. Tunnel attempts to reconnect to new relays as the current relays appear to be
     ///    dysfunctional.
-    case reconnecting(PacketTunnelRelay)
+    case reconnecting(SelectedRelays, isPostQuantum: Bool, isDaita: Bool)
 
     /// Waiting for connectivity to come back up.
     case waitingForConnectivity(WaitingForConnectionReason)
 
+    /// Error state.
+    case error(BlockedStateReason)
+
     var description: String {
         switch self {
         case .pendingReconnect:
-            return "pending reconnect after disconnect"
-        case let .connecting(tunnelRelay):
-            if let tunnelRelay {
-                return "connecting to \(tunnelRelay.hostname)"
+            "pending reconnect after disconnect"
+        case let .connecting(tunnelRelays, isPostQuantum, isDaita):
+            if let tunnelRelays {
+                """
+                connecting \(isPostQuantum ? "(PQ) " : ""), \
+                daita: \(isDaita), \
+                to \(tunnelRelays.exit.hostname)\
+                \(tunnelRelays.entry.flatMap { " via \($0.hostname)" } ?? "")
+                """
             } else {
-                return "connecting, fetching relay"
+                "connecting\(isPostQuantum ? " (PQ)" : ""), fetching relay"
             }
-        case let .connected(tunnelRelay):
-            return "connected to \(tunnelRelay.hostname)"
+        case let .connected(tunnelRelays, isPostQuantum, isDaita):
+            """
+            connected \(isPostQuantum ? "(PQ) " : ""), \
+            daita: \(isDaita), \
+            to \(tunnelRelays.exit.hostname)\
+            \(tunnelRelays.entry.flatMap { " via \($0.hostname)" } ?? "")
+            """
         case let .disconnecting(actionAfterDisconnect):
-            return "disconnecting and then \(actionAfterDisconnect)"
+            "disconnecting and then \(actionAfterDisconnect)"
         case .disconnected:
-            return "disconnected"
-        case let .reconnecting(tunnelRelay):
-            return "reconnecting to \(tunnelRelay.hostname)"
+            "disconnected"
+        case let .reconnecting(tunnelRelays, isPostQuantum, isDaita):
+            """
+            reconnecting \(isPostQuantum ? "(PQ) " : ""), \
+            daita: \(isDaita), \
+            to \(tunnelRelays.exit.hostname)\
+            \(tunnelRelays.entry.flatMap { " via \($0.hostname)" } ?? "")
+            """
         case .waitingForConnectivity:
-            return "waiting for connectivity"
+            "waiting for connectivity"
+        case let .error(blockedStateReason):
+            "error state: \(blockedStateReason)"
+        case let .negotiatingEphemeralPeer(tunnelRelays, _, isPostQuantum, isDaita):
+            """
+            negotiating key with exit relay: \(tunnelRelays.exit.hostname)\
+            \(tunnelRelays.entry.flatMap { " via \($0.hostname)" } ?? ""), \
+            isPostQuantum: \(isPostQuantum), isDaita: \(isDaita)
+            """
         }
     }
 
     var isSecured: Bool {
         switch self {
-        case .reconnecting, .connecting, .connected, .waitingForConnectivity(.noConnection):
-            return true
-        case .pendingReconnect, .disconnecting, .disconnected, .waitingForConnectivity(.noNetwork):
-            return false
+        case .reconnecting, .connecting, .connected, .waitingForConnectivity(.noConnection), .error(.accountExpired),
+             .error(.deviceRevoked), .negotiatingEphemeralPeer:
+            true
+        case .pendingReconnect, .disconnecting, .disconnected, .waitingForConnectivity(.noNetwork), .error:
+            false
         }
     }
 
-    var relay: PacketTunnelRelay? {
+    var relays: SelectedRelays? {
         switch self {
-        case let .connected(relay), let .reconnecting(relay):
-            return relay
-        case let .connecting(relay):
-            return relay
-        case .disconnecting, .disconnected, .waitingForConnectivity, .pendingReconnect:
-            return nil
+        case let .connected(relays, _, _),
+             let .reconnecting(relays, _, _),
+             let .negotiatingEphemeralPeer(relays, _, _, _):
+            relays
+        case let .connecting(relays, _, _):
+            relays
+        case .disconnecting, .disconnected, .waitingForConnectivity, .pendingReconnect, .error:
+            nil
         }
     }
 }
@@ -120,9 +158,9 @@ enum ActionAfterDisconnect: CustomStringConvertible {
     var description: String {
         switch self {
         case .nothing:
-            return "do nothing"
+            "do nothing"
         case .reconnect:
-            return "reconnect"
+            "reconnect"
         }
     }
 }

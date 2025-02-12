@@ -3,20 +3,25 @@
 //  TunnelStatusNotificationProvider
 //
 //  Created by pronebird on 20/08/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
+import PacketTunnelCore
 
-final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotificationProvider {
+final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotificationProvider, @unchecked Sendable {
     private var isWaitingForConnectivity = false
     private var noNetwork = false
-    private var packetTunnelError: String?
+    private var packetTunnelError: BlockedStateReason?
     private var tunnelManagerError: Error?
     private var tunnelObserver: TunnelBlockObserver?
 
     override var identifier: NotificationProviderIdentifier {
         .tunnelStatusNotificationProvider
+    }
+
+    override var priority: NotificationPriority {
+        .critical
     }
 
     var notificationDescriptor: InAppNotificationDescriptor? {
@@ -40,10 +45,10 @@ final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotific
             didLoadConfiguration: { [weak self] tunnelManager in
                 self?.handleTunnelStatus(tunnelManager.tunnelStatus)
             },
-            didUpdateTunnelStatus: { [weak self] tunnelManager, tunnelStatus in
+            didUpdateTunnelStatus: { [weak self] _, tunnelStatus in
                 self?.handleTunnelStatus(tunnelStatus)
             },
-            didFailWithError: { [weak self] tunnelManager, error in
+            didFailWithError: { [weak self] _, error in
                 self?.tunnelManagerError = error
             }
         )
@@ -55,9 +60,7 @@ final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotific
     // MARK: - Private
 
     private func handleTunnelStatus(_ tunnelStatus: TunnelStatus) {
-        let invalidateForTunnelError = updateLastTunnelError(
-            tunnelStatus.packetTunnelStatus.lastErrors.first?.localizedDescription
-        )
+        let invalidateForTunnelError = updateLastTunnelError(tunnelStatus.state)
         let invalidateForManagerError = updateTunnelManagerError(tunnelStatus.state)
         let invalidateForConnectivity = updateConnectivity(tunnelStatus.state)
         let invalidateForNetwork = updateNetwork(tunnelStatus.state)
@@ -67,7 +70,9 @@ final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotific
         }
     }
 
-    private func updateLastTunnelError(_ lastTunnelError: String?) -> Bool {
+    private func updateLastTunnelError(_ tunnelState: TunnelState) -> Bool {
+        let lastTunnelError = tunnelError(from: tunnelState)
+
         if packetTunnelError != lastTunnelError {
             packetTunnelError = lastTunnelError
 
@@ -116,22 +121,34 @@ final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotific
         return false
     }
 
-    private func notificationDescription(for packetTunnelError: String) -> InAppNotificationDescriptor {
+    // Extracts the blocked state reason from tunnel state with a few exceptions.
+    // We already have dedicated screens for .accountExpired and .deviceRevoked,
+    // so no need to show banners as well.
+    private func tunnelError(from tunnelState: TunnelState) -> BlockedStateReason? {
+        let errorsToIgnore: [BlockedStateReason] = [.accountExpired, .deviceRevoked]
+
+        if case let .error(blockedStateReason) = tunnelState, !errorsToIgnore.contains(blockedStateReason) {
+            return blockedStateReason
+        }
+
+        return nil
+    }
+
+    private func notificationDescription(for packetTunnelError: BlockedStateReason) -> InAppNotificationDescriptor {
         InAppNotificationDescriptor(
             identifier: identifier,
             style: .error,
             title: NSLocalizedString(
-                "TUNNEL_LEAKING_INAPP_NOTIFICATION_TITLE",
-                value: "NETWORK TRAFFIC MIGHT BE LEAKING",
+                "TUNNEL_BLOCKED_INAPP_NOTIFICATION_TITLE",
+                value: "BLOCKING INTERNET",
                 comment: ""
             ),
             body: .init(string: String(
                 format: NSLocalizedString(
-                    "PACKET_TUNNEL_ERROR_INAPP_NOTIFICATION_BODY",
-                    value: "Could not configure VPN: %@",
+                    "TUNNEL_BLOCKED_INAPP_NOTIFICATION_BODY",
+                    value: localizedReasonForBlockedStateError(packetTunnelError),
                     comment: ""
-                ),
-                packetTunnelError
+                )
             ))
         )
     }
@@ -214,6 +231,36 @@ final class TunnelStatusNotificationProvider: NotificationProvider, InAppNotific
                     comment: ""
                 )
             )
+        )
+    }
+
+    private func localizedReasonForBlockedStateError(_ error: BlockedStateReason) -> String {
+        let errorString: String
+
+        switch error {
+        case .outdatedSchema:
+            errorString = "Unable to start tunnel connection after update. Please disconnect and reconnect."
+        case .noRelaysSatisfyingFilterConstraints:
+            errorString = "No servers match your location filter. Try changing filter settings."
+        case .multihopEntryEqualsExit:
+            errorString = "The entry and exit servers cannot be the same. Try changing one to a new server or location."
+        case .noRelaysSatisfyingDaitaConstraints:
+            errorString = "No DAITA compatible servers match your location settings. Try changing location."
+        case .noRelaysSatisfyingConstraints:
+            errorString = "No servers match your settings, try changing server or other settings."
+        case .invalidAccount:
+            errorString = "You are logged in with an invalid account number. Please log out and try another one."
+        case .deviceLoggedOut:
+            errorString = "Unable to authenticate account. Please log out and log back in."
+        default:
+            errorString = "Unable to start tunnel connection. Please send a problem report."
+        }
+
+        return NSLocalizedString(
+            "BLOCKED_STATE_ERROR_TITLE",
+            tableName: "Main",
+            value: errorString,
+            comment: ""
         )
     }
 }

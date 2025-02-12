@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 05/10/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -24,17 +24,17 @@ class SettingsDNSTextCell: SettingsCell, UITextFieldDelegate {
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
 
-        textField.translatesAutoresizingMaskIntoConstraints = false
         textField.font = UIFont.systemFont(ofSize: 17)
         textField.backgroundColor = .clear
         textField.textColor = UIColor.TextField.textColor
-        textField.textMargins = UIMetrics.contentInsets
+        textField.textMargins = UIMetrics.SettingsCell.textFieldContentInsets
         textField.placeholder = NSLocalizedString(
             "DNS_TEXT_CELL_PLACEHOLDER",
             tableName: "Settings",
             value: "Enter IP",
             comment: ""
         )
+        textField.setAccessibilityIdentifier(.dnsSettingsEnterIPAddressTextField)
         textField.cornerRadius = 0
         textField.keyboardType = .numbersAndPunctuation
         textField.returnKeyType = .done
@@ -56,14 +56,9 @@ class SettingsDNSTextCell: SettingsCell, UITextFieldDelegate {
         backgroundView?.backgroundColor = UIColor.TextField.backgroundColor
         contentView.addSubview(textField)
 
-        overrideUserInterfaceStyle = .light
-
-        NSLayoutConstraint.activate([
-            textField.topAnchor.constraint(equalTo: contentView.topAnchor),
-            textField.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            textField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            textField.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-        ])
+        contentView.addConstrainedSubviews([textField]) {
+            textField.pinEdgesToSuperview()
+        }
 
         updateCellAppearance(animated: false)
     }
@@ -106,6 +101,8 @@ class SettingsDNSTextCell: SettingsCell, UITextFieldDelegate {
         textField.isEnabled = isEditing
 
         if isEditing {
+            textField.textMargins.left = UIMetrics.SettingsCell.textFieldContentInsets.left
+
             if isValidInput {
                 textField.textColor = UIColor.TextField.textColor
             } else {
@@ -114,9 +111,10 @@ class SettingsDNSTextCell: SettingsCell, UITextFieldDelegate {
 
             backgroundView?.backgroundColor = UIColor.TextField.backgroundColor
         } else {
-            textField.textColor = .white
+            textField.textMargins.left = UIMetrics.SettingsCell.textFieldNonEditingContentInsetLeft
 
-            backgroundView?.backgroundColor = UIColor.SubCell.backgroundColor
+            textField.textColor = .white
+            backgroundView?.backgroundColor = UIColor.Cell.Background.indentationLevelOne
         }
     }
 

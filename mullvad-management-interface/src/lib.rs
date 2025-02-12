@@ -11,7 +11,10 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tonic::transport::{server::Connected, Endpoint, Server, Uri};
+use tonic::transport::{server::Connected, Server};
+#[cfg(not(target_os = "android"))]
+use tonic::transport::{Endpoint, Uri};
+#[cfg(not(target_os = "android"))]
 use tower::service_fn;
 
 pub use tonic::{async_trait, transport::Channel, Code, Request, Response, Status};
@@ -21,83 +24,107 @@ pub type ManagementServiceClient =
 pub use types::management_service_server::{ManagementService, ManagementServiceServer};
 
 #[cfg(unix)]
-lazy_static::lazy_static! {
-    static ref MULLVAD_MANAGEMENT_SOCKET_GROUP: Option<String> = env::var("MULLVAD_MANAGEMENT_SOCKET_GROUP")
-        .ok();
-}
+use std::sync::LazyLock;
+#[cfg(unix)]
+static MULLVAD_MANAGEMENT_SOCKET_GROUP: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("MULLVAD_MANAGEMENT_SOCKET_GROUP").ok());
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+pub const CUSTOM_LIST_LIST_NOT_FOUND_DETAILS: &[u8] = b"custom_list_list_not_found";
+pub const CUSTOM_LIST_LIST_EXISTS_DETAILS: &[u8] = b"custom_list_list_exists";
+pub const CUSTOM_LIST_LIST_NAME_TOO_LONG_DETAILS: &[u8] = b"custom_list_list_name_too_long";
+
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Management RPC server or client error")]
-    GrpcTransportError(#[error(source)] tonic::transport::Error),
+    #[error("Management RPC server or client error")]
+    GrpcTransportError(#[source] tonic::transport::Error),
 
-    #[error(display = "Failed to start IPC pipe/socket")]
-    StartServerError(#[error(source)] io::Error),
+    #[error("Failed to start IPC pipe/socket")]
+    StartServerError(#[source] io::Error),
 
-    #[error(display = "Failed to initialize pipe/socket security attributes")]
-    SecurityAttributes(#[error(source)] io::Error),
+    #[error("Failed to initialize pipe/socket security attributes")]
+    SecurityAttributes(#[source] io::Error),
 
-    #[error(display = "Unable to set permissions for IPC endpoint")]
-    PermissionsError(#[error(source)] io::Error),
+    #[error("Unable to set permissions for IPC endpoint")]
+    PermissionsError(#[source] io::Error),
 
     #[cfg(unix)]
-    #[error(display = "Group not found")]
+    #[error("Group not found")]
     NoGidError,
 
     #[cfg(unix)]
-    #[error(display = "Failed to obtain group ID")]
-    ObtainGidError(#[error(source)] nix::Error),
+    #[error("Failed to obtain group ID")]
+    ObtainGidError(#[source] nix::Error),
 
     #[cfg(unix)]
-    #[error(display = "Failed to set group ID")]
-    SetGidError(#[error(source)] nix::Error),
+    #[error("Failed to set group ID")]
+    SetGidError(#[source] nix::Error),
 
-    #[error(display = "gRPC call returned error")]
-    Rpc(#[error(source)] tonic::Status),
+    #[error("gRPC call returned error")]
+    Rpc(#[source] tonic::Status),
 
-    #[error(display = "Failed to parse gRPC response")]
-    InvalidResponse(#[error(source)] types::FromProtobufTypeError),
+    #[error("Failed to parse gRPC response")]
+    InvalidResponse(#[source] types::FromProtobufTypeError),
 
-    #[error(display = "Duration is too large")]
+    #[error("Duration is too large")]
     DurationTooLarge,
 
-    #[error(display = "Unexpected non-UTF8 string")]
+    #[error("Unexpected non-UTF8 string")]
     PathMustBeUtf8,
 
-    #[error(display = "Missing daemon event")]
+    #[error("Missing daemon event")]
     MissingDaemonEvent,
 
-    #[error(display = "This voucher code is invalid")]
+    #[error("This voucher code is invalid")]
     InvalidVoucher,
 
-    #[error(display = "This voucher code has already been used")]
+    #[error("This voucher code has already been used")]
     UsedVoucher,
 
-    #[error(display = "There are too many devices on the account. One must be revoked to log in")]
+    #[error("There are too many devices on the account. One must be revoked to log in")]
     TooManyDevices,
 
-    #[error(display = "You are already logged in. Log out to create a new account")]
+    #[error("You are already logged in. Log out to create a new account")]
     AlreadyLoggedIn,
 
-    #[error(display = "The account does not exist")]
+    #[error("The account does not exist")]
     InvalidAccount,
 
-    #[error(display = "There is no such device")]
+    #[error("There is no such device")]
     DeviceNotFound,
 
-    #[error(display = "Location data is unavailable")]
+    #[error("Location data is unavailable")]
     NoLocationData,
+
+    #[error("A custom list with that name already exists")]
+    CustomListExists,
+
+    #[error("A custom list with that name does not exist")]
+    CustomListListNotFound,
+
+    #[error("Location already exists in the custom list")]
+    LocationExistsInCustomList,
+
+    #[error("Location was not found in the custom list")]
+    LocationNotFoundInCustomlist,
+
+    #[error("Could not retrieve API access methods from settings")]
+    ApiAccessMethodSettingsNotFound,
+
+    #[error("An access method with that id does not exist")]
+    ApiAccessMethodNotFound,
 }
 
+#[cfg(not(target_os = "android"))]
 #[deprecated(note = "Prefer MullvadProxyClient")]
 pub async fn new_rpc_client() -> Result<ManagementServiceClient, Error> {
+    use futures::TryFutureExt;
+
     let ipc_path = mullvad_paths::get_rpc_socket_path();
 
     // The URI will be ignored
     let channel = Endpoint::from_static("lttp://[::]:50051")
         .connect_with_connector(service_fn(move |_: Uri| {
-            IpcEndpoint::connect(ipc_path.clone())
+            IpcEndpoint::connect(ipc_path.clone()).map_ok(hyper_util::rt::tokio::TokioIo::new)
         }))
         .await
         .map_err(Error::GrpcTransportError)?;
@@ -105,20 +132,20 @@ pub async fn new_rpc_client() -> Result<ManagementServiceClient, Error> {
     Ok(ManagementServiceClient::new(channel))
 }
 
+#[cfg(not(target_os = "android"))]
 pub use client::MullvadProxyClient;
 
-pub type ServerJoinHandle = tokio::task::JoinHandle<Result<(), Error>>;
+pub type ServerJoinHandle = tokio::task::JoinHandle<()>;
 
-pub async fn spawn_rpc_server<T: ManagementService, F: Future<Output = ()> + Send + 'static>(
+pub fn spawn_rpc_server<T: ManagementService, F: Future<Output = ()> + Send + 'static>(
     service: T,
     abort_rx: F,
+    rpc_socket_path: impl AsRef<std::path::Path>,
 ) -> std::result::Result<ServerJoinHandle, Error> {
     use futures::stream::TryStreamExt;
     use parity_tokio_ipc::SecurityAttributes;
 
-    let socket_path = mullvad_paths::get_rpc_socket_path();
-
-    let mut endpoint = IpcEndpoint::new(socket_path.to_string_lossy().to_string());
+    let mut endpoint = IpcEndpoint::new(rpc_socket_path.as_ref().to_string_lossy().to_string());
     endpoint.set_security_attributes(
         SecurityAttributes::allow_everyone_create()
             .map_err(Error::SecurityAttributes)?
@@ -132,17 +159,22 @@ pub async fn spawn_rpc_server<T: ManagementService, F: Future<Output = ()> + Sen
         let group = nix::unistd::Group::from_name(group_name)
             .map_err(Error::ObtainGidError)?
             .ok_or(Error::NoGidError)?;
-        nix::unistd::chown(&socket_path, None, Some(group.gid)).map_err(Error::SetGidError)?;
-        fs::set_permissions(&socket_path, PermissionsExt::from_mode(0o760))
+        nix::unistd::chown(rpc_socket_path.as_ref(), None, Some(group.gid))
+            .map_err(Error::SetGidError)?;
+        fs::set_permissions(rpc_socket_path, PermissionsExt::from_mode(0o760))
             .map_err(Error::PermissionsError)?;
     }
 
     Ok(tokio::spawn(async move {
-        Server::builder()
+        if let Err(execution_error) = Server::builder()
             .add_service(ManagementServiceServer::new(service))
             .serve_with_incoming_shutdown(incoming.map_ok(StreamBox), abort_rx)
             .await
             .map_err(Error::GrpcTransportError)
+        {
+            log::error!("Management server panic: {execution_error}");
+        }
+        log::trace!("gRPC server is shutting down");
     }))
 }
 

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 26/07/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -41,7 +41,7 @@ class DeviceRowView: UIView {
                 renderingMode: .alwaysOriginal
             )
 
-        let button = UIButton(type: .custom)
+        let button = IncreasedHitButton(type: .custom)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setImage(image, for: .normal)
         button.accessibilityLabel = NSLocalizedString(
@@ -70,8 +70,9 @@ class DeviceRowView: UIView {
 
         super.init(frame: .zero)
 
+        setAccessibilityIdentifier(.deviceCell)
         backgroundColor = .primaryColor
-        directionalLayoutMargins = UIMetrics.rowViewLayoutMargins
+        directionalLayoutMargins = UIMetrics.TableView.rowViewLayoutMargins
 
         for subview in [textLabel, removeButton, activityIndicator, creationDateLabel] {
             addSubview(subview)
@@ -90,6 +91,7 @@ class DeviceRowView: UIView {
         )
 
         removeButton.addTarget(self, action: #selector(handleButtonTap(_:)), for: .touchUpInside)
+        removeButton.setAccessibilityIdentifier(.deviceCellRemoveButton)
 
         NSLayoutConstraint.activate([
             textLabel.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),

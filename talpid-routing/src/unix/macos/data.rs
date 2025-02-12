@@ -5,6 +5,7 @@ use nix::{
 };
 use std::{
     collections::BTreeMap,
+    ffi::{c_int, c_uchar, c_ushort},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 
@@ -12,6 +13,7 @@ use std::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteMessage {
     sockaddrs: BTreeMap<AddressFlag, RouteSocketAddress>,
+    mtu: u32,
     route_flags: RouteFlag,
     interface_index: u16,
     errno: i32,
@@ -40,6 +42,7 @@ impl RouteMessage {
 
         Self {
             sockaddrs,
+            mtu: 0,
             route_flags,
             interface_index: 0,
             errno: 0,
@@ -114,11 +117,11 @@ impl RouteMessage {
 
         let msg_len = usize::from(header.rtm_msglen);
         if msg_len > buffer.len() {
-            return Err(Error::BufferTooSmall(
-                "Message is shorter than it's msg_len indicates",
-                msg_len,
-                buffer.len(),
-            ));
+            return Err(Error::BufferTooSmall {
+                message_type: "route message (rt_msghdr.msg_len)",
+                expect_min_size: msg_len,
+                actual_size: buffer.len(),
+            });
         }
 
         let payload = &buffer[ROUTE_MESSAGE_HEADER_SIZE..std::cmp::min(msg_len, buffer.len())];
@@ -135,8 +138,15 @@ impl RouteMessage {
             .collect::<Result<BTreeMap<_, _>>>()?;
         let interface_index = header.rtm_index;
 
+        let mtu = if header.rtm_inits & RTV_MTU != 0 {
+            header.rtm_rmx.rmx_mtu
+        } else {
+            0
+        };
+
         Ok(Self {
             route_flags,
+            mtu,
             sockaddrs,
             interface_index,
             errno: header.rtm_errno,
@@ -166,6 +176,11 @@ impl RouteMessage {
         self
     }
 
+    pub fn set_mtu(mut self, mtu: u32) -> Self {
+        self.mtu = mtu;
+        self
+    }
+
     pub fn set_interface_addr(mut self, link: &InterfaceAddress) -> Self {
         self.insert_sockaddr(RouteSocketAddress::Gateway(link.address));
         self.route_flags |= RouteFlag::RTF_GATEWAY;
@@ -178,8 +193,7 @@ impl RouteMessage {
         self
     }
 
-    pub fn set_gateway_addr(mut self, addr: IpAddr) -> Self {
-        let gateway: SocketAddr = (addr, 0).into();
+    pub fn set_gateway_addr(mut self, gateway: impl Into<SockaddrStorage>) -> Self {
         self.insert_sockaddr(RouteSocketAddress::Gateway(Some(gateway.into())));
         self.route_flags |= RouteFlag::RTF_GATEWAY;
 
@@ -229,7 +243,7 @@ impl RouteMessage {
                 let ip_addr = *SocketAddrV4::from(*v4).ip();
                 let netmask = self.netmask().unwrap_or(Ipv4Addr::UNSPECIFIED.into());
                 let destination = IpNetwork::with_netmask(ip_addr.into(), netmask)
-                    .map_err(Error::InvalidNetmask)?;
+                    .map_err(|_| Error::InvalidNetmask)?;
                 return Ok(destination);
             }
 
@@ -237,7 +251,7 @@ impl RouteMessage {
                 let ip_addr = *SocketAddrV6::from(*v6).ip();
                 let netmask = self.netmask().unwrap_or(Ipv6Addr::UNSPECIFIED.into());
                 let destination = IpNetwork::with_netmask(ip_addr.into(), netmask)
-                    .map_err(Error::InvalidNetmask)?;
+                    .map_err(|_| Error::InvalidNetmask)?;
                 return Ok(destination);
             }
 
@@ -298,10 +312,10 @@ impl RouteMessage {
             .try_into()
             .expect("route message buffer size cannot fit in 32 bits");
 
-        let header = super::data::rt_msghdr {
+        let mut header = super::data::rt_msghdr {
             rtm_msglen,
             rtm_version: libc::RTM_VERSION.try_into().unwrap(),
-            rtm_type: message_type.bits(),
+            rtm_type: message_type.bits().try_into().unwrap(),
             rtm_index: self.interface_index,
             rtm_flags: self.route_flags.bits(),
             rtm_addrs: address_flags.bits(),
@@ -313,11 +327,21 @@ impl RouteMessage {
             rtm_rmx: Default::default(),
         };
 
+        if self.mtu != 0 {
+            header.rtm_inits |= RTV_MTU;
+            header.rtm_rmx.rmx_mtu = self.mtu;
+        }
+
         (header, payload_bytes)
     }
 
     pub fn interface_index(&self) -> u16 {
         self.interface_index
+    }
+
+    pub fn set_interface_index(mut self, index: u16) -> Self {
+        self.interface_index = index;
+        self
     }
 
     pub fn interface_address(&self) -> Option<IpAddr> {
@@ -385,13 +409,13 @@ impl RouteMessage {
 #[derive(Debug)]
 #[repr(C)]
 struct ifa_msghdr {
-    ifam_msglen: libc::c_ushort,
-    ifam_version: libc::c_uchar,
-    ifam_type: libc::c_uchar,
-    ifam_addrs: libc::c_int,
-    ifam_flags: libc::c_int,
-    ifam_index: libc::c_ushort,
-    ifam_metric: libc::c_int,
+    ifam_msglen: c_ushort,
+    ifam_version: c_uchar,
+    ifam_type: c_uchar,
+    ifam_addrs: c_int,
+    ifam_flags: c_int,
+    ifam_index: c_ushort,
+    ifam_metric: c_int,
 }
 
 #[derive(Debug)]
@@ -420,17 +444,17 @@ impl AddressMessage {
 
     pub fn netmask(&self) -> Result<IpAddr> {
         self.get_address(&AddressFlag::RTA_NETMASK)
-            .ok_or(Error::NoNetmaskAddress)
+            .ok_or(Error::NoNetmask)
     }
 
     pub fn from_byte_buffer(buffer: &[u8]) -> Result<Self> {
         const HEADER_SIZE: usize = std::mem::size_of::<ifa_msghdr>();
         if HEADER_SIZE > buffer.len() {
-            return Err(Error::BufferTooSmall(
-                "ifa_msghdr",
-                buffer.len(),
-                HEADER_SIZE,
-            ));
+            return Err(Error::BufferTooSmall {
+                message_type: "ifa_msghdr",
+                expect_min_size: HEADER_SIZE,
+                actual_size: buffer.len(),
+            });
         }
 
         // SAFETY: buffer is pointing to enough memory to contain a valid value for ifa_msghdr
@@ -438,11 +462,11 @@ impl AddressMessage {
 
         let msg_len = usize::from(header.ifam_msglen);
         if msg_len > buffer.len() {
-            return Err(Error::BufferTooSmall(
-                "Message is shorter than it's msg_len indicates",
-                msg_len,
-                buffer.len(),
-            ));
+            return Err(Error::BufferTooSmall {
+                message_type: "address message (ifa_msghdr.msg_len)",
+                expect_min_size: msg_len,
+                actual_size: buffer.len(),
+            });
         }
 
         let payload = &buffer[HEADER_SIZE..std::cmp::min(msg_len, buffer.len())];
@@ -516,34 +540,39 @@ impl From<IpNetwork> for Destination {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Payload buffer didn't match the reported message size in header
+    #[error("Buffer didn't match reported message size")]
     InvalidBuffer(Vec<u8>, AddressFlag),
     /// Buffer too small for specific message type
-    BufferTooSmall(&'static str, usize, usize),
+    #[error("The buffer is too small for msg \"{message_type}\": expected size >= {expect_min_size}, actual {actual_size}")]
+    BufferTooSmall {
+        message_type: &'static str,
+        expect_min_size: usize,
+        actual_size: usize,
+    },
     /// Unknown route flag
-    UnknownRouteFlag(i32),
-    /// Socket address is empty for the given address flag
-    EmptySockaddr(AddressFlag),
-    /// Unrecognized message
-    UnknownMessageType(u8),
+    #[error("Unknown route flag: {0}")]
+    UnknownRouteFlag(c_int),
     /// Unrecognized address flag
-    UnknownAddressFlag(libc::c_int),
+    #[error("Unrecognized address flag: {0}")]
+    UnknownAddressFlag(c_int),
     /// Mismatched socket address type
+    #[error("Unrecognized socket address: expected IPv4 or IPv6")]
     MismatchedSocketAddress(AddressFlag, Box<SockaddrStorage>),
-    /// Link socket address contains no identifier
-    NoLinkIdentifier(nix::libc::sockaddr_dl),
-    /// Failed to resolve an interface name to an index
-    InterfaceIndex(nix::Error),
     /// Invalid netmask
-    InvalidNetmask(ipnetwork::IpNetworkError),
+    #[error("Invalid netmask")]
+    InvalidNetmask,
     /// Route contains no netmask socket address
+    #[error("Found no route destination")]
     NoDestination,
+    /// Found no netmask
+    #[error("Found no netmask")]
+    NoNetmask,
     /// Address message does not contain an interface address
+    #[error("Found no interface address")]
     NoInterfaceAddress,
-    /// Address message does not contain an interface address
-    NoNetmaskAddress,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -582,11 +611,11 @@ impl RouteSocketMessage {
                 header,
                 payload: buffer.to_vec(),
             }),
-            None => Err(Error::BufferTooSmall(
-                "rt_msghdr_short",
-                buffer.len(),
-                ROUTE_MESSAGE_HEADER_SHORT_SIZE,
-            )),
+            None => Err(Error::BufferTooSmall {
+                message_type: "rt_msghdr_short",
+                expect_min_size: ROUTE_MESSAGE_HEADER_SHORT_SIZE,
+                actual_size: buffer.len(),
+            }),
         }
     }
 }
@@ -605,14 +634,18 @@ impl Interface {
         self.header.ifm_index
     }
 
+    pub fn mtu(&self) -> u32 {
+        self.header.ifm_data.ifi_mtu
+    }
+
     fn from_byte_buffer(buffer: &[u8]) -> Result<Self> {
         const INTERFACE_MESSAGE_HEADER_SIZE: usize = std::mem::size_of::<libc::if_msghdr>();
         if INTERFACE_MESSAGE_HEADER_SIZE > buffer.len() {
-            return Err(Error::BufferTooSmall(
-                "if_msghdr",
-                buffer.len(),
-                INTERFACE_MESSAGE_HEADER_SIZE,
-            ));
+            return Err(Error::BufferTooSmall {
+                message_type: "if_msghdr",
+                expect_min_size: INTERFACE_MESSAGE_HEADER_SIZE,
+                actual_size: buffer.len(),
+            });
         }
         let header: libc::if_msghdr = unsafe { std::ptr::read(buffer.as_ptr() as *const _) };
         // let payload = buffer[INTERFACE_MESSAGE_HEADER_SIZE..header.ifm_msglen.into()].to_vec();
@@ -620,140 +653,134 @@ impl Interface {
     }
 }
 
-// #define RTA_DST         0x1     /* destination sockaddr present */
-// #define RTA_GATEWAY     0x2     /* gateway sockaddr present */
-// #define RTA_NETMASK     0x4     /* netmask sockaddr present */
-// #define RTA_GENMASK     0x8     /* cloning mask sockaddr present */
-// #define RTA_IFP         0x10    /* interface name sockaddr present */
-// #define RTA_IFA         0x20    /* interface addr sockaddr present */
-// #define RTA_AUTHOR      0x40    /* sockaddr for author of redirect */
-// #define RTA_BRD         0x80    /* for NEWADDR, broadcast or p-p dest addr */
 bitflags::bitflags! {
     /// All enum values of address flags can be iterated via `flag <<= 1`, starting from 1.
     /// See https://www.manpagez.com/man/4/route/.
+    #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
     pub struct AddressFlag: i32 {
         /// Destination socket address
-        const RTA_DST       = 0x1;
+        const RTA_DST       = libc::RTA_DST;
         /// Gateway socket address
-        const RTA_GATEWAY   = 0x2;
+        const RTA_GATEWAY   = libc::RTA_GATEWAY;
         /// Netmask socket address
-        const RTA_NETMASK   = 0x4;
+        const RTA_NETMASK   = libc::RTA_NETMASK;
         /// Cloning mask socket address
-        const RTA_GENMASK   = 0x8;
+        const RTA_GENMASK   = libc::RTA_GENMASK;
         /// Interface name socket address
-        const RTA_IFP       = 0x10;
+        const RTA_IFP       = libc::RTA_IFP;
         /// Interface address socket address
-        const RTA_IFA       = 0x20;
+        const RTA_IFA       = libc::RTA_IFA;
         /// Socket address for author of redirect
-        const RTA_AUTHOR    = 0x40;
+        const RTA_AUTHOR    = libc::RTA_AUTHOR;
         /// Socket address for `NEWADDR`, broadcast or point-to-point destination address
-        const RTA_BRD       = 0x80;
+        const RTA_BRD       = libc::RTA_BRD;
     }
 }
 
 bitflags::bitflags! {
     /// Types of routing messages
     /// See https://www.manpagez.com/man/4/route/.
-    pub struct MessageType: u8 {
+    #[derive(Debug)]
+    pub struct MessageType: i32 {
         /// Add Route
-        const RTM_ADD         = 0x1;
+        const RTM_ADD         = libc::RTM_ADD;
         /// Delete Route
-        const RTM_DELETE      = 0x2;
+        const RTM_DELETE      = libc::RTM_DELETE;
         /// Change Metrics or flags
-        const RTM_CHANGE      = 0x3;
+        const RTM_CHANGE      = libc::RTM_CHANGE;
         /// Report Metrics
-        const RTM_GET         = 0x4;
+        const RTM_GET         = libc::RTM_GET;
         /// RTM_LOSING is no longer generated by and is deprecated
-        const RTM_LOSING      = 0x5;
+        const RTM_LOSING      = libc::RTM_LOSING;
         /// Told to use different route
-        const RTM_REDIRECT    = 0x6;
+        const RTM_REDIRECT    = libc::RTM_REDIRECT;
         /// Lookup failed on this address
-        const RTM_MISS        = 0x7;
+        const RTM_MISS        = libc::RTM_MISS;
         /// fix specified metrics
-        const RTM_LOCK        = 0x8;
+        const RTM_LOCK        = libc::RTM_LOCK;
         /// caused by SIOCADDRT
-        const RTM_OLDADD      = 0x9;
+        const RTM_OLDADD      = libc::RTM_OLDADD;
         /// caused by SIOCDELRT
-        const RTM_OLDDEL      = 0xa;
+        const RTM_OLDDEL      = libc::RTM_OLDDEL;
         /// req to resolve dst to LL addr
-        const RTM_RESOLVE     = 0xb;
+        const RTM_RESOLVE     = libc::RTM_RESOLVE;
         /// address being added to iface
-        const RTM_NEWADDR     = 0xc;
+        const RTM_NEWADDR     = libc::RTM_NEWADDR;
         /// address being removed from iface
-        const RTM_DELADDR     = 0xd;
+        const RTM_DELADDR     = libc::RTM_DELADDR;
         /// iface going up/down etc.
-        const RTM_IFINFO      = 0xe;
+        const RTM_IFINFO      = libc::RTM_IFINFO;
         /// mcast group membership being added to if
-        const RTM_NEWMADDR    = 0xf;
+        const RTM_NEWMADDR    = libc::RTM_NEWMADDR;
         /// mcast group membership being deleted
-        const RTM_DELMADDR    = 0x10;
+        const RTM_DELMADDR    = libc::RTM_DELMADDR;
     }
 
     /// Routing message flags
     /// See https://www.manpagez.com/man/4/route/.
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     pub struct RouteFlag: i32 {
         /// route usable
-        const RTF_UP = 0x1;
+        const RTF_UP = libc::RTF_UP;
         /// destination is a gateway
-        const RTF_GATEWAY = 0x2;
+        const RTF_GATEWAY = libc::RTF_GATEWAY;
         /// host entry (net otherwise)
-        const RTF_HOST = 0x4;
+        const RTF_HOST = libc::RTF_HOST;
         /// host or net unreachable
-        const RTF_REJECT = 0x8;
+        const RTF_REJECT = libc::RTF_REJECT;
         /// created dynamically (by redirect)
-        const RTF_DYNAMIC = 0x10;
+        const RTF_DYNAMIC = libc::RTF_DYNAMIC;
         /// modified dynamically (by redirect)
-        const RTF_MODIFIED = 0x20;
+        const RTF_MODIFIED = libc::RTF_MODIFIED;
         /// message confirmed
-        const RTF_DONE = 0x40;
+        const RTF_DONE = libc::RTF_DONE;
         /// delete cloned route
-        const RTF_DELCLONE = 0x80;
+        const RTF_DELCLONE = libc::RTF_DELCLONE;
         /// generate new routes on use
-        const RTF_CLONING = 0x100;
+        const RTF_CLONING = libc::RTF_CLONING;
         /// external daemon resolves name
-        const RTF_XRESOLVE = 0x200;
-        /// DEPRECATED - exists ONLY for backwards compatibility
-        const RTF_LLINFO = 0x400;
+        const RTF_XRESOLVE = libc::RTF_XRESOLVE;
         /// used by apps to add/del L2 entries
-        const RTF_LLDATA = 0x400;
+        /// the newer constant is called RTF_LLDATA but absent in libc, has the same value.
+        const RTF_LLINFO = libc::RTF_LLINFO;
         /// manually added
-        const RTF_STATIC = 0x800;
+        const RTF_STATIC = libc::RTF_STATIC;
         /// just discard pkts (during updates)
-        const RTF_BLACKHOLE = 0x1000;
+        const RTF_BLACKHOLE = libc::RTF_BLACKHOLE;
         /// not eligible for RTF_IFREF
-        const RTF_NOIFREF = 0x2000;
+        const RTF_NOIFREF = libc::RTF_NOIFREF;
         /// protocol specific routing flag
-        const RTF_PROTO2 = 0x4000;
+        const RTF_PROTO2 = libc::RTF_PROTO2;
         /// protocol specific routing flag
-        const RTF_PROTO1 = 0x8000;
+        const RTF_PROTO1 = libc::RTF_PROTO1;
         /// protocol requires cloning
-        const RTF_PRCLONING = 0x10000;
+        const RTF_PRCLONING = libc::RTF_PRCLONING;
         /// route generated through cloning
-        const RTF_WASCLONED = 0x20000;
+        const RTF_WASCLONED = libc::RTF_WASCLONED;
         /// protocol specific routing flag
-        const RTF_PROTO3 = 0x40000;
+        const RTF_PROTO3 = libc::RTF_PROTO3;
         /// future use
-        const RTF_PINNED = 0x100000;
+        const RTF_PINNED = libc::RTF_PINNED;
         /// route represents a local address
-        const RTF_LOCAL = 0x200000;
+        const RTF_LOCAL = libc::RTF_LOCAL;
         /// route represents a bcast address
-        const RTF_BROADCAST = 0x400000;
+        const RTF_BROADCAST = libc::RTF_BROADCAST;
         /// route represents a mcast address
-        const RTF_MULTICAST = 0x800000;
+        const RTF_MULTICAST = libc::RTF_MULTICAST;
         /// has valid interface scope
-        const RTF_IFSCOPE = 0x1000000;
+        const RTF_IFSCOPE = libc::RTF_IFSCOPE;
         /// defunct; no longer modifiable
-        const RTF_CONDEMNED = 0x2000000;
+        const RTF_CONDEMNED = libc::RTF_CONDEMNED;
         /// route holds a ref to interface
-        const RTF_IFREF = 0x4000000;
+        const RTF_IFREF = libc::RTF_IFREF;
         /// proxying, no interface scope
-        const RTF_PROXY = 0x8000000;
+        const RTF_PROXY = libc::RTF_PROXY;
         /// host is a router
-        const RTF_ROUTER = 0x10000000;
+        const RTF_ROUTER = libc::RTF_ROUTER;
         /// Route entry is being freed
-        const RTF_DEAD = 0x20000000;
+        const RTF_DEAD = libc::RTF_DEAD;
         /// route to destination of the global internet
-        const RTF_GLOBAL = 0x40000000;
+        const RTF_GLOBAL = libc::RTF_GLOBAL;
     }
 }
 
@@ -788,11 +815,11 @@ impl RouteSocketAddress {
 
         // to get the length and type of
         if buf.len() < std::mem::size_of::<sockaddr_hdr>() {
-            return Err(Error::BufferTooSmall(
-                "sockaddr buffer too small",
-                buf.len(),
-                std::mem::size_of::<sockaddr_hdr>(),
-            ));
+            return Err(Error::BufferTooSmall {
+                message_type: "sockaddr_hdr",
+                expect_min_size: std::mem::size_of::<sockaddr_hdr>(),
+                actual_size: buf.len(),
+            });
         }
 
         let addr_header_ptr = buf.as_ptr() as *const sockaddr_hdr;
@@ -959,7 +986,7 @@ impl<'a> RouteSockAddrIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RouteSockAddrIterator<'a> {
+impl Iterator for RouteSockAddrIterator<'_> {
     type Item = Result<RouteSocketAddress>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1003,16 +1030,16 @@ impl<'a> Iterator for RouteSockAddrIterator<'a> {
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct rt_msghdr {
-    pub rtm_msglen: libc::c_ushort,
-    pub rtm_version: libc::c_uchar,
-    pub rtm_type: libc::c_uchar,
-    pub rtm_index: libc::c_ushort,
-    pub rtm_flags: libc::c_int,
-    pub rtm_addrs: libc::c_int,
+    pub rtm_msglen: c_ushort,
+    pub rtm_version: c_uchar,
+    pub rtm_type: c_uchar,
+    pub rtm_index: c_ushort,
+    pub rtm_flags: c_int,
+    pub rtm_addrs: c_int,
     pub rtm_pid: libc::pid_t,
-    pub rtm_seq: libc::c_int,
-    pub rtm_errno: libc::c_int,
-    pub rtm_use: libc::c_int,
+    pub rtm_seq: c_int,
+    pub rtm_errno: c_int,
+    pub rtm_use: c_int,
     pub rtm_inits: u32,
     pub rtm_rmx: rt_metrics,
 }
@@ -1036,11 +1063,11 @@ impl rt_msghdr {
             // readable. rt_msghdr doesn't contain any pointers so any values are valid.
             Ok(unsafe { std::ptr::read(ptr as *const _) })
         } else {
-            Err(Error::BufferTooSmall(
-                "if_msghdr",
-                buf.len(),
-                ROUTE_MESSAGE_HEADER_SIZE,
-            ))
+            Err(Error::BufferTooSmall {
+                message_type: "rt_msghdr",
+                expect_min_size: ROUTE_MESSAGE_HEADER_SIZE,
+                actual_size: buf.len(),
+            })
         }
     }
 }
@@ -1049,15 +1076,15 @@ impl rt_msghdr {
 #[derive(Debug)]
 #[repr(C)]
 pub struct rt_msghdr_short {
-    pub rtm_msglen: libc::c_ushort,
-    pub rtm_version: libc::c_uchar,
-    pub rtm_type: libc::c_uchar,
-    pub rtm_index: libc::c_ushort,
-    pub rtm_flags: libc::c_int,
-    pub rtm_addrs: libc::c_int,
+    pub rtm_msglen: c_ushort,
+    pub rtm_version: c_uchar,
+    pub rtm_type: c_uchar,
+    pub rtm_index: c_ushort,
+    pub rtm_flags: c_int,
+    pub rtm_addrs: c_int,
     pub rtm_pid: libc::pid_t,
-    pub rtm_seq: libc::c_int,
-    pub rtm_errno: libc::c_int,
+    pub rtm_seq: c_int,
+    pub rtm_errno: c_int,
 }
 const ROUTE_MESSAGE_HEADER_SHORT_SIZE: usize = std::mem::size_of::<rt_msghdr_short>();
 
@@ -1145,3 +1172,6 @@ fn test_failing_rtmsg() {
     ];
     let _ = RouteSocketMessage::parse_message(&bytes).unwrap();
 }
+
+// Set MTU flag. See route.h
+const RTV_MTU: u32 = 0x1;

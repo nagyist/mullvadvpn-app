@@ -2,330 +2,170 @@
 //! updated as well.
 
 use crate::{
+    constraints::{Constraint, Match},
+    custom_list::{CustomListsSettings, Id},
     location::{CityCode, CountryCode, Hostname},
-    relay_list::Relay,
-    CustomTunnelEndpoint,
+    relay_list::{Relay, RelayEndpointData},
+    CustomTunnelEndpoint, Intersection,
 };
-#[cfg(target_os = "android")]
-use jnix::{jni::objects::JObject, FromJava, IntoJava, JnixEnv};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fmt, str::FromStr};
-use talpid_types::net::{openvpn::ProxySettings, IpVersion, TransportProtocol, TunnelType};
-
-pub trait Match<T> {
-    fn matches(&self, other: &T) -> bool;
-}
-
-pub trait Set<T> {
-    fn is_subset(&self, other: &T) -> bool;
-}
-
-/// Limits the set of [`crate::relay_list::Relay`]s that a `RelaySelector` may select.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(target_os = "android", derive(FromJava, IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-#[cfg_attr(target_os = "android", jnix(bounds = "T: android.os.Parcelable"))]
-pub enum Constraint<T> {
-    Any,
-    Only(T),
-}
-
-impl<T: fmt::Display> fmt::Display for Constraint<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
-            Constraint::Any => "any".fmt(f),
-            Constraint::Only(value) => fmt::Display::fmt(value, f),
-        }
-    }
-}
-
-impl<T> Constraint<T> {
-    pub fn unwrap(self) -> T {
-        match self {
-            Constraint::Any => panic!("called `Constraint::unwrap()` on an `Any` value"),
-            Constraint::Only(value) => value,
-        }
-    }
-
-    pub fn unwrap_or(self, other: T) -> T {
-        match self {
-            Constraint::Any => other,
-            Constraint::Only(value) => value,
-        }
-    }
-
-    pub fn or(self, other: Constraint<T>) -> Constraint<T> {
-        match self {
-            Constraint::Any => other,
-            Constraint::Only(value) => Constraint::Only(value),
-        }
-    }
-
-    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Constraint<U> {
-        match self {
-            Constraint::Any => Constraint::Any,
-            Constraint::Only(value) => Constraint::Only(f(value)),
-        }
-    }
-
-    pub fn is_any(&self) -> bool {
-        match self {
-            Constraint::Any => true,
-            Constraint::Only(_value) => false,
-        }
-    }
-
-    pub fn is_only(&self) -> bool {
-        !self.is_any()
-    }
-
-    pub fn as_ref(&self) -> Constraint<&T> {
-        match self {
-            Constraint::Any => Constraint::Any,
-            Constraint::Only(ref value) => Constraint::Only(value),
-        }
-    }
-
-    pub fn option(self) -> Option<T> {
-        match self {
-            Constraint::Any => None,
-            Constraint::Only(value) => Some(value),
-        }
-    }
-}
-
-impl<T: PartialEq> Constraint<T> {
-    pub fn matches_eq(&self, other: &T) -> bool {
-        match self {
-            Constraint::Any => true,
-            Constraint::Only(ref value) => value == other,
-        }
-    }
-}
-
-// Using the default attribute fails on Android
-#[allow(clippy::derivable_impls)]
-impl<T> Default for Constraint<T> {
-    fn default() -> Self {
-        Constraint::Any
-    }
-}
-
-impl<T: Copy> Copy for Constraint<T> {}
-
-impl<T: Match<U>, U> Match<U> for Constraint<T> {
-    fn matches(&self, other: &U) -> bool {
-        match *self {
-            Constraint::Any => true,
-            Constraint::Only(ref value) => value.matches(other),
-        }
-    }
-}
-
-impl<T: Set<U>, U> Set<Constraint<U>> for Constraint<T> {
-    fn is_subset(&self, other: &Constraint<U>) -> bool {
-        match self {
-            Constraint::Any => other.is_any(),
-            Constraint::Only(ref constraint) => match other {
-                Constraint::Only(ref other_constraint) => constraint.is_subset(other_constraint),
-                _ => true,
-            },
-        }
-    }
-}
-
-impl<T> From<Option<T>> for Constraint<T> {
-    fn from(value: Option<T>) -> Self {
-        match value {
-            Some(value) => Constraint::Only(value),
-            None => Constraint::Any,
-        }
-    }
-}
-
-impl<T: fmt::Debug + Clone + FromStr> FromStr for Constraint<T> {
-    type Err = T::Err;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.eq_ignore_ascii_case("any") {
-            return Ok(Self::Any);
-        }
-        Ok(Self::Only(T::from_str(value)?))
-    }
-}
-
-#[cfg(feature = "clap")]
-impl<T: fmt::Debug + Clone + clap::builder::ValueParserFactory> clap::builder::ValueParserFactory
-    for Constraint<T>
-where
-    <T as clap::builder::ValueParserFactory>::Parser: Sync + Send + Clone,
-{
-    type Parser = ConstraintParser<T::Parser>;
-
-    fn value_parser() -> Self::Parser {
-        ConstraintParser(T::value_parser())
-    }
-}
-
-#[cfg(feature = "clap")]
-#[derive(fmt::Debug, Clone)]
-pub struct ConstraintParser<T>(T);
-
-#[cfg(feature = "clap")]
-impl<T: clap::builder::TypedValueParser> clap::builder::TypedValueParser for ConstraintParser<T>
-where
-    T::Value: fmt::Debug,
-{
-    type Value = Constraint<T::Value>;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<Self::Value, clap::Error> {
-        if value.eq_ignore_ascii_case("any") {
-            return Ok(Constraint::Any);
-        }
-        self.0.parse_ref(cmd, arg, value).map(Constraint::Only)
-    }
-}
+use std::{
+    collections::HashSet,
+    fmt,
+    net::{Ipv4Addr, Ipv6Addr},
+    str::FromStr,
+};
+use talpid_types::net::{proxy::CustomProxy, IpVersion, TransportProtocol, TunnelType};
 
 /// Specifies a specific endpoint or [`RelayConstraints`] to use when `mullvad-daemon` selects a
 /// relay.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub enum RelaySettings {
     CustomTunnelEndpoint(CustomTunnelEndpoint),
     Normal(RelayConstraints),
 }
 
-impl fmt::Display for RelaySettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
+impl RelaySettings {
+    /// Returns false if the specified relay settings update explicitly do not allow for bridging
+    /// (i.e. use UDP instead of TCP)
+    pub fn supports_bridge(&self) -> bool {
+        match &self {
             RelaySettings::CustomTunnelEndpoint(endpoint) => {
-                write!(f, "custom endpoint {endpoint}")
+                endpoint.endpoint().protocol == TransportProtocol::Tcp
             }
-            RelaySettings::Normal(constraints) => constraints.fmt(f),
+            RelaySettings::Normal(update) => !matches!(
+                &update.openvpn_constraints,
+                OpenVpnConstraints {
+                    port: Constraint::Only(TransportPort {
+                        protocol: TransportProtocol::Udp,
+                        ..
+                    })
+                }
+            ),
         }
     }
 }
 
-impl RelaySettings {
-    pub fn merge(&mut self, update: RelaySettingsUpdate) -> Self {
-        match update {
-            RelaySettingsUpdate::CustomTunnelEndpoint(relay) => {
-                RelaySettings::CustomTunnelEndpoint(relay)
+impl From<CustomTunnelEndpoint> for RelaySettings {
+    fn from(value: CustomTunnelEndpoint) -> Self {
+        Self::CustomTunnelEndpoint(value)
+    }
+}
+
+impl From<RelayConstraints> for RelaySettings {
+    fn from(value: RelayConstraints) -> Self {
+        Self::Normal(value)
+    }
+}
+
+pub struct RelaySettingsFormatter<'a> {
+    pub settings: &'a RelaySettings,
+    pub custom_lists: &'a CustomListsSettings,
+}
+
+impl fmt::Display for RelaySettingsFormatter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.settings {
+            RelaySettings::CustomTunnelEndpoint(endpoint) => {
+                write!(f, "custom endpoint {endpoint}")
             }
-            RelaySettingsUpdate::Normal(constraint_update) => RelaySettings::Normal(match *self {
-                RelaySettings::CustomTunnelEndpoint(_) => {
-                    RelayConstraints::default().merge(constraint_update)
-                }
-                RelaySettings::Normal(ref constraint) => constraint.merge(constraint_update),
-            }),
+            RelaySettings::Normal(constraints) => {
+                write!(
+                    f,
+                    "{}",
+                    RelayConstraintsFormatter {
+                        constraints,
+                        custom_lists: self.custom_lists
+                    }
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationConstraint {
+    Location(GeographicLocationConstraint),
+    CustomList { list_id: Id },
+}
+
+pub struct LocationConstraintFormatter<'a> {
+    pub constraint: &'a LocationConstraint,
+    pub custom_lists: &'a CustomListsSettings,
+}
+
+impl From<GeographicLocationConstraint> for LocationConstraint {
+    fn from(location: GeographicLocationConstraint) -> Self {
+        Self::Location(location)
+    }
+}
+
+impl fmt::Display for LocationConstraintFormatter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.constraint {
+            LocationConstraint::Location(location) => write!(f, "{}", location),
+            LocationConstraint::CustomList { list_id } => self
+                .custom_lists
+                .iter()
+                .find(|list| &list.id == list_id)
+                .map(|custom_list| write!(f, "{}", custom_list.name))
+                .unwrap_or_else(|| write!(f, "invalid custom list")),
         }
     }
 }
 
 /// Limits the set of [`crate::relay_list::Relay`]s that a `RelaySelector` may select.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
-#[cfg_attr(not(target_os = "android"), derive(Default))]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub struct RelayConstraints {
     pub location: Constraint<LocationConstraint>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub providers: Constraint<Providers>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub ownership: Constraint<Ownership>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub tunnel_protocol: Constraint<TunnelType>,
     pub wireguard_constraints: WireguardConstraints,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub openvpn_constraints: OpenVpnConstraints,
 }
 
-#[cfg(target_os = "android")]
-impl Default for RelayConstraints {
-    fn default() -> Self {
-        RelayConstraints {
-            tunnel_protocol: Constraint::Only(TunnelType::Wireguard),
-            location: Constraint::default(),
-            providers: Constraint::default(),
-            ownership: Constraint::default(),
-            wireguard_constraints: WireguardConstraints::default(),
-            openvpn_constraints: OpenVpnConstraints::default(),
-        }
-    }
+pub struct RelayConstraintsFormatter<'a> {
+    pub constraints: &'a RelayConstraints,
+    pub custom_lists: &'a CustomListsSettings,
 }
 
-impl RelayConstraints {
-    pub fn merge(&self, update: RelayConstraintsUpdate) -> Self {
-        RelayConstraints {
-            location: update.location.unwrap_or_else(|| self.location.clone()),
-            providers: update.providers.unwrap_or_else(|| self.providers.clone()),
-            ownership: update.ownership.unwrap_or(self.ownership),
-            tunnel_protocol: update.tunnel_protocol.unwrap_or(self.tunnel_protocol),
-            wireguard_constraints: update
-                .wireguard_constraints
-                .unwrap_or_else(|| self.wireguard_constraints.clone()),
-            openvpn_constraints: update
-                .openvpn_constraints
-                .unwrap_or(self.openvpn_constraints),
-        }
-    }
-}
-
-impl fmt::Display for RelayConstraints {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self.tunnel_protocol {
-            Constraint::Any => write!(
-                f,
-                "Any tunnel protocol with OpenVPN through {} and WireGuard through {}",
-                &self.openvpn_constraints, &self.wireguard_constraints,
-            )?,
-            Constraint::Only(ref tunnel_protocol) => {
-                tunnel_protocol.fmt(f)?;
-                match tunnel_protocol {
-                    TunnelType::Wireguard => {
-                        write!(f, " over {}", &self.wireguard_constraints)?;
-                    }
-                    TunnelType::OpenVpn => {
-                        write!(f, " over {}", &self.openvpn_constraints)?;
-                    }
-                };
-            }
-        }
-        write!(f, " in ")?;
-        match self.location {
-            Constraint::Any => write!(f, "any location")?,
-            Constraint::Only(ref location_constraint) => location_constraint.fmt(f)?,
-        }
-        write!(f, " using ")?;
-        match self.providers {
-            Constraint::Any => write!(f, "any provider")?,
-            Constraint::Only(ref constraint) => constraint.fmt(f)?,
-        }
-        match self.ownership {
-            Constraint::Any => Ok(()),
-            Constraint::Only(ref constraint) => {
-                write!(f, " and {constraint}")
-            }
-        }
+impl fmt::Display for RelayConstraintsFormatter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Tunnel protocol: {}\nOpenVPN constraints: {}\nWireguard constraints: {}",
+            self.constraints.tunnel_protocol,
+            self.constraints.openvpn_constraints,
+            WireguardConstraintsFormatter {
+                constraints: &self.constraints.wireguard_constraints,
+                custom_lists: self.custom_lists,
+            },
+        )?;
+        writeln!(
+            f,
+            "Location: {}",
+            self.constraints
+                .location
+                .as_ref()
+                .map(|location| LocationConstraintFormatter {
+                    constraint: location,
+                    custom_lists: self.custom_lists,
+                })
+        )?;
+        writeln!(f, "Provider(s): {}", self.constraints.providers)?;
+        write!(f, "Ownership: {}", self.constraints.ownership)
     }
 }
 
 /// Limits the set of [`crate::relay_list::Relay`]s used by a `RelaySelector` based on
 /// location.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(target_os = "android", derive(FromJava, IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-pub enum LocationConstraint {
+pub enum GeographicLocationConstraint {
     /// A country is represented by its two letter country code.
     Country(CountryCode),
     /// A city is composed of a country code and a city code.
@@ -334,66 +174,82 @@ pub enum LocationConstraint {
     Hostname(CountryCode, CityCode, Hostname),
 }
 
-impl LocationConstraint {
-    pub fn matches_with_opts(&self, relay: &Relay, ignore_include_in_country: bool) -> bool {
+#[derive(thiserror::Error, Debug)]
+#[error("Failed to parse {input} into a geographic location constraint")]
+pub struct ParseGeoLocationError {
+    input: String,
+}
+
+impl GeographicLocationConstraint {
+    /// Create a new [`GeographicLocationConstraint`] given a country.
+    pub fn country(country: impl Into<String>) -> Self {
+        GeographicLocationConstraint::Country(country.into())
+    }
+
+    /// Create a new [`GeographicLocationConstraint`] given a country and city.
+    pub fn city(country: impl Into<String>, city: impl Into<String>) -> Self {
+        GeographicLocationConstraint::City(country.into(), city.into())
+    }
+
+    /// Create a new [`GeographicLocationConstraint`] given a country, city and hostname.
+    pub fn hostname(
+        country: impl Into<String>,
+        city: impl Into<String>,
+        hostname: impl Into<String>,
+    ) -> Self {
+        GeographicLocationConstraint::Hostname(country.into(), city.into(), hostname.into())
+    }
+
+    /// Check if `self` is _just_ a country. See [`GeographicLocationConstraint`] for more details.
+    pub fn is_country(&self) -> bool {
+        matches!(self, GeographicLocationConstraint::Country(_))
+    }
+
+    pub fn get_hostname(&self) -> Option<&Hostname> {
         match self {
-            LocationConstraint::Country(ref country) => {
-                relay
-                    .location
-                    .as_ref()
-                    .map_or(false, |loc| loc.country_code == *country)
-                    && (ignore_include_in_country || relay.include_in_country)
-            }
-            LocationConstraint::City(ref country, ref city) => {
-                relay.location.as_ref().map_or(false, |loc| {
-                    loc.country_code == *country && loc.city_code == *city
-                })
-            }
-            LocationConstraint::Hostname(ref country, ref city, ref hostname) => {
-                relay.location.as_ref().map_or(false, |loc| {
-                    loc.country_code == *country
-                        && loc.city_code == *city
-                        && relay.hostname == *hostname
-                })
-            }
+            GeographicLocationConstraint::Hostname(_, _, hostname) => Some(hostname),
+            _ => None,
         }
     }
 }
 
-impl Constraint<LocationConstraint> {
-    pub fn matches_with_opts(&self, relay: &Relay, ignore_include_in_country: bool) -> bool {
-        match self {
-            Constraint::Only(constraint) => {
-                constraint.matches_with_opts(relay, ignore_include_in_country)
-            }
-            Constraint::Any => true,
-        }
-    }
-}
-
-impl Match<Relay> for LocationConstraint {
+impl Match<Relay> for GeographicLocationConstraint {
     fn matches(&self, relay: &Relay) -> bool {
-        self.matches_with_opts(relay, false)
+        match self {
+            GeographicLocationConstraint::Country(country) => {
+                relay.location.country_code == *country
+            }
+            GeographicLocationConstraint::City(country, city) => {
+                let loc = &relay.location;
+                loc.country_code == *country && loc.city_code == *city
+            }
+            GeographicLocationConstraint::Hostname(country, city, hostname) => {
+                let loc = &relay.location;
+                loc.country_code == *country
+                    && loc.city_code == *city
+                    && relay.hostname == *hostname
+            }
+        }
     }
 }
 
-impl Set<LocationConstraint> for LocationConstraint {
-    /// Returns whether `self` is equal to or a subset of `other`.
-    fn is_subset(&self, other: &Self) -> bool {
-        match self {
-            LocationConstraint::Country(_) => self == other,
-            LocationConstraint::City(ref country, ref _city) => match other {
-                LocationConstraint::Country(ref other_country) => country == other_country,
-                LocationConstraint::City(..) => self == other,
-                _ => false,
-            },
-            LocationConstraint::Hostname(ref country, ref city, ref _hostname) => match other {
-                LocationConstraint::Country(ref other_country) => country == other_country,
-                LocationConstraint::City(ref other_country, ref other_city) => {
-                    country == other_country && city == other_city
-                }
-                LocationConstraint::Hostname(..) => self == other,
-            },
+impl FromStr for GeographicLocationConstraint {
+    type Err = ParseGeoLocationError;
+
+    // TODO: Implement for country and city as well?
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        // A host name, such as "se-got-wg-101" maps to
+        // Country: se
+        // City: got
+        // hostname: se-got-wg-101
+        let x = input.split("-").collect::<Vec<_>>();
+        match x[..] {
+            [country] => Ok(GeographicLocationConstraint::country(country)),
+            [country, city] => Ok(GeographicLocationConstraint::city(country, city)),
+            [country, city, ..] => Ok(GeographicLocationConstraint::hostname(country, city, input)),
+            _ => Err(ParseGeoLocationError {
+                input: input.to_string(),
+            }),
         }
     }
 }
@@ -438,8 +294,8 @@ impl FromStr for Ownership {
 
 /// Returned when `Ownership::from_str` fails to convert a string into a
 /// [`Ownership`] object.
-#[derive(err_derive::Error, Debug, Clone, PartialEq, Eq)]
-#[error(display = "Not a valid ownership setting")]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[error("Not a valid ownership setting")]
 pub struct OwnershipParseError;
 
 /// Limits the set of [`crate::relay_list::Relay`]s used by a `RelaySelector` based on
@@ -456,9 +312,11 @@ pub struct Providers {
 pub struct NoProviders(());
 
 impl Providers {
-    pub fn new(providers: impl Iterator<Item = Provider>) -> Result<Providers, NoProviders> {
+    pub fn new(
+        providers: impl IntoIterator<Item = impl Into<Provider>>,
+    ) -> Result<Providers, NoProviders> {
         let providers = Providers {
-            providers: providers.collect(),
+            providers: providers.into_iter().map(Into::into).collect(),
         };
         if providers.providers.is_empty() {
             return Err(NoProviders(()));
@@ -468,6 +326,11 @@ impl Providers {
 
     pub fn into_vec(self) -> Vec<Provider> {
         self.providers.into_iter().collect()
+    }
+
+    /// Access the underlying set of [providers][`Provider`]
+    pub fn providers(&self) -> &HashSet<Provider> {
+        &self.providers
     }
 }
 
@@ -497,19 +360,21 @@ impl fmt::Display for Providers {
     }
 }
 
-impl fmt::Display for LocationConstraint {
+impl fmt::Display for GeographicLocationConstraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            LocationConstraint::Country(country) => write!(f, "country {country}"),
-            LocationConstraint::City(country, city) => write!(f, "city {city}, {country}"),
-            LocationConstraint::Hostname(country, city, hostname) => {
+            GeographicLocationConstraint::Country(country) => write!(f, "country {country}"),
+            GeographicLocationConstraint::City(country, city) => {
+                write!(f, "city {city}, {country}")
+            }
+            GeographicLocationConstraint::Hostname(country, city, hostname) => {
                 write!(f, "city {city}, {country}, hostname {hostname}")
             }
         }
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize, Serialize, Intersection)]
 pub struct TransportPort {
     pub protocol: TransportProtocol,
     pub port: Constraint<u16>,
@@ -538,102 +403,127 @@ impl fmt::Display for OpenVpnConstraints {
 
 /// [`Constraint`]s applicable to WireGuard relays.
 #[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 #[serde(rename_all = "snake_case", default)]
 pub struct WireguardConstraints {
-    #[cfg_attr(
-        target_os = "android",
-        jnix(map = "|constraint| constraint.map(|v| Port { value: v as i32 })")
-    )]
     pub port: Constraint<u16>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub ip_version: Constraint<IpVersion>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub use_multihop: bool,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub entry_location: Constraint<LocationConstraint>,
 }
 
-#[cfg(target_os = "android")]
-impl<'env, 'sub_env> FromJava<'env, JObject<'sub_env>> for WireguardConstraints
-where
-    'env: 'sub_env,
-{
-    const JNI_SIGNATURE: &'static str = "Lnet/mullvad/mullvadvpn/model/WireguardConstraints;";
+impl WireguardConstraints {
+    /// Enable or disable multihop.
+    pub fn use_multihop(&mut self, multihop: bool) {
+        self.use_multihop = multihop
+    }
 
-    fn from_java(env: &JnixEnv<'env>, object: JObject<'sub_env>) -> Self {
-        let object = env
-            .call_method(
-                object,
-                "component1",
-                "()Lnet/mullvad/mullvadvpn/model/Constraint;",
-                &[],
-            )
-            .expect("missing WireguardConstraints.port")
-            .l()
-            .expect("WireguardConstraints.port did not return an object");
-
-        let port: Constraint<Port> = Constraint::from_java(env, object);
-
-        WireguardConstraints {
-            port: port.map(|port| port.value as u16),
-            ..Default::default()
-        }
+    /// Check if multihop is enabled.
+    pub fn multihop(&self) -> bool {
+        self.use_multihop
     }
 }
 
-impl fmt::Display for WireguardConstraints {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self.port {
+pub struct WireguardConstraintsFormatter<'a> {
+    pub constraints: &'a WireguardConstraints,
+    pub custom_lists: &'a CustomListsSettings,
+}
+
+impl fmt::Display for WireguardConstraintsFormatter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.constraints.port {
             Constraint::Any => write!(f, "any port")?,
-            Constraint::Only(port) => write!(f, "port {port}")?,
+            Constraint::Only(port) => write!(f, "port {}", port)?,
         }
-        write!(f, " over ")?;
-        match self.ip_version {
-            Constraint::Any => write!(f, "IPv4 or IPv6")?,
-            Constraint::Only(protocol) => write!(f, "{protocol}")?,
+        if let Constraint::Only(ip_version) = self.constraints.ip_version {
+            write!(f, ", {},", ip_version)?;
         }
-        if self.use_multihop {
-            match &self.entry_location {
-                Constraint::Any => write!(f, " (via any location)"),
-                Constraint::Only(location) => write!(f, " (via {location})"),
-            }
-        } else {
-            Ok(())
+        if self.constraints.multihop() {
+            let location = self.constraints.entry_location.as_ref().map(|location| {
+                LocationConstraintFormatter {
+                    constraint: location,
+                    custom_lists: self.custom_lists,
+                }
+            });
+            write!(f, ", multihop entry {}", location)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeType {
+    /// Let the relay selection algorithm decide on bridges, based on the relay list
+    /// and normal bridge constraints.
+    #[default]
+    Normal,
+    /// Use custom bridge configuration.
+    Custom,
+}
+
+impl fmt::Display for BridgeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        match self {
+            BridgeType::Normal => f.write_str("normal"),
+            BridgeType::Custom => f.write_str("custom"),
         }
     }
 }
 
-/// Used for jni conversion.
-#[cfg(target_os = "android")]
-#[derive(Debug, Default, Clone, Eq, PartialEq, FromJava, IntoJava)]
-#[jnix(package = "net.mullvad.mullvadvpn.model")]
-struct Port {
-    value: i32,
-}
+#[derive(thiserror::Error, Debug)]
+#[error("Missing custom bridge settings")]
+pub struct MissingCustomBridgeSettings(());
 
 /// Specifies a specific endpoint or [`BridgeConstraints`] to use when `mullvad-daemon` selects a
 /// bridge server.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BridgeSettings {
-    /// Let the relay selection algorithm decide on bridges, based on the relay list.
-    Normal(BridgeConstraints),
-    Custom(ProxySettings),
+pub struct BridgeSettings {
+    pub bridge_type: BridgeType,
+    pub normal: BridgeConstraints,
+    pub custom: Option<CustomProxy>,
+}
+
+pub enum ResolvedBridgeSettings<'a> {
+    Normal(&'a BridgeConstraints),
+    Custom(&'a CustomProxy),
+}
+
+impl BridgeSettings {
+    pub fn resolve(&self) -> Result<ResolvedBridgeSettings<'_>, MissingCustomBridgeSettings> {
+        match (self.bridge_type, &self.custom) {
+            (BridgeType::Normal, _) => Ok(ResolvedBridgeSettings::Normal(&self.normal)),
+            (BridgeType::Custom, Some(custom)) => Ok(ResolvedBridgeSettings::Custom(custom)),
+            (BridgeType::Custom, None) => Err(MissingCustomBridgeSettings(())),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(FromJava, IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum SelectedObfuscation {
-    Auto,
     #[default]
+    Auto,
     Off,
     #[cfg_attr(feature = "clap", clap(name = "udp2tcp"))]
     Udp2Tcp,
+    Shadowsocks,
+}
+
+impl Intersection for SelectedObfuscation {
+    fn intersection(self, other: Self) -> Option<Self>
+    where
+        Self: PartialEq,
+        Self: Sized,
+    {
+        match (self, other) {
+            (left, SelectedObfuscation::Auto) => Some(left),
+            (SelectedObfuscation::Auto, right) => Some(right),
+            (left, right) if left == right => Some(left),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for SelectedObfuscation {
@@ -642,47 +532,15 @@ impl fmt::Display for SelectedObfuscation {
             SelectedObfuscation::Auto => "auto".fmt(f),
             SelectedObfuscation::Off => "off".fmt(f),
             SelectedObfuscation::Udp2Tcp => "udp2tcp".fmt(f),
+            SelectedObfuscation::Shadowsocks => "shadowsocks".fmt(f),
         }
     }
 }
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize, Intersection)]
 #[serde(rename_all = "snake_case")]
 pub struct Udp2TcpObfuscationSettings {
-    #[cfg_attr(
-        target_os = "android",
-        jnix(map = "|constraint| constraint.map(|v| v as i32)")
-    )]
     pub port: Constraint<u16>,
-}
-
-#[cfg(target_os = "android")]
-impl<'env, 'sub_env> FromJava<'env, JObject<'sub_env>> for Udp2TcpObfuscationSettings
-where
-    'env: 'sub_env,
-{
-    const JNI_SIGNATURE: &'static str = "Lnet/mullvad/mullvadvpn/model/Udp2TcpObfuscationSettings;";
-
-    fn from_java(env: &JnixEnv<'env>, object: JObject<'sub_env>) -> Self {
-        let object = env
-            .call_method(
-                object,
-                "component1",
-                "()Lnet/mullvad/mullvadvpn/model/Constraint;",
-                &[],
-            )
-            .expect("missing Udp2TcpObfuscationSettings.port")
-            .l()
-            .expect("Udp2TcpObfuscationSettings.port did not return an object");
-
-        let port: Constraint<i32> = Constraint::from_java(env, object);
-
-        Udp2TcpObfuscationSettings {
-            port: port.map(|port| port as u16),
-        }
-    }
 }
 
 impl fmt::Display for Udp2TcpObfuscationSettings {
@@ -694,19 +552,33 @@ impl fmt::Display for Udp2TcpObfuscationSettings {
     }
 }
 
+#[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize, Intersection)]
+#[serde(rename_all = "snake_case")]
+pub struct ShadowsocksSettings {
+    pub port: Constraint<u16>,
+}
+
+impl fmt::Display for ShadowsocksSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.port {
+            Constraint::Any => write!(f, "any port"),
+            Constraint::Only(port) => write!(f, "port {port}"),
+        }
+    }
+}
+
 /// Contains obfuscation settings
 #[derive(Default, Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(FromJava, IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 #[serde(rename_all = "snake_case")]
 #[serde(default)]
 pub struct ObfuscationSettings {
     pub selected_obfuscation: SelectedObfuscation,
     pub udp2tcp: Udp2TcpObfuscationSettings,
+    pub shadowsocks: ShadowsocksSettings,
 }
 
 /// Limits the set of bridge servers to use in `mullvad-daemon`.
-#[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize, Intersection)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
 pub struct BridgeConstraints {
@@ -715,18 +587,30 @@ pub struct BridgeConstraints {
     pub ownership: Constraint<Ownership>,
 }
 
-impl fmt::Display for BridgeConstraints {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self.location {
+pub struct BridgeConstraintsFormatter<'a> {
+    pub constraints: &'a BridgeConstraints,
+    pub custom_lists: &'a CustomListsSettings,
+}
+
+impl fmt::Display for BridgeConstraintsFormatter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.constraints.location {
             Constraint::Any => write!(f, "any location")?,
-            Constraint::Only(ref location_constraint) => location_constraint.fmt(f)?,
+            Constraint::Only(ref constraint) => write!(
+                f,
+                "{}",
+                LocationConstraintFormatter {
+                    constraint,
+                    custom_lists: self.custom_lists,
+                }
+            )?,
         }
         write!(f, " using ")?;
-        match self.providers {
+        match self.constraints.providers {
             Constraint::Any => write!(f, "any provider")?,
-            Constraint::Only(ref constraint) => constraint.fmt(f)?,
+            Constraint::Only(ref constraint) => write!(f, "{}", constraint)?,
         }
-        match self.ownership {
+        match self.constraints.ownership {
             Constraint::Any => Ok(()),
             Constraint::Only(ref constraint) => {
                 write!(f, " and {constraint}")
@@ -767,52 +651,82 @@ pub struct InternalBridgeConstraints {
     pub transport_protocol: Constraint<TransportProtocol>,
 }
 
-/// Used to update the [`RelaySettings`] used in `mullvad-daemon`.
-#[derive(Debug, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(FromJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-#[serde(rename_all = "snake_case")]
-pub enum RelaySettingsUpdate {
-    #[cfg_attr(target_os = "android", jnix(deny))]
-    CustomTunnelEndpoint(CustomTunnelEndpoint),
-    Normal(RelayConstraintsUpdate),
+/// Options to override for a particular relay to use instead of the ones specified in the relay
+/// list
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RelayOverride {
+    /// Hostname for which to override the given options
+    pub hostname: Hostname,
+    /// IPv4 address to use instead of the default
+    pub ipv4_addr_in: Option<Ipv4Addr>,
+    /// IPv6 address to use instead of the default
+    pub ipv6_addr_in: Option<Ipv6Addr>,
 }
 
-impl RelaySettingsUpdate {
-    /// Returns false if the specified relay settings update explicitly do not allow for bridging
-    /// (i.e. use UDP instead of TCP)
-    pub fn supports_bridge(&self) -> bool {
-        match &self {
-            RelaySettingsUpdate::CustomTunnelEndpoint(endpoint) => {
-                endpoint.endpoint().protocol == TransportProtocol::Tcp
-            }
-            RelaySettingsUpdate::Normal(update) => !matches!(
-                &update.openvpn_constraints,
-                Some(OpenVpnConstraints {
-                    port: Constraint::Only(TransportPort {
-                        protocol: TransportProtocol::Udp,
-                        ..
-                    })
-                })
-            ),
+impl RelayOverride {
+    pub fn empty(hostname: Hostname) -> RelayOverride {
+        RelayOverride {
+            hostname,
+            ipv4_addr_in: None,
+            ipv6_addr_in: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self == &Self::empty(self.hostname.clone())
+    }
+
+    pub fn apply_to_relay(&self, relay: &mut Relay) {
+        if let Some(ipv4_addr_in) = self.ipv4_addr_in {
+            log::debug!(
+                "Overriding ipv4_addr_in for {}: {ipv4_addr_in}",
+                relay.hostname
+            );
+            relay.override_ipv4(ipv4_addr_in);
+        }
+        if let Some(ipv6_addr_in) = self.ipv6_addr_in {
+            log::debug!(
+                "Overriding ipv6_addr_in for {}: {ipv6_addr_in}",
+                relay.hostname
+            );
+            relay.override_ipv6(ipv6_addr_in);
+        }
+
+        // Additional IPs should be ignored when overrides are present
+        if let RelayEndpointData::Wireguard(data) = &mut relay.endpoint_data {
+            data.shadowsocks_extra_addr_in.retain(|addr| {
+                let not_overridden_v4 = self.ipv4_addr_in.is_none() && addr.is_ipv4();
+                let not_overridden_v6 = self.ipv6_addr_in.is_none() && addr.is_ipv6();
+
+                // Keep address if it's not overridden
+                not_overridden_v4 || not_overridden_v6
+            });
         }
     }
 }
 
-/// Used in [`RelaySettings`] to change relay constraints in the daemon.
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[cfg_attr(target_os = "android", derive(FromJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-#[serde(default)]
-pub struct RelayConstraintsUpdate {
-    pub location: Option<Constraint<LocationConstraint>>,
-    #[cfg_attr(target_os = "android", jnix(default))]
-    pub providers: Option<Constraint<Providers>>,
-    #[cfg_attr(target_os = "android", jnix(default))]
-    pub ownership: Option<Constraint<Ownership>>,
-    #[cfg_attr(target_os = "android", jnix(default))]
-    pub tunnel_protocol: Option<Constraint<TunnelType>>,
-    pub wireguard_constraints: Option<WireguardConstraints>,
-    #[cfg_attr(target_os = "android", jnix(default))]
-    pub openvpn_constraints: Option<OpenVpnConstraints>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hostname() {
+        // Parse a country
+        assert_eq!(
+            "se".parse::<GeographicLocationConstraint>().unwrap(),
+            GeographicLocationConstraint::country("se")
+        );
+        // Parse a city
+        assert_eq!(
+            "se-got".parse::<GeographicLocationConstraint>().unwrap(),
+            GeographicLocationConstraint::city("se", "got")
+        );
+        // Parse a hostname
+        assert_eq!(
+            "se-got-wg-101"
+                .parse::<GeographicLocationConstraint>()
+                .unwrap(),
+            GeographicLocationConstraint::hostname("se", "got", "se-got-wg-101")
+        );
+    }
 }

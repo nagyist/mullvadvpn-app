@@ -3,13 +3,13 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 17/02/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadTypes
 
-extension DecodingError: CustomErrorDescriptionProtocol {
+extension DecodingError: MullvadTypes.CustomErrorDescriptionProtocol {
     public var customErrorDescription: String? {
         switch self {
         case let .typeMismatch(type, context):
@@ -30,7 +30,7 @@ extension DecodingError: CustomErrorDescriptionProtocol {
     }
 }
 
-extension EncodingError: CustomErrorDescriptionProtocol {
+extension EncodingError: MullvadTypes.CustomErrorDescriptionProtocol {
     public var customErrorDescription: String? {
         switch self {
         case let .invalidValue(_, context):

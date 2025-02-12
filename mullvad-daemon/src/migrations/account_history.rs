@@ -1,8 +1,8 @@
 use super::{Error, Result};
-use mullvad_types::account::AccountToken;
+use mullvad_types::account::AccountNumber;
 use regex::Regex;
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, sync::LazyLock};
 use talpid_types::ErrorExt;
 use tokio::{
     fs::{self, File},
@@ -16,9 +16,7 @@ use tokio::{
 
 const ACCOUNT_HISTORY_FILE: &str = "account-history.json";
 
-lazy_static::lazy_static! {
-    static ref ACCOUNT_REGEX: Regex = Regex::new(r"^[0-9]+$").unwrap();
-}
+static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+$").unwrap());
 
 pub async fn migrate_location(old_dir: &Path, new_dir: &Path) {
     let old_path = old_dir.join(ACCOUNT_HISTORY_FILE);
@@ -27,13 +25,16 @@ pub async fn migrate_location(old_dir: &Path, new_dir: &Path) {
         return;
     }
 
-    if let Err(error) = fs::copy(&old_path, &new_path).await {
-        log::error!(
-            "{}",
-            error.display_chain_with_msg("Failed to migrate account history file location")
-        );
-    } else {
-        let _ = fs::remove_file(old_path).await;
+    match fs::copy(&old_path, &new_path).await {
+        Err(error) => {
+            log::error!(
+                "{}",
+                error.display_chain_with_msg("Failed to migrate account history file location")
+            );
+        }
+        _ => {
+            let _ = fs::remove_file(old_path).await;
+        }
     }
 }
 
@@ -69,7 +70,7 @@ pub async fn migrate_formats(settings_dir: &Path, settings: &mut serde_json::Val
 fn migrate_formats_inner(
     account_bytes: &[u8],
     settings: &mut serde_json::Value,
-) -> Result<Option<AccountToken>> {
+) -> Result<Option<AccountNumber>> {
     if let Ok(result) = try_format_v2(account_bytes) {
         if let Some((token, wg_data)) = result {
             settings["wireguard"] = wg_data;
@@ -80,7 +81,7 @@ fn migrate_formats_inner(
     } else if let Ok(token) = try_format_v1(account_bytes) {
         Ok(token)
     } else {
-        Err(Error::ParseHistoryError)
+        Err(Error::ParseHistory)
     }
 }
 
@@ -91,7 +92,7 @@ fn is_format_v3(bytes: &[u8]) -> bool {
     }
 }
 
-async fn write_format_v3(mut file: File, token: Option<AccountToken>) -> Result<()> {
+async fn write_format_v3(mut file: File, token: Option<AccountNumber>) -> Result<()> {
     file.set_len(0).await.map_err(Error::WriteHistory)?;
     file.seek(io::SeekFrom::Start(0))
         .await
@@ -104,26 +105,26 @@ async fn write_format_v3(mut file: File, token: Option<AccountToken>) -> Result<
     file.sync_all().await.map_err(Error::WriteHistory)
 }
 
-fn try_format_v2(bytes: &[u8]) -> Result<Option<(AccountToken, serde_json::Value)>> {
+fn try_format_v2(bytes: &[u8]) -> Result<Option<(AccountNumber, serde_json::Value)>> {
     #[derive(Deserialize, Clone)]
     pub struct AccountEntry {
-        pub account: AccountToken,
+        pub account: AccountNumber,
         pub wireguard: serde_json::Value,
     }
     Ok(serde_json::from_slice::<'_, Vec<AccountEntry>>(bytes)
-        .map_err(|_error| Error::ParseHistoryError)?
+        .map_err(|_error| Error::ParseHistory)?
         .into_iter()
         .next()
         .map(|entry| (entry.account, entry.wireguard)))
 }
 
-fn try_format_v1(bytes: &[u8]) -> Result<Option<AccountToken>> {
+fn try_format_v1(bytes: &[u8]) -> Result<Option<AccountNumber>> {
     #[derive(Deserialize)]
     struct OldFormat {
-        accounts: Vec<AccountToken>,
+        accounts: Vec<AccountNumber>,
     }
     Ok(serde_json::from_slice::<'_, OldFormat>(bytes)
-        .map_err(|_error| Error::ParseHistoryError)?
+        .map_err(|_error| Error::ParseHistory)?
         .accounts
         .into_iter()
         .next())

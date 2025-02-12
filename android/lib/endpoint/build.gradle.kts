@@ -1,25 +1,24 @@
 plugins {
-    id(Dependencies.Plugin.androidLibraryId)
-    id(Dependencies.Plugin.kotlinAndroidId)
-    id(Dependencies.Plugin.kotlinParcelizeId)
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.parcelize)
 }
 
 android {
     namespace = "net.mullvad.mullvadvpn.lib.endpoint"
-    compileSdk = Versions.Android.compileSdkVersion
+    compileSdk = Versions.compileSdkVersion
+    buildToolsVersion = Versions.buildToolsVersion
 
-    defaultConfig {
-        minSdk = Versions.Android.minSdkVersion
-        targetSdk = Versions.Android.targetSdkVersion
-    }
+    defaultConfig { minSdk = Versions.minSdkVersion }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
         jvmTarget = Versions.jvmTarget
+        allWarningsAsErrors = true
     }
 
     lint {
@@ -27,8 +26,7 @@ android {
         abortOnError = true
         warningsAsErrors = true
     }
+    buildFeatures { buildConfig = true }
 }
 
-dependencies {
-    implementation(Dependencies.Kotlin.stdlib)
-}
+dependencies { implementation(libs.kotlin.stdlib) }

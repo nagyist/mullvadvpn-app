@@ -5,10 +5,11 @@
 //! must be checked so that the user can be directed to approve the launch
 //! daemon in the system settings.
 
-use objc::{class, msg_send, sel, sel_impl};
+use libc::c_longlong;
+use objc2::{class, msg_send, runtime::AnyObject, Encode, Encoding, RefEncode};
 use std::ffi::CStr;
 
-type Id = *mut objc::runtime::Object;
+type Id = *mut AnyObject;
 
 // Framework that contains `SMAppService`.
 #[link(name = "ServiceManagement", kind = "framework")]
@@ -18,9 +19,23 @@ extern "C" {}
 #[repr(C)]
 #[derive(Debug)]
 struct NSOperatingSystemVersion {
-    major_version: libc::c_ulong,
-    minor_version: libc::c_ulong,
-    patch_version: libc::c_ulong,
+    major_version: c_longlong,
+    minor_version: c_longlong,
+    patch_version: c_longlong,
+}
+
+/// Implement Objective-C type encoding for the struct. Allows the `objc2` crate
+/// to perform function signature matching before performing calls into the Objective-C
+/// runtime.
+unsafe impl Encode for NSOperatingSystemVersion {
+    const ENCODING: Encoding = Encoding::Struct(
+        "NSOperatingSystemVersion",
+        &[Encoding::LongLong, Encoding::LongLong, Encoding::LongLong],
+    );
+}
+
+unsafe impl RefEncode for NSOperatingSystemVersion {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
 /// Authorization status of the Mullvad daemon.
@@ -69,9 +84,7 @@ fn daemon_plist_url() -> Object {
     /// Path to the plist that defines the Mullvad launch daemon.
     /// It must be kept in sync with the path defined in
     /// `dist-assets/pkg-scripts/postinstall`.
-    const DAEMON_PLIST_PATH: &CStr = unsafe {
-        CStr::from_bytes_with_nul_unchecked(b"/Library/LaunchDaemons/net.mullvad.daemon.plist\0")
-    };
+    const DAEMON_PLIST_PATH: &CStr = c"/Library/LaunchDaemons/net.mullvad.daemon.plist";
 
     let nsstr_inst: Id = unsafe { msg_send![class!(NSString), alloc] };
     let nsstr_inst: Id =
@@ -80,7 +93,7 @@ fn daemon_plist_url() -> Object {
     let nsurl_inst: Id = unsafe { msg_send![class!(NSURL), alloc] };
     let nsurl_inst: Id = unsafe { msg_send![nsurl_inst, initWithString: nsstr_inst] };
 
-    let _: libc::c_void = unsafe { msg_send![nsstr_inst, release] };
+    let _: () = unsafe { msg_send![nsstr_inst, release] };
 
     assert!(!nsurl_inst.is_null());
 
@@ -92,6 +105,6 @@ struct Object(Id);
 
 impl Drop for Object {
     fn drop(&mut self) {
-        let _: libc::c_void = unsafe { msg_send![self.0, release] };
+        let _: () = unsafe { msg_send![self.0, release] };
     }
 }

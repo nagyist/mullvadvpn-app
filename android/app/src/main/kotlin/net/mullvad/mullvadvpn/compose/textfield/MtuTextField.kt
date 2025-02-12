@@ -10,23 +10,21 @@ fun MtuTextField(
     isValidValue: Boolean,
     modifier: Modifier = Modifier,
     onValueChanged: (String) -> Unit = {},
-    onFocusChange: (Boolean) -> Unit = {},
     onSubmit: (String) -> Unit = {},
     isEnabled: Boolean = true,
     placeholderText: String = "",
-    maxCharLength: Int
+    maxCharLength: Int,
 ) {
     CustomTextField(
         value = value,
         keyboardType = KeyboardType.Number,
         modifier = modifier,
         onValueChanged = onValueChanged,
-        onFocusChange = onFocusChange,
         onSubmit = onSubmit,
         isEnabled = isEnabled,
         placeholderText = placeholderText,
         maxCharLength = maxCharLength,
         isValidValue = isValidValue,
-        isDigitsOnlyAllowed = true
+        isDigitsOnlyAllowed = true,
     )
 }

@@ -1,10 +1,11 @@
 use super::{
-    ConnectingState, ErrorState, EventConsequence, SharedTunnelStateValues, TunnelCommand,
-    TunnelCommandReceiver, TunnelState, TunnelStateTransition, TunnelStateWrapper,
+    ConnectingState, EventConsequence, SharedTunnelStateValues, TunnelCommand,
+    TunnelCommandReceiver, TunnelState, TunnelStateTransition,
 };
-#[cfg(target_os = "macos")]
-use crate::dns;
+#[cfg(not(target_os = "android"))]
 use crate::firewall::FirewallPolicy;
+#[cfg(target_os = "macos")]
+use crate::{dns, tunnel_state_machine::ErrorState};
 use futures::StreamExt;
 #[cfg(target_os = "macos")]
 use std::net::Ipv4Addr;
@@ -13,9 +14,64 @@ use talpid_types::tunnel::ErrorStateCause;
 use talpid_types::ErrorExt;
 
 /// No tunnel is running.
-pub struct DisconnectedState;
+pub struct DisconnectedState(());
 
 impl DisconnectedState {
+    pub(super) fn enter(
+        shared_values: &mut SharedTunnelStateValues,
+        should_reset_firewall: bool,
+    ) -> (Box<dyn TunnelState>, TunnelStateTransition) {
+        #[cfg(target_os = "macos")]
+        if let Err(err) = shared_values
+            .runtime
+            .block_on(shared_values.split_tunnel.reset_tunnel())
+        {
+            log::error!(
+                "{}",
+                err.display_chain_with_msg("Failed to disable split tunneling")
+            );
+        }
+        #[cfg(target_os = "macos")]
+        if shared_values.block_when_disconnected {
+            if let Err(err) = Self::setup_local_dns_config(shared_values) {
+                log::error!(
+                    "{}",
+                    err.display_chain_with_msg("Failed to start filtering resolver:")
+                );
+            }
+        } else if let Err(error) = shared_values.dns_monitor.reset() {
+            log::error!(
+                "{}",
+                error.display_chain_with_msg("Unable to disable filtering resolver")
+            );
+        }
+        #[cfg(windows)]
+        Self::register_split_tunnel_addresses(shared_values, should_reset_firewall);
+        Self::set_firewall_policy(shared_values, should_reset_firewall);
+        #[cfg(target_os = "linux")]
+        shared_values.reset_connectivity_check();
+        #[cfg(target_os = "android")]
+        shared_values.tun_provider.lock().unwrap().close_tun();
+
+        Self::construct_state_transition(shared_values)
+    }
+
+    #[cfg_attr(target_os = "android", allow(unused_variables))]
+    fn construct_state_transition(
+        shared_values: &mut SharedTunnelStateValues,
+    ) -> (Box<dyn TunnelState>, TunnelStateTransition) {
+        (
+            Box::new(DisconnectedState(())),
+            TunnelStateTransition::Disconnected {
+                // Being disconnected and having lockdown mode enabled implies that your internet
+                // access is locked down
+                #[cfg(not(target_os = "android"))]
+                locked_down: shared_values.block_when_disconnected,
+            },
+        )
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn set_firewall_policy(
         shared_values: &mut SharedTunnelStateValues,
         should_reset_firewall: bool,
@@ -45,6 +101,13 @@ impl DisconnectedState {
             log::error!("{}", error_chain);
         }
     }
+
+    // NOTE: There is no firewall on Android, so it is pointless to pretend to enforce firewall
+    // policies by calling a bunch of functions that will end up being a no-op. The proper
+    // long-term fix would be to remove the firewall module completely,
+    // but I leave this for a future developer to clean up.
+    #[cfg(target_os = "android")]
+    fn set_firewall_policy(_: &mut SharedTunnelStateValues, _: bool) {}
 
     #[cfg(windows)]
     fn register_split_tunnel_addresses(
@@ -80,49 +143,22 @@ impl DisconnectedState {
         shared_values: &mut SharedTunnelStateValues,
     ) -> Result<(), dns::Error> {
         shared_values
-            .dns_monitor
-            .set("lo", &[Ipv4Addr::LOCALHOST.into()])
+            .runtime
+            .block_on(shared_values.filtering_resolver.disable_forward());
+
+        shared_values.dns_monitor.set(
+            "lo",
+            dns::DnsConfig::default().resolve(
+                &[Ipv4Addr::LOCALHOST.into()],
+                shared_values.filtering_resolver.listening_port(),
+            ),
+        )
     }
 }
 
 impl TunnelState for DisconnectedState {
-    type Bootstrap = bool;
-
-    fn enter(
-        shared_values: &mut SharedTunnelStateValues,
-        should_reset_firewall: Self::Bootstrap,
-    ) -> (TunnelStateWrapper, TunnelStateTransition) {
-        #[cfg(target_os = "macos")]
-        if shared_values.block_when_disconnected {
-            if let Err(err) = Self::setup_local_dns_config(shared_values) {
-                log::error!(
-                    "{}",
-                    err.display_chain_with_msg("Failed to start filtering resolver:")
-                );
-            }
-        } else if let Err(error) = shared_values.dns_monitor.reset() {
-            log::error!(
-                "{}",
-                error.display_chain_with_msg("Unable to disable filtering resolver")
-            );
-        }
-
-        #[cfg(windows)]
-        Self::register_split_tunnel_addresses(shared_values, should_reset_firewall);
-        Self::set_firewall_policy(shared_values, should_reset_firewall);
-        #[cfg(target_os = "linux")]
-        shared_values.reset_connectivity_check();
-        #[cfg(target_os = "android")]
-        shared_values.tun_provider.lock().unwrap().close_tun();
-
-        (
-            TunnelStateWrapper::from(DisconnectedState),
-            TunnelStateTransition::Disconnected,
-        )
-    }
-
     fn handle_event(
-        self,
+        self: Box<Self>,
         runtime: &tokio::runtime::Handle,
         commands: &mut TunnelCommandReceiver,
         shared_values: &mut SharedTunnelStateValues,
@@ -130,37 +166,38 @@ impl TunnelState for DisconnectedState {
         use self::EventConsequence::*;
 
         match runtime.block_on(commands.next()) {
-            Some(TunnelCommand::AllowLan(allow_lan)) => {
-                if shared_values.allow_lan != allow_lan {
-                    // The only platform that can fail is Android, but Android doesn't support the
-                    // "block when disconnected" option, so the following call never fails.
-                    shared_values
-                        .set_allow_lan(allow_lan)
-                        .expect("Failed to set allow LAN parameter");
-
+            Some(TunnelCommand::AllowLan(allow_lan, complete_tx)) => {
+                if shared_values.set_allow_lan(allow_lan) {
                     Self::set_firewall_policy(shared_values, false);
                 }
-                SameState(self.into())
+                let _ = complete_tx.send(());
+                SameState(self)
             }
+            #[cfg(not(target_os = "android"))]
             Some(TunnelCommand::AllowEndpoint(endpoint, tx)) => {
                 if shared_values.allowed_endpoint != endpoint {
                     shared_values.allowed_endpoint = endpoint;
                     Self::set_firewall_policy(shared_values, false);
                 }
                 let _ = tx.send(());
-                SameState(self.into())
+                SameState(self)
             }
-            Some(TunnelCommand::Dns(servers)) => {
+            Some(TunnelCommand::Dns(servers, complete_tx)) => {
                 // Same situation as allow LAN above.
-                shared_values
-                    .set_dns_servers(servers)
-                    .expect("Failed to reconnect after changing custom DNS servers");
-
-                SameState(self.into())
+                shared_values.set_dns_config(servers);
+                let _ = complete_tx.send(());
+                SameState(self)
             }
-            Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
+            #[cfg(not(target_os = "android"))]
+            Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected, complete_tx)) => {
                 if shared_values.block_when_disconnected != block_when_disconnected {
                     shared_values.block_when_disconnected = block_when_disconnected;
+
+                    // TODO: Investigate if we can simply return
+                    // `NewState(Self::enter(shared_values, true))`.
+                    // The logic for updating the firewall in `DisconnectedState::enter` is
+                    // identical but it does not enter the error state if setting the local DNS
+                    // fails.
                     Self::set_firewall_policy(shared_values, true);
                     #[cfg(windows)]
                     Self::register_split_tunnel_addresses(shared_values, true);
@@ -179,33 +216,45 @@ impl TunnelState for DisconnectedState {
                     } else {
                         Self::reset_dns(shared_values);
                     }
+                    let _ = complete_tx.send(());
+                    NewState(Self::construct_state_transition(shared_values))
+                } else {
+                    let _ = complete_tx.send(());
+                    SameState(self)
                 }
-                SameState(self.into())
             }
-            Some(TunnelCommand::IsOffline(is_offline)) => {
-                shared_values.is_offline = is_offline;
-                SameState(self.into())
+            Some(TunnelCommand::Connectivity(connectivity)) => {
+                shared_values.connectivity = connectivity;
+                SameState(self)
             }
             Some(TunnelCommand::Connect) => NewState(ConnectingState::enter(shared_values, 0)),
-            Some(TunnelCommand::Block(reason)) => {
-                Self::reset_dns(shared_values);
-                NewState(ErrorState::enter(shared_values, reason))
-            }
+            Some(TunnelCommand::Block(_reason)) => SameState(self),
             #[cfg(target_os = "android")]
             Some(TunnelCommand::BypassSocket(fd, done_tx)) => {
                 shared_values.bypass_socket(fd, done_tx);
-                SameState(self.into())
+                SameState(self)
             }
             #[cfg(windows)]
             Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
-                shared_values.split_tunnel.set_paths(&paths, result_tx);
-                SameState(self.into())
+                shared_values.exclude_paths(paths, result_tx);
+                SameState(self)
+            }
+            #[cfg(target_os = "android")]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                shared_values.set_excluded_paths(paths);
+                let _ = result_tx.send(Ok(()));
+                SameState(self)
+            }
+            #[cfg(target_os = "macos")]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                let _ = result_tx.send(shared_values.set_exclude_paths(paths).map(|_| ()));
+                SameState(self)
             }
             None => {
                 Self::reset_dns(shared_values);
                 Finished
             }
-            Some(_) => SameState(self.into()),
+            Some(_) => SameState(self),
         }
     }
 }

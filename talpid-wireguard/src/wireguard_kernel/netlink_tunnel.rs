@@ -1,11 +1,14 @@
 use std::pin::Pin;
 
 use futures::Future;
+use talpid_tunnel_config_client::DaitaSettings;
+
+use crate::config::MULLVAD_INTERFACE_NAME;
 
 use super::{
     super::stats::{Stats, StatsMap},
     wg_message::DeviceNla,
-    Config, Error, Handle, Tunnel, TunnelError, MULLVAD_INTERFACE_NAME,
+    Config, Error, Handle, Tunnel, TunnelError,
 };
 
 pub struct NetlinkTunnel {
@@ -62,6 +65,7 @@ impl NetlinkTunnel {
     }
 }
 
+#[async_trait::async_trait]
 impl Tunnel for NetlinkTunnel {
     fn get_interface_name(&self) -> String {
         let mut wg = self.netlink_connections.wg_handle.clone();
@@ -93,27 +97,25 @@ impl Tunnel for NetlinkTunnel {
         tokio_handle.block_on(async move {
             if let Err(err) = netlink_connections.delete_device(interface_index).await {
                 log::error!("Failed to remove WireGuard device: {}", err);
-                Err(TunnelError::FatalStartWireguardError)
+                Err(TunnelError::FatalStartWireguardError(Box::new(err)))
             } else {
                 Ok(())
             }
         })
     }
 
-    fn get_tunnel_stats(&self) -> std::result::Result<StatsMap, TunnelError> {
-        let mut wg = self.netlink_connections.wg_handle.clone();
+    async fn get_tunnel_stats(&self) -> std::result::Result<StatsMap, TunnelError> {
         let interface_index = self.interface_index;
-        self.tokio_handle.block_on(async move {
-            let device = wg.get_by_index(interface_index).await.map_err(|err| {
-                log::error!("Failed to fetch WireGuard device config: {}", err);
-                TunnelError::GetConfigError
-            })?;
-            Ok(Stats::parse_device_message(&device))
-        })
+        let mut wg = self.netlink_connections.wg_handle.clone();
+        let device = wg.get_by_index(interface_index).await.map_err(|err| {
+            log::error!("Failed to fetch WireGuard device config: {}", err);
+            TunnelError::GetConfigError
+        })?;
+        Ok(Stats::parse_device_message(&device))
     }
 
     fn set_config(
-        &self,
+        &mut self,
         config: Config,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), TunnelError>> + Send + 'static>> {
         let mut wg = self.netlink_connections.wg_handle.clone();
@@ -122,9 +124,14 @@ impl Tunnel for NetlinkTunnel {
             wg.set_config(interface_index, &config)
                 .await
                 .map_err(|err| {
-                    log::error!("Failed to fetch WireGuard device config: {}", err);
+                    log::error!("Failed to set WireGuard device config: {}", err);
                     TunnelError::SetConfigError
                 })
         })
+    }
+
+    /// Outright fail to start - this tunnel type does not support DAITA.
+    fn start_daita(&mut self, _: DaitaSettings) -> std::result::Result<(), TunnelError> {
+        Err(TunnelError::DaitaNotSupported)
     }
 }

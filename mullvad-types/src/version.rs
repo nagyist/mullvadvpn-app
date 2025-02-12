@@ -1,45 +1,37 @@
-#[cfg(target_os = "android")]
-use jnix::IntoJava;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp::{Ord, Ordering, PartialOrd},
+    cmp::Ordering,
+    fmt::{self, Formatter},
     str::FromStr,
+    sync::LazyLock,
 };
 
-lazy_static::lazy_static! {
-    static ref STABLE_REGEX: Regex = Regex::new(r"^(\d{4})\.(\d+)$").unwrap();
-    static ref BETA_REGEX: Regex = Regex::new(r"^(\d{4})\.(\d+)-beta(\d+)$").unwrap();
-    static ref DEV_REGEX: Regex = Regex::new(r"^(\d{4})\.(\d+)(\.\d+)?(-beta(\d+))?-dev-(\w+)$").unwrap();
-}
+static STABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{4})\.(\d+)$").unwrap());
+static BETA_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})\.(\d+)-beta(\d+)$").unwrap());
+static DEV_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})\.(\d+)(\.\d+)?(-beta(\d+))?-dev-(\w+)$").unwrap());
 
 /// AppVersionInfo represents the current stable and the current latest release versions of the
 /// Mullvad VPN app.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub struct AppVersionInfo {
     /// False if Mullvad has stopped supporting the currently running version. This could mean
     /// a number of things. For example:
     /// * API endpoints it uses might not work any more.
     /// * Software bundled with this version, such as OpenVPN or OpenSSL, has known security
     ///   issues, so using it is no longer recommended.
+    ///
     /// The user should really upgrade when this is false.
     pub supported: bool,
     /// Latest stable version
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub latest_stable: AppVersion,
     /// Equal to `latest_stable` when the newest release is a stable release. But will contain
     /// beta versions when those are out for testing.
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub latest_beta: AppVersion,
     /// Whether should update to newer version
     pub suggested_upgrade: Option<AppVersion>,
-    /// Temporary field provided by the API used to decide if a user should default to Wireguard or
-    /// OpenVpn. Represents the percentage of users which should use Wireguard.
-    /// NOTE: This field will be removed completely in future versions.
-    #[cfg_attr(target_os = "android", jnix(skip))]
-    pub wg_migration_threshold: f32,
 }
 
 pub type AppVersion = String;
@@ -141,18 +133,18 @@ impl PartialOrd for ParsedAppVersion {
     }
 }
 
-impl ToString for ParsedAppVersion {
-    fn to_string(&self) -> String {
+impl fmt::Display for ParsedAppVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stable(year, version) => format!("{year}.{version}"),
+            Self::Stable(year, version) => write!(f, "{year}.{version}"),
             Self::Beta(year, version, beta_version) => {
-                format!("{year}.{version}-beta{beta_version}")
+                write!(f, "{year}.{version}-beta{beta_version}")
             }
             Self::Dev(year, version, beta_version, hash) => {
                 if let Some(beta_version) = beta_version {
-                    format!("{year}.{version}-beta{beta_version}-dev-{hash}")
+                    write!(f, "{year}.{version}-beta{beta_version}-dev-{hash}")
                 } else {
-                    format!("{year}.{version}-dev-{hash}")
+                    write!(f, "{year}.{version}-dev-{hash}")
                 }
             }
         }

@@ -3,49 +3,41 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
-use talpid_routing::{self, RouteManagerHandle};
-use talpid_types::ErrorExt;
+use talpid_routing::RouteManagerHandle;
+use talpid_types::{net::Connectivity, ErrorExt};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "The route manager returned an error")]
-    RouteManagerError(#[error(source)] talpid_routing::Error),
+    #[error("The route manager returned an error")]
+    RouteManagerError(#[source] talpid_routing::Error),
 }
 
 pub struct MonitorHandle {
     route_manager: RouteManagerHandle,
     fwmark: Option<u32>,
-    _notify_tx: Arc<UnboundedSender<bool>>,
+    _notify_tx: Arc<UnboundedSender<Connectivity>>,
 }
 
+/// A non-local IPv4 address.
 const PUBLIC_INTERNET_ADDRESS_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(193, 138, 218, 78));
+/// A non-local IPv6 address.
 const PUBLIC_INTERNET_ADDRESS_V6: IpAddr =
     IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6));
 
 impl MonitorHandle {
-    pub async fn host_is_offline(&self) -> bool {
-        match public_ip_unreachable(&self.route_manager, self.fwmark).await {
-            Ok(is_offline) => is_offline,
-            Err(err) => {
-                log::error!(
-                    "Failed to verify offline state: {}. Presuming connectivity",
-                    err
-                );
-                false
-            }
-        }
+    pub async fn connectivity(&self) -> Connectivity {
+        check_connectivity(&self.route_manager, self.fwmark).await
     }
 }
 
 pub async fn spawn_monitor(
-    notify_tx: UnboundedSender<bool>,
+    notify_tx: UnboundedSender<Connectivity>,
     route_manager: RouteManagerHandle,
     fwmark: Option<u32>,
 ) -> Result<MonitorHandle> {
-    let mut is_offline = public_ip_unreachable(&route_manager, fwmark).await?;
+    let mut connectivity = check_connectivity(&route_manager, fwmark).await;
 
     let mut listener = route_manager
         .change_listener()
@@ -64,18 +56,10 @@ pub async fn spawn_monitor(
         while let Some(_event) = listener.next().await {
             match sender.upgrade() {
                 Some(sender) => {
-                    let new_offline_state = public_ip_unreachable(&route_manager, fwmark)
-                        .await
-                        .unwrap_or_else(|err| {
-                            log::error!(
-                                "{}",
-                                err.display_chain_with_msg("Failed to infer offline state")
-                            );
-                            false
-                        });
-                    if new_offline_state != is_offline {
-                        is_offline = new_offline_state;
-                        let _ = sender.unbounded_send(is_offline);
+                    let new_connectivity = check_connectivity(&route_manager, fwmark).await;
+                    if new_connectivity != connectivity {
+                        connectivity = new_connectivity;
+                        let _ = sender.unbounded_send(connectivity);
                     }
                 }
                 None => return,
@@ -86,15 +70,36 @@ pub async fn spawn_monitor(
     Ok(monitor_handle)
 }
 
-async fn public_ip_unreachable(handle: &RouteManagerHandle, fwmark: Option<u32>) -> Result<bool> {
-    Ok(handle
-        .get_destination_route(PUBLIC_INTERNET_ADDRESS_V4, fwmark)
-        .await
-        .map_err(Error::RouteManagerError)?
-        .is_none()
-        && handle
-            .get_destination_route(PUBLIC_INTERNET_ADDRESS_V6, fwmark)
+async fn check_connectivity(handle: &RouteManagerHandle, fwmark: Option<u32>) -> Connectivity {
+    let route_exists = |destination| async move {
+        handle
+            .get_destination_route(destination, fwmark)
             .await
-            .unwrap_or(None)
-            .is_none())
+            .map(|route| route.is_some())
+    };
+
+    match (
+        route_exists(PUBLIC_INTERNET_ADDRESS_V4).await,
+        route_exists(PUBLIC_INTERNET_ADDRESS_V6).await,
+    ) {
+        (Ok(ipv4), Ok(ipv6)) => Connectivity::Status { ipv4, ipv6 },
+        // If we fail to retrieve the IPv4 route, always assume we're connected
+        (Err(err), _) => {
+            log::error!(
+                "Failed to verify offline state: {}. Presuming connectivity",
+                err
+            );
+            Connectivity::PresumeOnline
+        }
+        // Errors for IPv6 likely mean it's disabled, so assume it's unavailable
+        (Ok(ipv4), Err(err)) => {
+            log::trace!(
+                "{}",
+                err.display_chain_with_msg(
+                    "Failed to infer offline state for IPv6. Assuming it's unavailable"
+                )
+            );
+            Connectivity::Status { ipv4, ipv6: false }
+        }
+    }
 }

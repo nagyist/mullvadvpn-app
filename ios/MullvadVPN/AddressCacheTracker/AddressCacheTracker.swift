@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 08/12/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadLogging
@@ -12,19 +12,19 @@ import MullvadTypes
 import Operations
 import UIKit
 
-final class AddressCacheTracker {
-    /// Update interval (in seconds).
-    private static let updateInterval: TimeInterval = 60 * 60 * 24
+final class AddressCacheTracker: @unchecked Sendable {
+    /// Update interval.
+    private static let updateInterval: Duration = .days(1)
 
-    /// Retry interval (in seconds).
-    private static let retryInterval: TimeInterval = 60 * 15
+    /// Retry interval.
+    private static let retryInterval: Duration = .minutes(15)
 
     /// Logger.
     private let logger = Logger(label: "AddressCache.Tracker")
-    private let application: UIApplication
+    private let backgroundTaskProvider: BackgroundTaskProviding
 
     /// REST API proxy.
-    private let apiProxy: REST.APIProxy
+    private let apiProxy: APIQuerying
 
     /// Address cache.
     private let store: REST.AddressCache
@@ -45,8 +45,8 @@ final class AddressCacheTracker {
     private let nslock = NSLock()
 
     /// Designated initializer
-    init(application: UIApplication, apiProxy: REST.APIProxy, store: REST.AddressCache) {
-        self.application = application
+    init(backgroundTaskProvider: BackgroundTaskProviding, apiProxy: APIQuerying, store: REST.AddressCache) {
+        self.backgroundTaskProvider = backgroundTaskProvider
         self.apiProxy = apiProxy
         self.store = store
     }
@@ -65,7 +65,7 @@ final class AddressCacheTracker {
 
         let scheduleDate = _nextScheduleDate()
 
-        logger.debug("Schedule address cache update at \(scheduleDate.logFormatDate()).")
+        logger.debug("Schedule address cache update at \(scheduleDate.logFormatted).")
 
         scheduleEndpointsUpdate(startTime: .now() + scheduleDate.timeIntervalSinceNow)
     }
@@ -84,7 +84,7 @@ final class AddressCacheTracker {
         timer = nil
     }
 
-    func updateEndpoints(completionHandler: ((Result<Bool, Error>) -> Void)? = nil) -> Cancellable {
+    func updateEndpoints(completionHandler: ((sending Result<Bool, Error>) -> Void)? = nil) -> Cancellable {
         let operation = ResultBlockOperation<Bool> { finish -> Cancellable in
             guard self.nextScheduleDate() <= Date() else {
                 finish(.success(false))
@@ -103,7 +103,7 @@ final class AddressCacheTracker {
 
         operation.addObserver(
             BackgroundObserver(
-                application: application,
+                backgroundTaskProvider: backgroundTaskProvider,
                 name: "Update endpoints",
                 cancelUponExpiration: true
             )
@@ -165,7 +165,7 @@ final class AddressCacheTracker {
             let scheduleDate = self._nextScheduleDate()
 
             self.logger
-                .debug("Schedule next address cache update at \(scheduleDate.logFormatDate()).")
+                .debug("Schedule next address cache update at \(scheduleDate.logFormatted).")
 
             self.scheduleEndpointsUpdate(startTime: .now() + scheduleDate.timeIntervalSinceNow)
         }
@@ -174,11 +174,11 @@ final class AddressCacheTracker {
     private func _nextScheduleDate() -> Date {
         let nextDate = lastFailureAttemptDate.map { date in
             Date(
-                timeInterval: Self.retryInterval,
+                timeInterval: Self.retryInterval.timeInterval,
                 since: date
             )
         } ?? Date(
-            timeInterval: Self.updateInterval,
+            timeInterval: Self.updateInterval.timeInterval,
             since: store.getLastUpdateDate()
         )
 

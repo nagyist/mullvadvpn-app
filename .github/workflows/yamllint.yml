@@ -8,10 +8,13 @@ on:
       - '**/**.yml'
       - '**/**.yaml'
   workflow_dispatch:
+
+permissions: {}
+
 jobs:
   check-formatting:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: sudo apt-get install yamllint
       - run: yamllint .

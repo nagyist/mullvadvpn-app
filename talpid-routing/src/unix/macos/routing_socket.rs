@@ -1,9 +1,9 @@
 use std::{
     collections::VecDeque,
     mem::size_of,
-    os::unix::prelude::{FromRawFd, RawFd},
     pin::Pin,
     task::{ready, Context, Poll},
+    time::Duration,
 };
 
 use nix::{
@@ -13,25 +13,47 @@ use nix::{
 use std::{
     fs::File,
     io::{self, Read, Write},
+    os::fd::{AsRawFd, RawFd},
 };
 
 use super::data::{rt_msghdr_short, MessageType, RouteMessage};
 
 use tokio::io::{unix::AsyncFd, AsyncWrite, AsyncWriteExt};
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to open routing socket")]
-    OpenSocket(io::Error),
-    #[error(display = "Failed to write to routing socket")]
-    Write(io::Error),
-    #[error(display = "Failed to read from routing socket")]
-    Read(io::Error),
-    #[error(display = "Received a message that's too small")]
+    #[error("Failed to open routing socket")]
+    OpenSocket(#[source] io::Error),
+    #[error("Failed to write to routing socket")]
+    Write(#[source] io::Error),
+    #[error("Failed to read from routing socket")]
+    Read(#[source] io::Error),
+    #[error("Received a message that's too small")]
     MessageTooSmall(usize),
+    #[error("Failed to receive response to route message")]
+    ResponseTimeout,
+}
+
+impl Error {
+    /// Return the underlying `io::Error` (or `None`)
+    pub fn as_io_error(&self) -> Option<&io::Error> {
+        use std::error::Error;
+        self.source()
+            .and_then(|source| source.downcast_ref::<io::Error>())
+    }
+
+    /// Return whether an operation failed because the socket has been shut down
+    pub fn is_shutdown(&self) -> bool {
+        // ENOTCONN is returned when the socket is shut down (e.g., due to `pid_shutdown_sockets`)
+        self.as_io_error()
+            .map(|io_error| io_error.kind() == io::ErrorKind::NotConnected)
+            .unwrap_or(false)
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wraps a `PF_ROUTE` socket, keeps track of sent message IDs, and facilitates sending and
 /// receiving [route socket messages](#RouteMessage)
@@ -56,7 +78,7 @@ impl RoutingSocket {
 
     pub async fn recv_msg(&mut self, mut buf: &mut [u8]) -> Result<usize> {
         if let Some(buffered_msg) = self.buf.pop_front() {
-            let bytes_written = buf.write(&buffered_msg).map_err(Error::Write)?;
+            let bytes_written = buf.write(&buffered_msg).map_err(Error::Read)?;
             return Ok(bytes_written);
         }
         self.read_next_msg(buf).await
@@ -73,13 +95,17 @@ impl RoutingSocket {
     ) -> Result<Vec<u8>> {
         let (msg, seq) = self.next_route_msg(message, message_type);
         match self.socket.write(&msg).await {
-            Ok(_) => self.wait_for_response(seq).await,
+            Ok(_) => tokio::time::timeout(RESPONSE_TIMEOUT, self.wait_for_response(seq))
+                .await
+                .map_err(|_| Error::ResponseTimeout)?,
             Err(err) => Err(Error::Write(err)),
         }
     }
 
-    pub async fn wait_for_response(&mut self, response_num: i32) -> Result<Vec<u8>> {
+    async fn wait_for_response(&mut self, response_num: i32) -> Result<Vec<u8>> {
         loop {
+            talpid_types::detect_flood!();
+
             let mut buffer = vec![0u8; 2048];
             // do not truncate the buffer - trailing empty bytes won't be written but will be
             // assumed in the data format.
@@ -132,9 +158,11 @@ struct RoutingSocketInner {
 impl RoutingSocketInner {
     fn new() -> io::Result<Self> {
         let fd = socket(AddressFamily::Route, SockType::Raw, SockFlag::empty(), None)?;
-        let _ = fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(fcntl::OFlag::O_NONBLOCK))?;
-        // SAFETY: File handle is valid here
-        let socket = unsafe { File::from_raw_fd(fd) };
+        let _ = fcntl::fcntl(
+            fd.as_raw_fd(),
+            fcntl::FcntlArg::F_SETFL(fcntl::OFlag::O_NONBLOCK),
+        )?;
+        let socket = File::from(fd);
         Ok(Self {
             socket: AsyncFd::new(socket)?,
         })
@@ -151,7 +179,7 @@ impl RoutingSocketInner {
     }
 }
 
-impl std::os::unix::prelude::AsRawFd for RoutingSocketInner {
+impl AsRawFd for RoutingSocketInner {
     fn as_raw_fd(&self) -> RawFd {
         self.socket.as_raw_fd()
     }

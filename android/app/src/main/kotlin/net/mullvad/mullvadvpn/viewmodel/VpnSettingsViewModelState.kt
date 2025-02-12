@@ -1,199 +1,71 @@
 package net.mullvad.mullvadvpn.viewmodel
 
 import net.mullvad.mullvadvpn.compose.state.VpnSettingsUiState
-import net.mullvad.mullvadvpn.model.DefaultDnsOptions
-import net.mullvad.mullvadvpn.model.QuantumResistantState
-import net.mullvad.mullvadvpn.model.SelectedObfuscation
+import net.mullvad.mullvadvpn.lib.model.Constraint
+import net.mullvad.mullvadvpn.lib.model.DefaultDnsOptions
+import net.mullvad.mullvadvpn.lib.model.Mtu
+import net.mullvad.mullvadvpn.lib.model.ObfuscationMode
+import net.mullvad.mullvadvpn.lib.model.Port
+import net.mullvad.mullvadvpn.lib.model.PortRange
+import net.mullvad.mullvadvpn.lib.model.QuantumResistantState
 
 data class VpnSettingsViewModelState(
-    val mtuValue: String,
-    val isAutoConnectEnabled: Boolean,
+    val mtuValue: Mtu?,
     val isLocalNetworkSharingEnabled: Boolean,
     val isCustomDnsEnabled: Boolean,
-    val isAllowLanEnabled: Boolean,
     val customDnsList: List<CustomDnsItem>,
     val contentBlockersOptions: DefaultDnsOptions,
-    val selectedObfuscation: SelectedObfuscation,
-    val dialogState: VpnSettingsDialogState,
-    val quantumResistant: QuantumResistantState
+    val obfuscationMode: ObfuscationMode,
+    val selectedUdp2TcpObfuscationPort: Constraint<Port>,
+    val selectedShadowsocksObfuscationPort: Constraint<Port>,
+    val quantumResistant: QuantumResistantState,
+    val selectedWireguardPort: Constraint<Port>,
+    val customWireguardPort: Port?,
+    val availablePortRanges: List<PortRange>,
+    val systemVpnSettingsAvailable: Boolean,
+    val autoStartAndConnectOnBoot: Boolean,
 ) {
-    fun toUiState(): VpnSettingsUiState {
-        return when (dialogState) {
-            is VpnSettingsDialogState.MtuDialog ->
-                VpnSettingsUiState.MtuDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    mtuEditValue = dialogState.mtuEditValue,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.DnsDialog ->
-                VpnSettingsUiState.DnsDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    stagedDns = dialogState.stagedDns,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.LocalNetworkSharingInfoDialog ->
-                VpnSettingsUiState.LocalNetworkSharingInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.ContentBlockersInfoDialog ->
-                VpnSettingsUiState.ContentBlockersInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.CustomDnsInfoDialog ->
-                VpnSettingsUiState.CustomDnsInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.MalwareInfoDialog ->
-                VpnSettingsUiState.MalwareInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.ObfuscationInfoDialog ->
-                VpnSettingsUiState.ObfuscationInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            is VpnSettingsDialogState.QuantumResistanceInfoDialog -> {
-                VpnSettingsUiState.QuantumResistanceInfoDialogUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-            }
-            else ->
-                VpnSettingsUiState.DefaultUiState(
-                    mtu = mtuValue,
-                    isAutoConnectEnabled = isAutoConnectEnabled,
-                    isLocalNetworkSharingEnabled = isLocalNetworkSharingEnabled,
-                    isCustomDnsEnabled = isCustomDnsEnabled,
-                    isAllowLanEnabled = isAllowLanEnabled,
-                    customDnsItems = customDnsList,
-                    contentBlockersOptions = contentBlockersOptions,
-                    selectedObfuscation = selectedObfuscation,
-                    quantumResistant = quantumResistant
-                )
-        }
-    }
+    val isCustomWireguardPort =
+        selectedWireguardPort is Constraint.Only &&
+            selectedWireguardPort.value == customWireguardPort
+
+    fun toUiState(): VpnSettingsUiState =
+        VpnSettingsUiState(
+            mtuValue,
+            isLocalNetworkSharingEnabled,
+            isCustomDnsEnabled,
+            customDnsList,
+            contentBlockersOptions,
+            obfuscationMode,
+            selectedUdp2TcpObfuscationPort,
+            selectedShadowsocksObfuscationPort,
+            quantumResistant,
+            selectedWireguardPort,
+            customWireguardPort,
+            availablePortRanges,
+            systemVpnSettingsAvailable,
+            autoStartAndConnectOnBoot,
+        )
 
     companion object {
-        private const val EMPTY_STRING = ""
-
         fun default() =
             VpnSettingsViewModelState(
-                mtuValue = EMPTY_STRING,
-                isAutoConnectEnabled = false,
+                mtuValue = null,
                 isLocalNetworkSharingEnabled = false,
                 isCustomDnsEnabled = false,
                 customDnsList = listOf(),
                 contentBlockersOptions = DefaultDnsOptions(),
-                isAllowLanEnabled = false,
-                dialogState = VpnSettingsDialogState.NoDialog,
-                selectedObfuscation = SelectedObfuscation.Auto,
-                quantumResistant = QuantumResistantState.Off
+                obfuscationMode = ObfuscationMode.Auto,
+                selectedUdp2TcpObfuscationPort = Constraint.Any,
+                selectedShadowsocksObfuscationPort = Constraint.Any,
+                quantumResistant = QuantumResistantState.Off,
+                selectedWireguardPort = Constraint.Any,
+                customWireguardPort = null,
+                availablePortRanges = emptyList(),
+                systemVpnSettingsAvailable = false,
+                autoStartAndConnectOnBoot = false,
             )
     }
-}
-
-sealed class VpnSettingsDialogState {
-    object NoDialog : VpnSettingsDialogState()
-
-    data class MtuDialog(val mtuEditValue: String) : VpnSettingsDialogState()
-
-    data class DnsDialog(val stagedDns: StagedDns) : VpnSettingsDialogState()
-
-    object LocalNetworkSharingInfoDialog : VpnSettingsDialogState()
-
-    object ContentBlockersInfoDialog : VpnSettingsDialogState()
-
-    object CustomDnsInfoDialog : VpnSettingsDialogState()
-
-    object MalwareInfoDialog : VpnSettingsDialogState()
-
-    object ObfuscationInfoDialog : VpnSettingsDialogState()
-
-    object QuantumResistanceInfoDialog : VpnSettingsDialogState()
-}
-
-sealed interface StagedDns {
-    val item: CustomDnsItem
-    val validationResult: ValidationResult
-
-    data class NewDns(
-        override val item: CustomDnsItem,
-        override val validationResult: ValidationResult = ValidationResult.Success,
-    ) : StagedDns
-
-    data class EditDns(
-        override val item: CustomDnsItem,
-        override val validationResult: ValidationResult = ValidationResult.Success,
-        val index: Int
-    ) : StagedDns
-
-    sealed class ValidationResult {
-        object Success : ValidationResult()
-        object InvalidAddress : ValidationResult()
-        object DuplicateAddress : ValidationResult()
-    }
-
-    fun isValid() = (validationResult is ValidationResult.Success)
 }
 
 data class CustomDnsItem(val address: String, val isLocal: Boolean) {

@@ -1,6 +1,6 @@
 use crate::net::{Endpoint, GenericTunnelOptions, TransportProtocol};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use ipnetwork::IpNetwork;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     cmp, fmt,
@@ -17,6 +17,16 @@ pub struct TunnelParameters {
     pub options: TunnelOptions,
     pub generic_options: GenericTunnelOptions,
     pub obfuscation: Option<super::obfuscation::ObfuscatorConfig>,
+}
+
+impl TunnelParameters {
+    /// Returns the endpoint that will be connected to
+    pub fn get_next_hop_endpoint(&self) -> Endpoint {
+        self.obfuscation
+            .as_ref()
+            .map(|proxy| proxy.get_obfuscator_endpoint())
+            .unwrap_or_else(|| self.connection.get_endpoint())
+    }
 }
 
 /// Connection-specific configuration in [`TunnelParameters`].
@@ -61,6 +71,10 @@ pub struct PeerConfig {
     /// ephemeral and living in memory only.
     #[serde(skip)]
     pub psk: Option<PresharedKey>,
+    /// Enable constant packet sizes for `entry_peer``
+    #[cfg(daita)]
+    #[serde(skip)]
+    pub constant_packet_size: bool,
 }
 
 #[derive(Clone, Eq, PartialEq, Deserialize, Serialize, Debug)]
@@ -75,15 +89,15 @@ pub struct TunnelConfig {
 pub struct TunnelOptions {
     /// MTU for the wireguard tunnel
     pub mtu: Option<u16>,
-    /// Temporary switch for wireguard-nt
-    #[cfg(windows)]
-    pub use_wireguard_nt: bool,
     /// Perform PQ-safe PSK exchange when connecting
     pub quantum_resistant: bool,
+    /// Enable DAITA during tunnel config
+    #[cfg(daita)]
+    pub daita: bool,
 }
 
 /// Wireguard x25519 private key
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey(x25519_dalek::StaticSecret);
 
 impl PrivateKey {
@@ -93,7 +107,7 @@ impl PrivateKey {
     }
 
     pub fn new_from_random() -> Self {
-        PrivateKey(x25519_dalek::StaticSecret::new(OsRng))
+        PrivateKey(x25519_dalek::StaticSecret::random())
     }
 
     /// Generate public key from private key
@@ -102,7 +116,7 @@ impl PrivateKey {
     }
 
     pub fn to_base64(&self) -> String {
-        base64::encode(self.0.to_bytes())
+        STANDARD.encode(self.0.to_bytes())
     }
 
     pub fn from_base64(key: &str) -> Result<Self, InvalidKey> {
@@ -132,7 +146,7 @@ impl fmt::Debug for PrivateKey {
 
 impl fmt::Display for PrivateKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &base64::encode((self.0).to_bytes()))
+        write!(f, "{}", &STANDARD.encode((self.0).to_bytes()))
     }
 }
 
@@ -159,11 +173,11 @@ impl<'de> Deserialize<'de> for PrivateKey {
 pub struct PublicKey(x25519_dalek::PublicKey);
 
 /// Error returned if an input represents an invalid key
-#[derive(Debug, err_derive::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum InvalidKey {
-    #[error(display = "Invalid key: {}", _0)]
-    Format(#[error(source)] base64::DecodeError),
-    #[error(display = "Invalid key length: {}", _0)]
+    #[error("Invalid key: {0}")]
+    Format(#[from] base64::DecodeError),
+    #[error("Invalid key length: {0}")]
     Length(usize),
 }
 
@@ -174,7 +188,7 @@ impl PublicKey {
     }
 
     pub fn to_base64(&self) -> String {
-        base64::encode(self.as_bytes())
+        STANDARD.encode(self.as_bytes())
     }
 
     pub fn from_base64(key: &str) -> Result<Self, InvalidKey> {
@@ -269,7 +283,7 @@ impl From<Box<[u8; 32]>> for PresharedKey {
 
 impl fmt::Debug for PresharedKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &base64::encode(self.as_bytes()))
+        write!(f, "{}", &STANDARD.encode(self.as_bytes()))
     }
 }
 
@@ -277,7 +291,7 @@ fn serialize_key<S>(key: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&base64::encode(key))
+    serializer.serialize_str(&STANDARD.encode(key))
 }
 
 fn deserialize_key<'de, D, K>(deserializer: D) -> Result<K, D::Error>
@@ -292,7 +306,7 @@ where
 }
 
 fn key_from_base64<K: From<[u8; 32]>>(key: &str) -> Result<K, InvalidKey> {
-    let bytes = base64::decode(key).map_err(InvalidKey::Format)?;
+    let bytes = STANDARD.decode(key).map_err(InvalidKey::Format)?;
     if bytes.len() != 32 {
         return Err(InvalidKey::Length(bytes.len()));
     }

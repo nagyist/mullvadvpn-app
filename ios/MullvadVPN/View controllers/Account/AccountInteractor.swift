@@ -3,35 +3,45 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 26/10/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
 import StoreKit
 
-final class AccountInteractor {
+final class AccountInteractor: Sendable {
     private let storePaymentManager: StorePaymentManager
     let tunnelManager: TunnelManager
+    let accountsProxy: RESTAccountHandling
+    let apiProxy: APIQuerying
 
-    var didReceivePaymentEvent: ((StorePaymentEvent) -> Void)?
-    var didReceiveDeviceState: ((DeviceState) -> Void)?
+    nonisolated(unsafe) var didReceivePaymentEvent: (@Sendable (StorePaymentEvent) -> Void)?
+    nonisolated(unsafe) var didReceiveDeviceState: (@Sendable (DeviceState) -> Void)?
 
-    private var tunnelObserver: TunnelObserver?
-    private var paymentObserver: StorePaymentObserver?
+    nonisolated(unsafe) private var tunnelObserver: TunnelObserver?
+    nonisolated(unsafe) private var paymentObserver: StorePaymentObserver?
 
-    init(storePaymentManager: StorePaymentManager, tunnelManager: TunnelManager) {
+    init(
+        storePaymentManager: StorePaymentManager,
+        tunnelManager: TunnelManager,
+        accountsProxy: RESTAccountHandling,
+        apiProxy: APIQuerying
+    ) {
         self.storePaymentManager = storePaymentManager
         self.tunnelManager = tunnelManager
+        self.accountsProxy = accountsProxy
+        self.apiProxy = apiProxy
 
         let tunnelObserver =
-            TunnelBlockObserver(didUpdateDeviceState: { [weak self] manager, deviceState, previousDeviceState in
+            TunnelBlockObserver(didUpdateDeviceState: { [weak self] _, deviceState, _ in
                 self?.didReceiveDeviceState?(deviceState)
             })
 
-        let paymentObserver = StorePaymentBlockObserver { [weak self] manager, event in
+        let paymentObserver = StorePaymentBlockObserver { [weak self] _, event in
             self?.didReceivePaymentEvent?(event)
         }
 
@@ -46,17 +56,24 @@ final class AccountInteractor {
         tunnelManager.deviceState
     }
 
-    func logout(_ completion: @escaping () -> Void) {
-        tunnelManager.unsetAccount(completionHandler: completion)
+    func logout() async {
+        await tunnelManager.unsetAccount()
     }
 
     func addPayment(_ payment: SKPayment, for accountNumber: String) {
         storePaymentManager.addPayment(payment, for: accountNumber)
     }
 
+    func sendStoreKitReceipt(_ transaction: VerificationResult<Transaction>, for accountNumber: String) async throws {
+        try await apiProxy.createApplePayment(
+            accountNumber: accountNumber,
+            receiptString: transaction.jwsRepresentation.data(using: .utf8)!
+        ).execute()
+    }
+
     func restorePurchases(
         for accountNumber: String,
-        completionHandler: @escaping (Result<REST.CreateApplePaymentResponse, Error>) -> Void
+        completionHandler: @escaping @Sendable (Result<REST.CreateApplePaymentResponse, Error>) -> Void
     ) -> Cancellable {
         storePaymentManager.restorePurchases(
             for: accountNumber,
@@ -66,7 +83,7 @@ final class AccountInteractor {
 
     func requestProducts(
         with productIdentifiers: Set<StoreSubscription>,
-        completionHandler: @escaping (Result<SKProductsResponse, Error>) -> Void
+        completionHandler: @escaping @Sendable (Result<SKProductsResponse, Error>) -> Void
     ) -> Cancellable {
         storePaymentManager.requestProducts(
             with: productIdentifiers,

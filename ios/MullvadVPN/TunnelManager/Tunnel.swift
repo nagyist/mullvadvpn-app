@@ -3,10 +3,11 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 25/02/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
+import MullvadTypes
 import NetworkExtension
 
 // Switch to stabs on simulator
@@ -17,13 +18,42 @@ typealias TunnelProviderManagerType = NETunnelProviderManager
 #endif
 
 protocol TunnelStatusObserver {
-    func tunnel(_ tunnel: Tunnel, didReceiveStatus status: NEVPNStatus)
+    func tunnel(_ tunnel: any TunnelProtocol, didReceiveStatus status: NEVPNStatus)
+}
+
+protocol TunnelProtocol: AnyObject, Sendable {
+    associatedtype TunnelManagerProtocol: VPNTunnelProviderManagerProtocol
+    var status: NEVPNStatus { get }
+    var isOnDemandEnabled: Bool { get set }
+    var startDate: Date? { get }
+    var backgroundTaskProvider: BackgroundTaskProviding { get }
+
+    init(tunnelProvider: TunnelManagerProtocol, backgroundTaskProvider: BackgroundTaskProviding)
+
+    func addObserver(_ observer: any TunnelStatusObserver)
+    func removeObserver(_ observer: any TunnelStatusObserver)
+    func addBlockObserver(
+        queue: DispatchQueue?,
+        handler: @escaping (any TunnelProtocol, NEVPNStatus) -> Void
+    ) -> TunnelStatusBlockObserver
+
+    func logFormat() -> String
+
+    func saveToPreferences(_ completion: @escaping (Error?) -> Void)
+    func removeFromPreferences(completion: @escaping (Error?) -> Void)
+
+    func setConfiguration(_ configuration: TunnelConfiguration)
+    func start(options: [String: NSObject]?) throws
+    func stop()
+    func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)?) throws
 }
 
 /// Tunnel wrapper class.
-final class Tunnel: Equatable {
+final class Tunnel: TunnelProtocol, Equatable, @unchecked Sendable {
     /// Unique identifier assigned to instance at the time of creation.
     let identifier = UUID()
+
+    var backgroundTaskProvider: BackgroundTaskProviding
 
     #if DEBUG
     /// System VPN configuration identifier.
@@ -82,13 +112,14 @@ final class Tunnel: Equatable {
     }
 
     private let lock = NSLock()
-    private var observerList = ObserverList<TunnelStatusObserver>()
+    private var observerList = ObserverList<any TunnelStatusObserver>()
 
     private var _startDate: Date?
-    private let tunnelProvider: TunnelProviderManagerType
+    internal let tunnelProvider: TunnelProviderManagerType
 
-    init(tunnelProvider: TunnelProviderManagerType) {
+    init(tunnelProvider: TunnelProviderManagerType, backgroundTaskProvider: BackgroundTaskProviding) {
         self.tunnelProvider = tunnelProvider
+        self.backgroundTaskProvider = backgroundTaskProvider
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleVPNStatusChangeNotification(_:)),
@@ -108,9 +139,9 @@ final class Tunnel: Equatable {
     }
 
     func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)?) throws {
-        let session = tunnelProvider.connection as! VPNTunnelProviderSessionProtocol
+        let session = tunnelProvider.connection as? VPNTunnelProviderSessionProtocol
 
-        try session.sendProviderMessage(messageData, responseHandler: responseHandler)
+        try session?.sendProviderMessage(messageData, responseHandler: responseHandler)
     }
 
     func setConfiguration(_ configuration: TunnelConfiguration) {
@@ -137,7 +168,7 @@ final class Tunnel: Equatable {
 
     func addBlockObserver(
         queue: DispatchQueue? = nil,
-        handler: @escaping (Tunnel, NEVPNStatus) -> Void
+        handler: @escaping (any TunnelProtocol, NEVPNStatus) -> Void
     ) -> TunnelStatusBlockObserver {
         let observer = TunnelStatusBlockObserver(tunnel: self, queue: queue, handler: handler)
 
@@ -146,11 +177,11 @@ final class Tunnel: Equatable {
         return observer
     }
 
-    func addObserver(_ observer: TunnelStatusObserver) {
+    func addObserver(_ observer: any TunnelStatusObserver) {
         observerList.append(observer)
     }
 
-    func removeObserver(_ observer: TunnelStatusObserver) {
+    func removeObserver(_ observer: any TunnelStatusObserver) {
         observerList.remove(observer)
     }
 
@@ -161,7 +192,7 @@ final class Tunnel: Equatable {
 
         handleVPNStatus(newStatus)
 
-        observerList.forEach { observer in
+        observerList.notify { observer in
             observer.tunnel(self, didReceiveStatus: newStatus)
         }
     }
@@ -195,35 +226,5 @@ final class Tunnel: Equatable {
 
     static func == (lhs: Tunnel, rhs: Tunnel) -> Bool {
         lhs.tunnelProvider == rhs.tunnelProvider
-    }
-}
-
-final class TunnelStatusBlockObserver: TunnelStatusObserver {
-    typealias Handler = (Tunnel, NEVPNStatus) -> Void
-
-    private weak var tunnel: Tunnel?
-    private let queue: DispatchQueue?
-    private let handler: Handler
-
-    fileprivate init(tunnel: Tunnel, queue: DispatchQueue?, handler: @escaping Handler) {
-        self.tunnel = tunnel
-        self.queue = queue
-        self.handler = handler
-    }
-
-    func invalidate() {
-        tunnel?.removeObserver(self)
-    }
-
-    func tunnel(_ tunnel: Tunnel, didReceiveStatus status: NEVPNStatus) {
-        let block = {
-            self.handler(tunnel, status)
-        }
-
-        if let queue {
-            queue.async(execute: block)
-        } else {
-            block()
-        }
     }
 }

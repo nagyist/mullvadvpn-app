@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 19/07/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -42,10 +42,7 @@ class DeviceManagementContentView: UIView {
         textLabel.textColor = .white
         textLabel.translatesAutoresizingMaskIntoConstraints = false
         textLabel.numberOfLines = 0
-        if #available(iOS 14.0, *) {
-            // See: https://stackoverflow.com/q/46200027/351305
-            textLabel.lineBreakStrategy = []
-        }
+        textLabel.lineBreakStrategy = []
         return textLabel
     }()
 
@@ -72,6 +69,7 @@ class DeviceManagementContentView: UIView {
             for: .normal
         )
         button.isEnabled = false
+        button.setAccessibilityIdentifier(.continueWithLoginButton)
         return button
     }()
 
@@ -99,7 +97,7 @@ class DeviceManagementContentView: UIView {
         return stackView
     }()
 
-    var handleDeviceDeletion: ((DeviceViewModel, @escaping () -> Void) -> Void)?
+    var handleDeviceDeletion: (@Sendable (DeviceViewModel, @escaping @Sendable () -> Void) -> Void)?
 
     private var currentDeviceModels = [DeviceViewModel]()
 
@@ -115,14 +113,16 @@ class DeviceManagementContentView: UIView {
         addViews()
         constraintViews()
         updateView()
+
+        setAccessibilityIdentifier(.deviceManagementView)
     }
 
     private func addViews() {
-        [scrollView, buttonStackView].forEach(addSubview)
+        try? [scrollView, buttonStackView].forEach(addSubview)
 
         scrollView.addSubview(scrollContentView)
 
-        [statusImageView, titleLabel, messageLabel, deviceStackView]
+        try? [statusImageView, titleLabel, messageLabel, deviceStackView]
             .forEach(scrollContentView.addSubview)
     }
 
@@ -173,7 +173,7 @@ class DeviceManagementContentView: UIView {
 
             deviceStackView.topAnchor.constraint(
                 equalTo: messageLabel.bottomAnchor,
-                constant: UIMetrics.sectionSpacing
+                constant: UIMetrics.TableView.sectionSpacing
             ),
             deviceStackView.leadingAnchor.constraint(equalTo: scrollContentView.leadingAnchor),
             deviceStackView.trailingAnchor.constraint(equalTo: scrollContentView.trailingAnchor),
@@ -198,21 +198,7 @@ class DeviceManagementContentView: UIView {
         difference.forEach { change in
             switch change {
             case let .insert(offset, model, _):
-                let view = DeviceRowView(viewModel: model)
-
-                view.isHidden = true
-                view.alpha = 0
-
-                view.deleteHandler = { [weak self] _ in
-                    view.showsActivityIndicator = true
-
-                    self?.handleDeviceDeletion?(view.viewModel) {
-                        view.showsActivityIndicator = false
-                    }
-                }
-
-                viewsToAdd.append((view, offset))
-
+                viewsToAdd.append((createDeviceRowView(from: model), offset))
             case let .remove(offset, _, _):
                 viewsToRemove.append(deviceStackView.arrangedSubviews[offset])
             }
@@ -229,41 +215,60 @@ class DeviceManagementContentView: UIView {
             }
         }
 
-        let showHideViews = {
-            viewsToRemove.forEach { view in
-                view.alpha = 0
-                view.isHidden = true
-            }
-
-            viewsToAdd.forEach { item in
-                item.view.alpha = 1
-                item.view.isHidden = false
-            }
-        }
-
-        let removeViews = {
-            viewsToRemove.forEach { view in
-                view.removeFromSuperview()
-            }
-        }
-
         if animated {
             UIView.animate(
                 withDuration: 0.25,
                 delay: 0,
                 options: [.curveEaseInOut],
                 animations: { [weak self] in
-                    showHideViews()
+                    self?.showHideViews(viewsToAdd: viewsToAdd, viewsToRemove: viewsToRemove)
                     self?.deviceStackView.layoutIfNeeded()
                 },
-                completion: { isComplete in
-                    removeViews()
+                completion: { [weak self] _ in
+                    self?.removeViews(viewsToRemove: viewsToRemove)
                 }
             )
         } else {
-            showHideViews()
-            removeViews()
+            showHideViews(viewsToAdd: viewsToAdd, viewsToRemove: viewsToRemove)
+            removeViews(viewsToRemove: viewsToRemove)
         }
+    }
+
+    private func showHideViews(viewsToAdd: [(view: UIView, offset: Int)], viewsToRemove: [UIView]) {
+        viewsToRemove.forEach { view in
+            view.alpha = 0
+            view.isHidden = true
+        }
+
+        viewsToAdd.forEach { item in
+            item.view.alpha = 1
+            item.view.isHidden = false
+        }
+    }
+
+    private func removeViews(viewsToRemove: [UIView]) {
+        viewsToRemove.forEach { view in
+            view.removeFromSuperview()
+        }
+    }
+
+    private func createDeviceRowView(from model: DeviceViewModel) -> DeviceRowView {
+        let view = DeviceRowView(viewModel: model)
+
+        view.isHidden = true
+        view.alpha = 0
+
+        view.deleteHandler = { [weak self] _ in
+            view.showsActivityIndicator = true
+
+            self?.handleDeviceDeletion?(view.viewModel) {
+                Task { @MainActor in
+                    view.showsActivityIndicator = false
+                }
+            }
+        }
+
+        return view
     }
 
     private func updateView() {

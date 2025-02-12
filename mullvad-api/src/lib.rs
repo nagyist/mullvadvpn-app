@@ -1,28 +1,26 @@
-#![deny(rust_2018_idioms)]
-
-use chrono::{offset::Utc, DateTime};
+#![allow(rustdoc::private_intra_doc_links)]
+use async_trait::async_trait;
 #[cfg(target_os = "android")]
 use futures::channel::mpsc;
-use futures::Stream;
-use hyper::Method;
+#[cfg(target_os = "android")]
+use mullvad_types::account::{PlayPurchase, PlayPurchasePaymentToken};
 use mullvad_types::{
-    account::{AccountToken, VoucherSubmission},
+    account::{AccountData, AccountNumber, VoucherSubmission},
     version::AppVersion,
 };
-use once_cell::sync::OnceCell;
-use proxy::ApiConnectionMode;
+use proxy::{ApiConnectionMode, ConnectionModeProvider};
 use std::{
-    cell::Cell,
     collections::BTreeMap,
     future::Future,
+    io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    ops::Deref,
     path::Path,
+    sync::Arc,
 };
 use talpid_types::ErrorExt;
 
 pub mod availability;
-use availability::{ApiAvailability, ApiAvailabilityHandle};
+use availability::ApiAvailability;
 pub mod rest;
 
 mod abortable_stream;
@@ -36,6 +34,9 @@ mod access;
 mod address_cache;
 pub mod device;
 mod relay_list;
+
+pub mod ffi;
+
 pub use address_cache::AddressCache;
 pub use device::DevicesProxy;
 pub use hyper::StatusCode;
@@ -47,7 +48,7 @@ pub const VOUCHER_USED: &str = "VOUCHER_USED";
 /// Error code returned by the Mullvad API if the voucher code is invalid.
 pub const INVALID_VOUCHER: &str = "INVALID_VOUCHER";
 
-/// Error code returned by the Mullvad API if the account token is invalid.
+/// Error code returned by the Mullvad API if the account number is invalid.
 pub const INVALID_ACCOUNT: &str = "INVALID_ACCOUNT";
 
 /// Error code returned by the Mullvad API if the device does not exist.
@@ -63,209 +64,326 @@ pub const API_IP_CACHE_FILENAME: &str = "api-ip-address.txt";
 
 const ACCOUNTS_URL_PREFIX: &str = "accounts/v1";
 const APP_URL_PREFIX: &str = "app/v1";
+#[cfg(target_os = "android")]
+const GOOGLE_PAYMENTS_URL_PREFIX: &str = "payments/google-play/v1";
 
-pub static API: LazyManual<ApiEndpoint> = LazyManual::new(ApiEndpoint::from_env_vars);
-
-unsafe impl<T, F: Send> Sync for LazyManual<T, F> where OnceCell<T>: Sync {}
-
-/// A value that is either initialized on access or explicitly.
-pub struct LazyManual<T, F = fn() -> T> {
-    cell: OnceCell<T>,
-    lazy_fn: Cell<Option<F>>,
-}
-
-impl<T, F> LazyManual<T, F> {
-    const fn new(lazy_fn: F) -> Self {
-        Self {
-            cell: OnceCell::new(),
-            lazy_fn: Cell::new(Some(lazy_fn)),
-        }
-    }
-
-    /// Tries to initialize the object. An error is returned if it is
-    /// already initialized.
-    #[cfg(feature = "api-override")]
-    pub fn override_init(&self, val: T) -> Result<(), T> {
-        let _ = self.lazy_fn.take();
-        self.cell.set(val)
-    }
-}
-
-impl<T> Deref for LazyManual<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.cell.get_or_init(|| (self.lazy_fn.take().unwrap())())
-    }
+pub mod env {
+    pub const API_HOST_VAR: &str = "MULLVAD_API_HOST";
+    pub const API_ADDR_VAR: &str = "MULLVAD_API_ADDR";
+    pub const API_FORCE_DIRECT_VAR: &str = "MULLVAD_API_FORCE_DIRECT";
+    pub const DISABLE_TLS_VAR: &str = "MULLVAD_API_DISABLE_TLS";
 }
 
 /// A hostname and socketaddr to reach the Mullvad REST API over.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiEndpoint {
-    pub host: String,
-    pub addr: SocketAddr,
-    #[cfg(feature = "api-override")]
-    pub disable_address_cache: bool,
-    #[cfg(feature = "api-override")]
+    /// An overriden API hostname. Initialized with the value of the environment
+    /// variable `MULLVAD_API_HOST` if it has been set.
+    ///
+    /// Use the associated function [`Self::host`] to read this value with a
+    /// default fallback if `MULLVAD_API_HOST` was not set.
+    pub host: Option<String>,
+    /// An overriden API address. Initialized with the value of the environment
+    /// variable `MULLVAD_API_ADDR` if it has been set.
+    ///
+    /// Use the associated function [`Self::address()`] to read this value with
+    /// a default fallback if `MULLVAD_API_ADDR` was not set.
+    ///
+    /// # Note
+    ///
+    /// If [`Self::address`] is populated with [`Some(SocketAddr)`], it should
+    /// always be respected when establishing API connections.
+    pub address: Option<SocketAddr>,
+    #[cfg(any(feature = "api-override", test))]
     pub disable_tls: bool,
     #[cfg(feature = "api-override")]
-    pub force_direct_connection: bool,
+    /// Whether bridges/proxies can be used to access the API or not. This is
+    /// useful primarily for testing purposes.
+    ///
+    /// * If `force_direct` is `true`, bridges and proxies will not be used to reach the API.
+    /// * If `force_direct` is `false`, bridges and proxies can be used to reach the API.
+    ///
+    /// # Note
+    ///
+    /// By default, `force_direct` will be `true` if the `api-override` feature
+    /// is enabled and overrides are in use. This is supposedly less error prone, as
+    /// common targets such as Devmole might be unreachable from behind a bridge server.
+    ///
+    /// To disable `force_direct`, set the environment variable
+    /// `MULLVAD_API_FORCE_DIRECT=0` before starting the daemon.
+    pub force_direct: bool,
 }
 
 impl ApiEndpoint {
+    const API_HOST_DEFAULT: &'static str = "api.mullvad.net";
+    const API_IP_DEFAULT: IpAddr = IpAddr::V4(Ipv4Addr::new(45, 83, 223, 196));
+    const API_PORT_DEFAULT: u16 = 443;
+
     /// Returns the endpoint to connect to the API over.
     ///
     /// # Panics
     ///
-    /// Panics if `MULLVAD_API_ADDR` has invalid contents or if only one of
-    /// `MULLVAD_API_ADDR` or `MULLVAD_API_HOST` has been set but not the other.
+    /// Panics if `MULLVAD_API_ADDR`, `MULLVAD_API_HOST` or
+    /// `MULLVAD_API_DISABLE_TLS` has invalid contents.
+    #[cfg(feature = "api-override")]
     pub fn from_env_vars() -> ApiEndpoint {
-        const API_HOST_DEFAULT: &str = "api.mullvad.net";
-        const API_IP_DEFAULT: IpAddr = IpAddr::V4(Ipv4Addr::new(45, 83, 223, 196));
-        const API_PORT_DEFAULT: u16 = 443;
+        let host_var = Self::read_var(env::API_HOST_VAR);
+        let address_var = Self::read_var(env::API_ADDR_VAR);
+        let disable_tls_var = Self::read_var(env::DISABLE_TLS_VAR);
+        let force_direct = Self::read_var(env::API_FORCE_DIRECT_VAR);
 
-        fn read_var(key: &'static str) -> Option<String> {
-            use std::env;
-            match env::var(key) {
-                Ok(v) => Some(v),
-                Err(env::VarError::NotPresent) => None,
-                Err(env::VarError::NotUnicode(_)) => panic!("{key} does not contain valid UTF-8"),
-            }
-        }
-
-        let host_var = read_var("MULLVAD_API_HOST");
-        let address_var = read_var("MULLVAD_API_ADDR");
-        let disable_tls_var = read_var("MULLVAD_API_DISABLE_TLS");
-
-        #[cfg_attr(not(feature = "api-override"), allow(unused_mut))]
         let mut api = ApiEndpoint {
-            host: API_HOST_DEFAULT.to_owned(),
-            addr: SocketAddr::new(API_IP_DEFAULT, API_PORT_DEFAULT),
-            #[cfg(feature = "api-override")]
-            disable_address_cache: false,
-            #[cfg(feature = "api-override")]
+            host: None,
+            address: None,
             disable_tls: false,
-            #[cfg(feature = "api-override")]
-            force_direct_connection: false,
+            force_direct: force_direct
+                .map(|force_direct| force_direct != "0")
+                .unwrap_or_else(|| host_var.is_some() || address_var.is_some()),
         };
 
-        #[cfg(feature = "api-override")]
-        {
-            use std::net::ToSocketAddrs;
-
-            if host_var.is_none() && address_var.is_none() {
-                if disable_tls_var.is_some() {
-                    log::warn!("MULLVAD_API_DISABLE_TLS is ignored since MULLVAD_API_HOST and MULLVAD_API_ADDR are not set");
-                }
-                return api;
-            }
-
-            let scheme = if let Some(disable_tls_var) = disable_tls_var {
-                api.disable_tls = disable_tls_var != "0";
-                "http://"
-            } else {
-                "https://"
-            };
-
-            if let Some(user_host) = host_var {
-                api.host = user_host;
-            }
-            if let Some(user_addr) = address_var {
-                api.addr = user_addr
-                    .parse()
-                    .expect("MULLVAD_API_ADDR is not a valid socketaddr");
-            } else {
-                log::warn!("Resolving API IP from MULLVAD_API_HOST");
-                api.addr = format!("{}:{}", api.host, API_PORT_DEFAULT)
+        match (host_var, address_var) {
+            (None, None) => {}
+            (Some(host), None) => {
+                use std::net::ToSocketAddrs;
+                log::debug!(
+                    "{api_addr} not found. Resolving API IP address from {api_host}={host}",
+                    api_addr = env::API_ADDR_VAR,
+                    api_host = env::API_HOST_VAR
+                );
+                api.address = format!("{}:{}", host, ApiEndpoint::API_PORT_DEFAULT)
                     .to_socket_addrs()
-                    .expect("failed to resolve API host")
-                    .next()
-                    .expect("API host yielded 0 addresses");
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Unable to resolve API IP address from host {host}:{port}",
+                            port = ApiEndpoint::API_PORT_DEFAULT,
+                        )
+                    })
+                    .next();
+                api.host = Some(host);
             }
-            api.disable_address_cache = true;
-            api.force_direct_connection = true;
-            log::debug!("Overriding API. Using {} at {scheme}{}", api.host, api.addr);
+            (host, Some(address)) => {
+                let addr = address.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{api_addr}={address} is not a valid socketaddr",
+                        api_addr = env::API_ADDR_VAR,
+                    )
+                });
+                api.address = Some(addr);
+                api.host = host;
+            }
         }
-        #[cfg(not(feature = "api-override"))]
-        if host_var.is_some() || address_var.is_some() || disable_tls_var.is_some() {
-            log::warn!("These variables are ignored in production builds: MULLVAD_API_HOST, MULLVAD_API_ADDR, MULLVAD_API_DISABLE_TLS");
+
+        if api.host.is_none() && api.address.is_none() {
+            if disable_tls_var.is_some() {
+                log::warn!(
+                    "{disable_tls} is ignored since {api_host} and {api_addr} are not set",
+                    disable_tls = env::DISABLE_TLS_VAR,
+                    api_host = env::API_HOST_VAR,
+                    api_addr = env::API_ADDR_VAR,
+                );
+            }
+        } else {
+            api.disable_tls = disable_tls_var
+                .as_ref()
+                .map(|disable_tls| disable_tls != "0")
+                .unwrap_or(api.disable_tls);
+
+            log::debug!(
+                "Overriding API. Using {host} at {scheme}{addr} (force direct={direct})",
+                host = api.host(),
+                addr = api.address(),
+                scheme = if api.disable_tls {
+                    "http://"
+                } else {
+                    "https://"
+                },
+                direct = api.force_direct,
+            );
         }
         api
+    }
+
+    #[cfg(feature = "api-override")]
+    pub fn should_disable_address_cache(&self) -> bool {
+        self.host.is_some() || self.address.is_some()
+    }
+
+    /// Returns the endpoint to connect to the API over.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `MULLVAD_API_ADDR`, `MULLVAD_API_HOST` or
+    /// `MULLVAD_API_DISABLE_TLS` has invalid contents.
+    #[cfg(not(feature = "api-override"))]
+    pub fn from_env_vars() -> ApiEndpoint {
+        let env_vars = [
+            env::API_HOST_VAR,
+            env::API_ADDR_VAR,
+            env::DISABLE_TLS_VAR,
+            env::API_FORCE_DIRECT_VAR,
+        ];
+
+        if env_vars.map(Self::read_var).iter().any(Option::is_some) {
+            log::warn!(
+                "These variables are ignored in production builds: {env_vars_pretty}",
+                env_vars_pretty = env_vars.join(", ")
+            );
+        }
+
+        ApiEndpoint {
+            host: None,
+            address: None,
+            #[cfg(test)]
+            disable_tls: false,
+        }
+    }
+
+    /// Returns a new API endpoint with the given host and socket address.
+    pub fn new(
+        host: String,
+        address: SocketAddr,
+        #[cfg(any(feature = "api-override", test))] disable_tls: bool,
+    ) -> Self {
+        Self {
+            host: Some(host),
+            address: Some(address),
+            #[cfg(any(feature = "api-override", test))]
+            disable_tls,
+            #[cfg(feature = "api-override")]
+            force_direct: false,
+        }
+    }
+
+    pub fn set_addr(&mut self, address: SocketAddr) {
+        self.address = Some(address);
+    }
+
+    /// Read the [`Self::host`] value, falling back to
+    /// [`Self::API_HOST_DEFAULT`] as default value if it does not exist.
+    pub fn host(&self) -> &str {
+        self.host
+            .as_deref()
+            .unwrap_or(ApiEndpoint::API_HOST_DEFAULT)
+    }
+
+    /// Read the [`Self::address`] value, falling back to
+    /// [`Self::API_IP_DEFAULT`] as default value if it does not exist.
+    pub fn address(&self) -> SocketAddr {
+        self.address.unwrap_or(SocketAddr::new(
+            ApiEndpoint::API_IP_DEFAULT,
+            ApiEndpoint::API_PORT_DEFAULT,
+        ))
+    }
+
+    /// Try to read the value of an environment variable. Returns `None` if the
+    /// environment variable has not been set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the environment variable was found, but it did not contain
+    /// valid unicode data.
+    fn read_var(key: &'static str) -> Option<String> {
+        use std::env;
+        match env::var(key) {
+            Ok(v) => Some(v),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => panic!("{key} does not contain valid UTF-8"),
+        }
+    }
+}
+
+#[async_trait]
+pub trait DnsResolver: 'static + Send + Sync {
+    async fn resolve(&self, host: String) -> io::Result<Vec<SocketAddr>>;
+}
+
+/// DNS resolver that relies on `ToSocketAddrs` (`getaddrinfo`).
+pub struct DefaultDnsResolver;
+
+#[async_trait]
+impl DnsResolver for DefaultDnsResolver {
+    async fn resolve(&self, host: String) -> io::Result<Vec<SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        // Spawn a blocking thread, since `to_socket_addrs` relies on `libc::getaddrinfo`, which
+        // blocks and either has no timeout or a very long one.
+        let addrs = tokio::task::spawn_blocking(move || (host, 0).to_socket_addrs())
+            .await
+            .expect("DNS task panicked")?;
+        Ok(addrs.collect())
+    }
+}
+
+/// DNS resolver that always returns no results
+pub struct NullDnsResolver;
+
+#[async_trait]
+impl DnsResolver for NullDnsResolver {
+    async fn resolve(&self, _host: String) -> io::Result<Vec<SocketAddr>> {
+        Ok(vec![])
     }
 }
 
 /// A type that helps with the creation of API connections.
 pub struct Runtime {
     handle: tokio::runtime::Handle,
-    pub address_cache: AddressCache,
+    address_cache: AddressCache,
     api_availability: availability::ApiAvailability,
+    endpoint: ApiEndpoint,
     #[cfg(target_os = "android")]
     socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
 }
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to construct a rest client")]
-    RestError(#[error(source)] rest::Error),
+    #[error("Failed to construct a rest client")]
+    RestError(#[from] rest::Error),
 
-    #[error(display = "Failed to load address cache")]
-    AddressCacheError(#[error(source)] address_cache::Error),
+    #[error("Failed to load address cache")]
+    AddressCacheError(#[from] address_cache::Error),
 
-    #[error(display = "API availability check failed")]
-    ApiCheckError(#[error(source)] availability::Error),
-}
+    #[error("API availability check failed")]
+    ApiCheckError(#[from] availability::Error),
 
-/// Closure that receives the next API (real or proxy) endpoint to use for `api.mullvad.net`.
-/// It should return a future that determines whether to reject the new endpoint or not.
-pub trait ApiEndpointUpdateCallback: Fn(SocketAddr) -> Self::AcceptedNewEndpoint {
-    type AcceptedNewEndpoint: Future<Output = bool> + Send;
-}
-
-impl<U, T: Future<Output = bool> + Send> ApiEndpointUpdateCallback for U
-where
-    U: Fn(SocketAddr) -> T,
-{
-    type AcceptedNewEndpoint = T;
+    #[error("DNS resolution error")]
+    ResolutionFailed(#[from] std::io::Error),
 }
 
 impl Runtime {
-    /// Create a new `Runtime`.
-    pub fn new(handle: tokio::runtime::Handle) -> Result<Self, Error> {
-        Self::new_inner(
-            handle,
-            #[cfg(target_os = "android")]
-            None,
-        )
-    }
-
-    fn new_inner(
+    /// Will create a new Runtime without a cache with the provided API endpoint.
+    pub fn new(
         handle: tokio::runtime::Handle,
+        endpoint: &ApiEndpoint,
         #[cfg(target_os = "android")] socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
-    ) -> Result<Self, Error> {
-        Ok(Runtime {
+    ) -> Self {
+        Runtime {
             handle,
-            address_cache: AddressCache::new(None)?,
-            api_availability: ApiAvailability::new(availability::State::default()),
+            address_cache: AddressCache::new(endpoint, None),
+            api_availability: ApiAvailability::default(),
+            endpoint: endpoint.clone(),
             #[cfg(target_os = "android")]
             socket_bypass_tx,
-        })
+        }
     }
 
     /// Create a new `Runtime` using the specified directories.
     /// Try to use the cache directory first, and fall back on the bundled address otherwise.
+    /// Will try to construct an API endpoint from the environment.
     pub async fn with_cache(
+        endpoint: &ApiEndpoint,
         cache_dir: &Path,
         write_changes: bool,
         #[cfg(target_os = "android")] socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
     ) -> Result<Self, Error> {
         let handle = tokio::runtime::Handle::current();
+
         #[cfg(feature = "api-override")]
-        if API.disable_address_cache {
-            return Self::new_inner(
+        if endpoint.should_disable_address_cache() {
+            return Ok(Self::new(
                 handle,
+                endpoint,
                 #[cfg(target_os = "android")]
                 socket_bypass_tx,
-            );
+            ));
         }
 
         let cache_file = cache_dir.join(API_IP_CACHE_FILENAME);
@@ -275,7 +393,13 @@ impl Runtime {
             None
         };
 
-        let address_cache = match AddressCache::from_file(&cache_file, write_file.clone()).await {
+        let address_cache = match AddressCache::from_file(
+            &cache_file,
+            write_file.clone(),
+            endpoint.host().to_owned(),
+        )
+        .await
+        {
             Ok(cache) => cache,
             Err(error) => {
                 if cache_file.exists() {
@@ -286,84 +410,84 @@ impl Runtime {
                         )
                     );
                 }
-                AddressCache::new(write_file)?
+                AddressCache::new(endpoint, write_file)
             }
         };
+
+        let api_availability = ApiAvailability::default();
 
         Ok(Runtime {
             handle,
             address_cache,
-            api_availability: ApiAvailability::new(availability::State::default()),
+            api_availability,
+            endpoint: endpoint.clone(),
             #[cfg(target_os = "android")]
             socket_bypass_tx,
         })
     }
 
-    /// Creates a new request service and returns a handle to it.
-    async fn new_request_service<T: Stream<Item = ApiConnectionMode> + Unpin + Send + 'static>(
+    /// Returns a request factory initialized to create requests for the master API Assumes an API
+    /// endpoint that is constructed from env vars, or uses default values.
+    pub fn mullvad_rest_handle<T: ConnectionModeProvider + 'static>(
         &self,
-        sni_hostname: Option<String>,
-        proxy_provider: T,
-        new_address_callback: impl ApiEndpointUpdateCallback + Send + Sync + 'static,
-        #[cfg(target_os = "android")] socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
-    ) -> rest::RequestServiceHandle {
-        rest::RequestService::spawn(
-            sni_hostname,
-            self.api_availability.handle(),
-            self.address_cache.clone(),
-            proxy_provider,
-            new_address_callback,
-            #[cfg(target_os = "android")]
-            socket_bypass_tx,
-        )
-        .await
-    }
-
-    /// Returns a request factory initialized to create requests for the master API
-    pub async fn mullvad_rest_handle<
-        T: Stream<Item = ApiConnectionMode> + Unpin + Send + 'static,
-    >(
-        &self,
-        proxy_provider: T,
-        new_address_callback: impl ApiEndpointUpdateCallback + Send + Sync + 'static,
+        connection_mode_provider: T,
     ) -> rest::MullvadRestHandle {
-        let service = self
-            .new_request_service(
-                Some(API.host.clone()),
-                proxy_provider,
-                new_address_callback,
-                #[cfg(target_os = "android")]
-                self.socket_bypass_tx.clone(),
-            )
-            .await;
-        let factory = rest::RequestFactory::new(API.host.clone(), None);
+        let service = self.new_request_service(
+            connection_mode_provider,
+            Arc::new(self.address_cache.clone()),
+            #[cfg(target_os = "android")]
+            self.socket_bypass_tx.clone(),
+            #[cfg(any(feature = "api-override", test))]
+            self.endpoint.disable_tls,
+        );
+        let hostname = self.endpoint.host().to_owned();
+        let token_store = access::AccessTokenStore::new(service.clone(), hostname.clone());
+        let factory = rest::RequestFactory::new(hostname, Some(token_store));
 
-        rest::MullvadRestHandle::new(
-            service,
-            factory,
-            self.address_cache.clone(),
-            self.availability_handle(),
-        )
+        rest::MullvadRestHandle::new(service, factory, self.availability_handle())
     }
 
     /// Returns a new request service handle
-    pub async fn rest_handle(&mut self) -> rest::RequestServiceHandle {
+    pub fn rest_handle(&self, dns_resolver: impl DnsResolver) -> rest::RequestServiceHandle {
         self.new_request_service(
-            None,
-            ApiConnectionMode::Direct.into_repeat(),
-            |_| async { true },
+            ApiConnectionMode::Direct.into_provider(),
+            Arc::new(dns_resolver),
             #[cfg(target_os = "android")]
             None,
+            #[cfg(any(feature = "api-override", test))]
+            false,
         )
-        .await
+    }
+
+    /// Creates a new request service and returns a handle to it.
+    fn new_request_service<T: ConnectionModeProvider + 'static>(
+        &self,
+        connection_mode_provider: T,
+        dns_resolver: Arc<dyn DnsResolver>,
+        #[cfg(target_os = "android")] socket_bypass_tx: Option<mpsc::Sender<SocketBypassRequest>>,
+        #[cfg(any(feature = "api-override", test))] disable_tls: bool,
+    ) -> rest::RequestServiceHandle {
+        rest::RequestService::spawn(
+            self.api_availability.clone(),
+            connection_mode_provider,
+            dns_resolver,
+            #[cfg(target_os = "android")]
+            socket_bypass_tx,
+            #[cfg(any(feature = "api-override", test))]
+            disable_tls,
+        )
     }
 
     pub fn handle(&mut self) -> &mut tokio::runtime::Handle {
         &mut self.handle
     }
 
-    pub fn availability_handle(&self) -> ApiAvailabilityHandle {
-        self.api_availability.handle()
+    pub fn availability_handle(&self) -> ApiAvailability {
+        self.api_availability.clone()
+    }
+
+    pub fn address_cache(&self) -> &AddressCache {
+        &self.address_cache
     }
 }
 
@@ -377,61 +501,48 @@ impl AccountsProxy {
         Self { handle }
     }
 
-    pub fn get_expiry(
+    pub fn get_data(
         &self,
-        account: AccountToken,
-    ) -> impl Future<Output = Result<DateTime<Utc>, rest::Error>> {
+        account: AccountNumber,
+    ) -> impl Future<Output = Result<AccountData, rest::Error>> + use<> {
+        let service = self.handle.service.clone();
+        let factory = self.handle.factory.clone();
+        async move {
+            let request = factory
+                .get(&format!("{ACCOUNTS_URL_PREFIX}/accounts/me"))?
+                .expected_status(&[StatusCode::OK])
+                .account(account)?;
+            let response = service.request(request).await?;
+            response.deserialize().await
+        }
+    }
+
+    pub fn create_account(
+        &self,
+    ) -> impl Future<Output = Result<AccountNumber, rest::Error>> + use<> {
         #[derive(serde::Deserialize)]
-        struct AccountExpiryResponse {
-            expiry: DateTime<Utc>,
+        struct AccountCreationResponse {
+            number: AccountNumber,
         }
 
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
-        async move {
-            let response = rest::send_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/accounts/me"),
-                Method::GET,
-                Some((access_proxy, account)),
-                &[StatusCode::OK],
-            )
-            .await;
-
-            let account: AccountExpiryResponse = rest::deserialize_body(response?).await?;
-            Ok(account.expiry)
-        }
-    }
-
-    pub fn create_account(&mut self) -> impl Future<Output = Result<AccountToken, rest::Error>> {
-        #[derive(serde::Deserialize)]
-        struct AccountCreationResponse {
-            number: AccountToken,
-        }
-
-        let service = self.handle.service.clone();
-        let response = rest::send_request(
-            &self.handle.factory,
-            service,
-            &format!("{ACCOUNTS_URL_PREFIX}/accounts"),
-            Method::POST,
-            None,
-            &[StatusCode::CREATED],
-        );
 
         async move {
-            let account: AccountCreationResponse = rest::deserialize_body(response.await?).await?;
+            let request = factory
+                .post(&format!("{ACCOUNTS_URL_PREFIX}/accounts"))?
+                .expected_status(&[StatusCode::CREATED]);
+            let response = service.request(request).await?;
+            let account: AccountCreationResponse = response.deserialize().await?;
             Ok(account.number)
         }
     }
 
     pub fn submit_voucher(
-        &mut self,
-        account_token: AccountToken,
+        &self,
+        account: AccountNumber,
         voucher_code: String,
-    ) -> impl Future<Output = Result<VoucherSubmission, rest::Error>> {
+    ) -> impl Future<Output = Result<VoucherSubmission, rest::Error>> + use<> {
         #[derive(serde::Serialize)]
         struct VoucherSubmission {
             voucher_code: String,
@@ -439,28 +550,88 @@ impl AccountsProxy {
 
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
         let submission = VoucherSubmission { voucher_code };
 
         async move {
-            let response = rest::send_json_request(
-                &factory,
-                service,
-                &format!("{APP_URL_PREFIX}/submit-voucher"),
-                Method::POST,
-                &submission,
-                Some((access_proxy, account_token)),
-                &[StatusCode::OK],
-            )
-            .await;
-            rest::deserialize_body(response?).await
+            let request = factory
+                .post_json(&format!("{APP_URL_PREFIX}/submit-voucher"), &submission)?
+                .account(account)?
+                .expected_status(&[StatusCode::OK]);
+            service.request(request).await?.deserialize().await
+        }
+    }
+
+    pub fn delete_account(
+        &self,
+        account: AccountNumber,
+    ) -> impl Future<Output = Result<(), rest::Error>> + use<> {
+        let service = self.handle.service.clone();
+        let factory = self.handle.factory.clone();
+
+        async move {
+            let request = factory
+                .delete(&format!("{ACCOUNTS_URL_PREFIX}/accounts/me"))?
+                .account(account.clone())?
+                .header("Mullvad-Account-Number", &account)?
+                .expected_status(&[StatusCode::NO_CONTENT]);
+
+            let _ = service.request(request).await?;
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn init_play_purchase(
+        &mut self,
+        account: AccountNumber,
+    ) -> impl Future<Output = Result<PlayPurchasePaymentToken, rest::Error>> {
+        #[derive(serde::Deserialize)]
+        struct PlayPurchaseInitResponse {
+            obfuscated_id: String,
+        }
+
+        let service = self.handle.service.clone();
+        let factory = self.handle.factory.clone();
+
+        async move {
+            let request = factory
+                .post_json(&format!("{GOOGLE_PAYMENTS_URL_PREFIX}/init"), &())?
+                .account(account)?
+                .expected_status(&[StatusCode::OK]);
+            let response = service.request(request).await?;
+
+            let PlayPurchaseInitResponse { obfuscated_id } = response.deserialize().await?;
+
+            Ok(obfuscated_id)
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn verify_play_purchase(
+        &mut self,
+        account: AccountNumber,
+        play_purchase: PlayPurchase,
+    ) -> impl Future<Output = Result<(), rest::Error>> {
+        let service = self.handle.service.clone();
+        let factory = self.handle.factory.clone();
+
+        async move {
+            let request = factory
+                .post_json(
+                    &format!("{GOOGLE_PAYMENTS_URL_PREFIX}/acknowledge"),
+                    &play_purchase,
+                )?
+                .account(account)?
+                .expected_status(&[StatusCode::ACCEPTED]);
+            service.request(request).await?;
+            Ok(())
         }
     }
 
     pub fn get_www_auth_token(
         &self,
-        account: AccountToken,
-    ) -> impl Future<Output = Result<String, rest::Error>> {
+        account: AccountNumber,
+    ) -> impl Future<Output = Result<String, rest::Error>> + use<> {
         #[derive(serde::Deserialize)]
         struct AuthTokenResponse {
             auth_token: String,
@@ -468,19 +639,14 @@ impl AccountsProxy {
 
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
 
         async move {
-            let response = rest::send_request(
-                &factory,
-                service,
-                &format!("{APP_URL_PREFIX}/www-auth-token"),
-                Method::POST,
-                Some((access_proxy, account)),
-                &[StatusCode::OK],
-            )
-            .await;
-            let response: AuthTokenResponse = rest::deserialize_body(response?).await?;
+            let request = factory
+                .post(&format!("{APP_URL_PREFIX}/www-auth-token"))?
+                .account(account)?
+                .expected_status(&[StatusCode::OK]);
+            let response = service.request(request).await?;
+            let response: AuthTokenResponse = response.deserialize().await?;
             Ok(response.auth_token)
         }
     }
@@ -518,19 +684,13 @@ impl ProblemReportProxy {
         };
 
         let service = self.handle.service.clone();
-
-        let request = rest::send_json_request(
-            &self.handle.factory,
-            service,
-            &format!("{APP_URL_PREFIX}/problem-report"),
-            Method::POST,
-            &report,
-            None,
-            &[StatusCode::NO_CONTENT],
-        );
+        let factory = self.handle.factory.clone();
 
         async move {
-            request.await?;
+            let request = factory
+                .post_json(&format!("{APP_URL_PREFIX}/problem-report"), &report)?
+                .expected_status(&[StatusCode::NO_CONTENT]);
+            service.request(request).await?;
             Ok(())
         }
     }
@@ -547,16 +707,6 @@ pub struct AppVersionResponse {
     pub latest: AppVersion,
     pub latest_stable: Option<AppVersion>,
     pub latest_beta: AppVersion,
-    #[serde(default = "default_wg_threshold")]
-    pub x_threshold_wg_default: f32,
-}
-
-/// Temporary function that will be removed later. Used to generate default wg_threshold.
-/// In case there is no `x_threshold_wg_default` returned by the API result we interpret that to
-/// mean that the migration is done and WireGuard should be the default. In that case the threshold
-/// value should be 1.0
-fn default_wg_threshold() -> f32 {
-    1.0
 }
 
 impl AppVersionProxy {
@@ -569,19 +719,18 @@ impl AppVersionProxy {
         app_version: AppVersion,
         platform: &str,
         platform_version: String,
-    ) -> impl Future<Output = Result<AppVersionResponse, rest::Error>> {
+    ) -> impl Future<Output = Result<AppVersionResponse, rest::Error>> + use<> {
         let service = self.handle.service.clone();
 
         let path = format!("{APP_URL_PREFIX}/releases/{platform}/{app_version}");
-        let request = self.handle.factory.request(&path, Method::GET);
+        let request = self.handle.factory.get(&path);
 
         async move {
-            let mut request = request?;
-            request.add_header("M-Platform-Version", &platform_version)?;
-
+            let request = request?
+                .expected_status(&[StatusCode::OK])
+                .header("M-Platform-Version", &platform_version)?;
             let response = service.request(request).await?;
-            let parsed_response = rest::parse_rest_response(response, &[StatusCode::OK]).await?;
-            rest::deserialize_body(parsed_response).await
+            response.deserialize().await
         }
     }
 }
@@ -597,18 +746,24 @@ impl ApiProxy {
     }
 
     pub async fn get_api_addrs(&self) -> Result<Vec<SocketAddr>, rest::Error> {
-        let service = self.handle.service.clone();
+        let request = self
+            .handle
+            .factory
+            .get(&format!("{APP_URL_PREFIX}/api-addrs"))?
+            .expected_status(&[StatusCode::OK]);
+        let response = self.handle.service.request(request).await?;
+        response.deserialize().await
+    }
 
-        let response = rest::send_request(
-            &self.handle.factory,
-            service,
-            &format!("{APP_URL_PREFIX}/api-addrs"),
-            Method::GET,
-            None,
-            &[StatusCode::OK],
-        )
-        .await?;
+    /// Check the availablility of `{APP_URL_PREFIX}/api-addrs`.
+    pub async fn api_addrs_available(&self) -> Result<bool, rest::Error> {
+        let request = self
+            .handle
+            .factory
+            .head(&format!("{APP_URL_PREFIX}/api-addrs"))?
+            .expected_status(&[StatusCode::OK]);
 
-        rest::deserialize_body(response).await
+        let response = self.handle.service.request(request).await?;
+        Ok(response.status().is_success())
     }
 }

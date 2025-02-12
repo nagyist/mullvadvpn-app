@@ -1,6 +1,6 @@
-use mullvad_types::account::AccountToken;
+use mullvad_types::account::AccountNumber;
 use regex::Regex;
-use std::path::Path;
+use std::{path::Path, sync::LazyLock};
 use talpid_types::ErrorExt;
 use tokio::{
     fs,
@@ -9,37 +9,34 @@ use tokio::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Unable to open or read account history file")]
-    Read(#[error(source)] io::Error),
+    #[error("Unable to open or read account history file")]
+    Read(#[source] io::Error),
 
-    #[error(display = "Failed to serialize account history")]
-    Serialize(#[error(source)] serde_json::Error),
+    #[error("Failed to serialize account history")]
+    Serialize(#[source] serde_json::Error),
 
-    #[error(display = "Unable to write account history file")]
-    Write(#[error(source)] io::Error),
+    #[error("Unable to write account history file")]
+    Write(#[source] io::Error),
 
-    #[error(display = "Write task panicked or was cancelled")]
-    WriteCancelled(#[error(source)] tokio::task::JoinError),
+    #[error("Write task panicked or was cancelled")]
+    WriteCancelled(#[source] tokio::task::JoinError),
 }
 
 static ACCOUNT_HISTORY_FILE: &str = "account-history.json";
 
 pub struct AccountHistory {
     file: io::BufWriter<fs::File>,
-    token: Option<AccountToken>,
+    number: Option<AccountNumber>,
 }
 
-lazy_static::lazy_static! {
-    static ref ACCOUNT_REGEX: Regex = Regex::new(r"^[0-9]+$").unwrap();
-}
+static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+$").unwrap());
 
 impl AccountHistory {
     pub async fn new(
         settings_dir: &Path,
-        current_token: Option<AccountToken>,
+        current_number: Option<AccountNumber>,
     ) -> Result<AccountHistory> {
         let mut options = fs::OpenOptions::new();
         #[cfg(unix)]
@@ -64,18 +61,18 @@ impl AccountHistory {
             .map_err(Error::Read)?;
 
         let mut buffer = String::new();
-        let (token, should_save): (Option<AccountToken>, bool) =
+        let (number, should_save): (Option<AccountNumber>, bool) =
             match reader.read_to_string(&mut buffer).await {
                 Ok(_) if ACCOUNT_REGEX.is_match(&buffer) => (Some(buffer), false),
-                Ok(0) => (current_token, true),
+                Ok(0) => (current_number, true),
                 Ok(_) | Err(_) => {
                     log::warn!("Failed to parse account history");
-                    (current_token, true)
+                    (current_number, true)
                 }
             };
 
         let file = io::BufWriter::new(reader.into_inner());
-        let mut history = AccountHistory { file, token };
+        let mut history = AccountHistory { file, number };
         if should_save {
             if let Err(error) = history.save_to_disk().await {
                 log::error!(
@@ -87,20 +84,20 @@ impl AccountHistory {
         Ok(history)
     }
 
-    /// Gets the account token in the history
-    pub fn get(&self) -> Option<AccountToken> {
-        self.token.clone()
+    /// Gets the account number in the history
+    pub fn get(&self) -> Option<AccountNumber> {
+        self.number.clone()
     }
 
-    /// Replace the account token in the history
-    pub async fn set(&mut self, new_entry: AccountToken) -> Result<()> {
-        self.token = Some(new_entry);
+    /// Replace the account number in the history
+    pub async fn set(&mut self, new_entry: AccountNumber) -> Result<()> {
+        self.number = Some(new_entry);
         self.save_to_disk().await
     }
 
     /// Remove account history
     pub async fn clear(&mut self) -> Result<()> {
-        self.token = None;
+        self.number = None;
         self.save_to_disk().await
     }
 
@@ -110,9 +107,9 @@ impl AccountHistory {
             .seek(io::SeekFrom::Start(0))
             .await
             .map_err(Error::Write)?;
-        if let Some(ref token) = self.token {
+        if let Some(ref number) = self.number {
             self.file
-                .write_all(token.as_bytes())
+                .write_all(number.as_bytes())
                 .await
                 .map_err(Error::Write)?;
         }

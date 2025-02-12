@@ -1,24 +1,45 @@
 package net.mullvad.mullvadvpn.repository
 
-import android.content.SharedPreferences
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import net.mullvad.mullvadvpn.lib.model.BuildVersion
 import net.mullvad.mullvadvpn.util.IChangelogDataProvider
+import net.mullvad.mullvadvpn.util.trimAll
 
-private const val MISSING_VERSION_CODE = -1
 private const val NEWLINE_CHAR = '\n'
-private const val LAST_SHOWED_CHANGELOG_VERSION_CODE = "last_showed_changelog_version_code"
+private const val BULLET_POINT_CHAR = '-'
 
 class ChangelogRepository(
-    private val preferences: SharedPreferences,
-    private val dataProvider: IChangelogDataProvider
+    private val dataProvider: IChangelogDataProvider,
+    private val userPreferencesRepository: UserPreferencesRepository,
+    private val buildVersion: BuildVersion,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
-    fun getVersionCodeOfMostRecentChangelogShowed(): Int {
-        return preferences.getInt(LAST_SHOWED_CHANGELOG_VERSION_CODE, MISSING_VERSION_CODE)
+    val hasUnreadChangelog: StateFlow<Boolean> =
+        userPreferencesRepository.preferencesFlow
+            .map {
+                getLastVersionChanges().isNotEmpty() &&
+                    buildVersion.code > it.lastShownChangelogVersionCode
+            }
+            .stateIn(
+                CoroutineScope(dispatcher),
+                started = SharingStarted.Eagerly,
+                initialValue = false,
+            )
+
+    suspend fun setDismissNewChangelogNotification() {
+        userPreferencesRepository.setHasDisplayedChangelogNotification()
     }
 
-    fun setVersionCodeOfMostRecentChangelogShowed(versionCode: Int) =
-        preferences.edit().putInt(LAST_SHOWED_CHANGELOG_VERSION_CODE, versionCode).apply()
-
-    fun getLastVersionChanges(): List<String> {
-        return dataProvider.getChangelog().split(NEWLINE_CHAR).filter { it.isNotEmpty() }
-    }
+    fun getLastVersionChanges(): List<String> =
+        // Prepend with a new line char so each entry consists of NEWLINE_CHAR + BULLET_POINT_CHAR
+        (NEWLINE_CHAR + dataProvider.getChangelog())
+            .split(NEWLINE_CHAR.toString() + BULLET_POINT_CHAR)
+            .trimAll()
+            .filter { it.isNotEmpty() }
 }

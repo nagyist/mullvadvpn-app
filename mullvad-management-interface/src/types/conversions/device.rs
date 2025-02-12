@@ -1,33 +1,27 @@
 use crate::types::{conversions::bytes_to_pubkey, proto, FromProtobufTypeError};
+use chrono::DateTime;
 use prost_types::Timestamp;
 
 impl TryFrom<proto::Device> for mullvad_types::device::Device {
     type Error = FromProtobufTypeError;
 
     fn try_from(device: proto::Device) -> Result<Self, Self::Error> {
+        let created_seconds = device
+            .created
+            .ok_or(FromProtobufTypeError::InvalidArgument(
+                "missing 'created' field",
+            ))?
+            .seconds;
+
+        let created = DateTime::from_timestamp(created_seconds, 0)
+            .ok_or(FromProtobufTypeError::InvalidArgument("invalid timestamp"))?;
+
         Ok(mullvad_types::device::Device {
             id: device.id,
             name: device.name,
             pubkey: bytes_to_pubkey(&device.pubkey)?,
-            ports: device
-                .ports
-                .into_iter()
-                .map(mullvad_types::device::DevicePort::from)
-                .collect(),
             hijack_dns: device.hijack_dns,
-            created: chrono::DateTime::from_utc(
-                chrono::NaiveDateTime::from_timestamp_opt(
-                    device
-                        .created
-                        .ok_or(FromProtobufTypeError::InvalidArgument(
-                            "missing 'created' field",
-                        ))?
-                        .seconds,
-                    0,
-                )
-                .unwrap(),
-                chrono::Utc,
-            ),
+            created,
         })
     }
 }
@@ -38,11 +32,6 @@ impl From<mullvad_types::device::Device> for proto::Device {
             id: device.id,
             name: device.name,
             pubkey: device.pubkey.as_bytes().to_vec(),
-            ports: device
-                .ports
-                .into_iter()
-                .map(proto::DevicePort::from)
-                .collect(),
             hijack_dns: device.hijack_dns,
             created: Some(Timestamp {
                 seconds: device.created.timestamp(),
@@ -56,9 +45,8 @@ impl TryFrom<proto::DeviceState> for mullvad_types::device::DeviceState {
     type Error = FromProtobufTypeError;
 
     fn try_from(state: proto::DeviceState) -> Result<Self, FromProtobufTypeError> {
-        let state_type = proto::device_state::State::from_i32(state.state).ok_or(
-            FromProtobufTypeError::InvalidArgument("invalid device state"),
-        )?;
+        let state_type = proto::device_state::State::try_from(state.state)
+            .map_err(|_| FromProtobufTypeError::InvalidArgument("invalid device state"))?;
 
         match state_type {
             proto::device_state::State::LoggedIn => {
@@ -73,7 +61,7 @@ impl TryFrom<proto::DeviceState> for mullvad_types::device::DeviceState {
 
                 Ok(mullvad_types::device::DeviceState::LoggedIn(
                     mullvad_types::device::AccountAndDevice {
-                        account_token: account.account_token,
+                        account_number: account.account_number,
                         device: mullvad_types::device::Device::try_from(device)?,
                     },
                 ))
@@ -86,19 +74,13 @@ impl TryFrom<proto::DeviceState> for mullvad_types::device::DeviceState {
     }
 }
 
-impl From<mullvad_types::device::DevicePort> for proto::DevicePort {
-    fn from(port: mullvad_types::device::DevicePort) -> Self {
-        proto::DevicePort { id: port.id }
-    }
-}
-
 impl From<mullvad_types::device::DeviceState> for proto::DeviceState {
     fn from(state: mullvad_types::device::DeviceState) -> Self {
         proto::DeviceState {
             state: proto::device_state::State::from(&state) as i32,
-            device: state.into_device().map(|device| proto::AccountAndDevice {
-                account_token: device.account_token,
-                device: Some(proto::Device::from(device.device)),
+            device: state.logged_in().map(|client| proto::AccountAndDevice {
+                account_number: client.account_number,
+                device: Some(proto::Device::from(client.device)),
             }),
         }
     }
@@ -128,8 +110,8 @@ impl TryFrom<proto::DeviceEvent> for mullvad_types::device::DeviceEvent {
     type Error = FromProtobufTypeError;
 
     fn try_from(event: proto::DeviceEvent) -> Result<Self, Self::Error> {
-        let cause = proto::device_event::Cause::from_i32(event.cause)
-            .ok_or(FromProtobufTypeError::InvalidArgument("invalid event"))?;
+        let cause = proto::device_event::Cause::try_from(event.cause)
+            .map_err(|_| FromProtobufTypeError::InvalidArgument("invalid event"))?;
         let cause = mullvad_types::device::DeviceEventCause::from(cause);
 
         let new_state = mullvad_types::device::DeviceState::try_from(event.new_state.ok_or(
@@ -169,7 +151,7 @@ impl From<proto::device_event::Cause> for mullvad_types::device::DeviceEventCaus
 impl From<mullvad_types::device::RemoveDeviceEvent> for proto::RemoveDeviceEvent {
     fn from(event: mullvad_types::device::RemoveDeviceEvent) -> Self {
         proto::RemoveDeviceEvent {
-            account_token: event.account_token,
+            account_number: event.account_number,
             new_device_list: event
                 .new_devices
                 .into_iter()
@@ -189,7 +171,7 @@ impl TryFrom<proto::RemoveDeviceEvent> for mullvad_types::device::RemoveDeviceEv
             .map(mullvad_types::device::Device::try_from)
             .collect::<Result<Vec<_>, FromProtobufTypeError>>()?;
         Ok(mullvad_types::device::RemoveDeviceEvent {
-            account_token: event.account_token,
+            account_number: event.account_number,
             new_devices,
         })
     }
@@ -198,7 +180,7 @@ impl TryFrom<proto::RemoveDeviceEvent> for mullvad_types::device::RemoveDeviceEv
 impl From<mullvad_types::device::AccountAndDevice> for proto::AccountAndDevice {
     fn from(device: mullvad_types::device::AccountAndDevice) -> Self {
         proto::AccountAndDevice {
-            account_token: device.account_token,
+            account_number: device.account_number,
             device: Some(proto::Device::from(device.device)),
         }
     }
@@ -209,11 +191,5 @@ impl From<Vec<mullvad_types::device::Device>> for proto::DeviceList {
         proto::DeviceList {
             devices: devices.into_iter().map(proto::Device::from).collect(),
         }
-    }
-}
-
-impl From<proto::DevicePort> for mullvad_types::device::DevicePort {
-    fn from(port: proto::DevicePort) -> Self {
-        mullvad_types::device::DevicePort { id: port.id }
     }
 }

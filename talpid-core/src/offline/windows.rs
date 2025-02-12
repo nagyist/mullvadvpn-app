@@ -1,5 +1,3 @@
-use talpid_routing::{get_best_default_route, CallbackHandle, EventType, RouteManagerHandle};
-
 use crate::window::{PowerManagementEvent, PowerManagementListener};
 use futures::channel::mpsc::UnboundedSender;
 use parking_lot::Mutex;
@@ -8,37 +6,40 @@ use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
-use talpid_types::ErrorExt;
-use talpid_windows_net::AddressFamily;
+use talpid_routing::{get_best_default_route, CallbackHandle, EventType, RouteManagerHandle};
+use talpid_types::{net::Connectivity, ErrorExt};
+use talpid_windows::net::AddressFamily;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Unable to create listener thread")]
-    ThreadCreationError(#[error(source)] io::Error),
-    #[error(display = "Failed to start connectivity monitor")]
-    ConnectivityMonitorError(#[error(source)] talpid_routing::Error),
+    #[error("Unable to create listener thread")]
+    ThreadCreationError(#[from] io::Error),
+    #[error("Failed to start connectivity monitor")]
+    ConnectivityMonitorError(#[from] talpid_routing::Error),
 }
 
 pub struct BroadcastListener {
     system_state: Arc<Mutex<SystemState>>,
     _callback_handle: CallbackHandle,
-    _notify_tx: Arc<UnboundedSender<bool>>,
+    _notify_tx: Arc<UnboundedSender<Connectivity>>,
 }
 
 unsafe impl Send for BroadcastListener {}
 
 impl BroadcastListener {
     pub async fn start(
-        notify_tx: UnboundedSender<bool>,
-        route_manager_handle: RouteManagerHandle,
+        notify_tx: UnboundedSender<Connectivity>,
+        route_manager: RouteManagerHandle,
         mut power_mgmt_rx: PowerManagementListener,
     ) -> Result<Self, Error> {
         let notify_tx = Arc::new(notify_tx);
-        let (v4_connectivity, v6_connectivity) = Self::check_initial_connectivity();
+        let (ipv4, ipv6) = Self::check_initial_connectivity();
         let system_state = Arc::new(Mutex::new(SystemState {
-            v4_connectivity,
-            v6_connectivity,
-            suspended: false,
+            connectivity: ConnectivityInner {
+                ipv4,
+                ipv6,
+                suspended: false,
+            },
             notify_tx: Arc::downgrade(&notify_tx),
         }));
 
@@ -66,8 +67,7 @@ impl BroadcastListener {
         });
 
         let callback_handle =
-            Self::setup_network_connectivity_listener(system_state.clone(), route_manager_handle)
-                .await?;
+            Self::setup_network_connectivity_listener(system_state.clone(), route_manager).await?;
 
         Ok(BroadcastListener {
             system_state,
@@ -106,9 +106,9 @@ impl BroadcastListener {
     /// until after `WinNet_DeactivateConnectivityMonitor` has been called.
     async fn setup_network_connectivity_listener(
         system_state: Arc<Mutex<SystemState>>,
-        route_manager_handle: RouteManagerHandle,
+        route_manager: RouteManagerHandle,
     ) -> Result<CallbackHandle, Error> {
-        let change_handle = route_manager_handle
+        let change_handle = route_manager
             .add_default_route_change_callback(Box::new(move |event, addr_family| {
                 Self::connectivity_callback(event, addr_family, &system_state)
             }))
@@ -139,9 +139,9 @@ impl BroadcastListener {
     }
 
     #[allow(clippy::unused_async)]
-    pub async fn host_is_offline(&self) -> bool {
+    pub async fn connectivity(&self) -> Connectivity {
         let state = self.system_state.lock();
-        state.is_offline_currently()
+        state.connectivity.into_connectivity()
     }
 }
 
@@ -153,10 +153,8 @@ enum StateChange {
 }
 
 struct SystemState {
-    v4_connectivity: bool,
-    v6_connectivity: bool,
-    suspended: bool,
-    notify_tx: Weak<UnboundedSender<bool>>,
+    connectivity: ConnectivityInner,
+    notify_tx: Weak<UnboundedSender<Connectivity>>,
 }
 
 impl SystemState {
@@ -164,23 +162,21 @@ impl SystemState {
         let old_state = self.is_offline_currently();
         match change {
             StateChange::NetworkV4Connectivity(connectivity) => {
-                self.v4_connectivity = connectivity;
+                self.connectivity.ipv4 = connectivity;
             }
-
             StateChange::NetworkV6Connectivity(connectivity) => {
-                self.v6_connectivity = connectivity;
+                self.connectivity.ipv6 = connectivity;
             }
-
             StateChange::Suspended(suspended) => {
-                self.suspended = suspended;
+                self.connectivity.suspended = suspended;
             }
         };
 
-        let new_state = self.is_offline_currently();
+        let new_state = self.connectivity.is_offline();
         if old_state != new_state {
             log::info!("Connectivity changed: {}", is_offline_str(new_state));
             if let Some(notify_tx) = self.notify_tx.upgrade() {
-                if let Err(e) = notify_tx.unbounded_send(new_state) {
+                if let Err(e) = notify_tx.unbounded_send(self.connectivity.into_connectivity()) {
                     log::error!("Failed to send new offline state to daemon: {}", e);
                 }
             }
@@ -188,7 +184,7 @@ impl SystemState {
     }
 
     fn is_offline_currently(&self) -> bool {
-        (!self.v4_connectivity && !self.v6_connectivity) || self.suspended
+        self.connectivity.is_offline()
     }
 }
 
@@ -204,14 +200,52 @@ fn is_offline_str(offline: bool) -> &'static str {
 pub type MonitorHandle = BroadcastListener;
 
 pub async fn spawn_monitor(
-    sender: UnboundedSender<bool>,
-    route_manager_handle: RouteManagerHandle,
+    sender: UnboundedSender<Connectivity>,
+    route_manager: RouteManagerHandle,
 ) -> Result<MonitorHandle, Error> {
     let power_mgmt_rx = crate::window::PowerManagementListener::new();
-    BroadcastListener::start(sender, route_manager_handle, power_mgmt_rx).await
+    BroadcastListener::start(sender, route_manager, power_mgmt_rx).await
 }
 
 fn apply_system_state_change(state: Arc<Mutex<SystemState>>, change: StateChange) {
     let mut state = state.lock();
     state.apply_change(change);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConnectivityInner {
+    /// Whether IPv4 connectivity seems to be available on the host.
+    ipv4: bool,
+    /// Whether IPv6 connectivity seems to be available on the host.
+    ipv6: bool,
+    /// The host is suspended.
+    suspended: bool,
+}
+
+impl ConnectivityInner {
+    /// Map [`ConnectivityInner`] to the public [`Connectivity`].
+    ///
+    /// # Note
+    ///
+    /// If the host is suspended, there is a great likelihood that we should
+    /// consider the host to be offline. We synthesize this by setting both
+    /// `ipv4` and `ipv6` availability to `false`.
+    fn into_connectivity(self) -> Connectivity {
+        if self.suspended {
+            Connectivity::Status {
+                ipv4: false,
+                ipv6: false,
+            }
+        } else {
+            Connectivity::Status {
+                ipv4: self.ipv4,
+                ipv6: self.ipv6,
+            }
+        }
+    }
+
+    /// See [`Connectivity::is_offline`] for details.
+    fn is_offline(&self) -> bool {
+        self.into_connectivity().is_offline()
+    }
 }

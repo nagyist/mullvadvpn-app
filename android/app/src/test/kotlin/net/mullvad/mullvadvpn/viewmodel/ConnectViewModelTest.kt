@@ -2,221 +2,336 @@ package net.mullvad.mullvadvpn.viewmodel
 
 import androidx.lifecycle.viewModelScope
 import app.cash.turbine.test
+import arrow.core.right
+import io.mockk.Runs
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
-import io.mockk.mockkStatic
-import io.mockk.slot
 import io.mockk.unmockkAll
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
-import net.mullvad.mullvadvpn.TestCoroutineRule
 import net.mullvad.mullvadvpn.compose.state.ConnectUiState
-import net.mullvad.mullvadvpn.model.GeoIpLocation
-import net.mullvad.mullvadvpn.model.TunnelState
-import net.mullvad.mullvadvpn.relaylist.RelayCountry
-import net.mullvad.mullvadvpn.relaylist.RelayItem
-import net.mullvad.mullvadvpn.relaylist.RelayList
-import net.mullvad.mullvadvpn.ui.VersionInfo
-import net.mullvad.mullvadvpn.ui.serviceconnection.AppVersionInfoCache
-import net.mullvad.mullvadvpn.ui.serviceconnection.ConnectionProxy
-import net.mullvad.mullvadvpn.ui.serviceconnection.LocationInfoCache
-import net.mullvad.mullvadvpn.ui.serviceconnection.RelayListListener
-import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionContainer
+import net.mullvad.mullvadvpn.lib.common.test.TestCoroutineRule
+import net.mullvad.mullvadvpn.lib.model.AccountData
+import net.mullvad.mullvadvpn.lib.model.DeviceState
+import net.mullvad.mullvadvpn.lib.model.ErrorState
+import net.mullvad.mullvadvpn.lib.model.GeoIpLocation
+import net.mullvad.mullvadvpn.lib.model.TunnelEndpoint
+import net.mullvad.mullvadvpn.lib.model.TunnelState
+import net.mullvad.mullvadvpn.lib.model.WebsiteAuthToken
+import net.mullvad.mullvadvpn.lib.shared.AccountRepository
+import net.mullvad.mullvadvpn.lib.shared.ConnectionProxy
+import net.mullvad.mullvadvpn.lib.shared.DeviceRepository
+import net.mullvad.mullvadvpn.repository.ChangelogRepository
+import net.mullvad.mullvadvpn.repository.InAppNotification
+import net.mullvad.mullvadvpn.repository.InAppNotificationController
 import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionManager
 import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionState
-import net.mullvad.mullvadvpn.util.appVersionCallbackFlow
-import net.mullvad.talpid.util.EventNotifier
-import org.junit.After
-import org.junit.Before
-import org.junit.Rule
-import org.junit.Test
+import net.mullvad.mullvadvpn.usecase.LastKnownLocationUseCase
+import net.mullvad.mullvadvpn.usecase.OutOfTimeUseCase
+import net.mullvad.mullvadvpn.usecase.PaymentUseCase
+import net.mullvad.mullvadvpn.usecase.SelectedLocationTitleUseCase
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 
+@ExtendWith(TestCoroutineRule::class)
 class ConnectViewModelTest {
-    @get:Rule val testCoroutineRule = TestCoroutineRule()
 
     private val mockServiceConnectionManager: ServiceConnectionManager = mockk()
     private lateinit var viewModel: ConnectViewModel
 
     private val serviceConnectionState =
-        MutableStateFlow<ServiceConnectionState>(ServiceConnectionState.Disconnected)
-    private val versionInfo =
-        MutableStateFlow(
-            VersionInfo(
-                currentVersion = null,
-                upgradeVersion = null,
-                isOutdated = false,
-                isSupported = false
-            )
-        )
+        MutableStateFlow<ServiceConnectionState>(ServiceConnectionState.Unbound)
+    private val accountExpiryState = MutableStateFlow<AccountData?>(null)
+    private val device = MutableStateFlow<DeviceState?>(null)
+    private val notifications = MutableStateFlow<List<InAppNotification>>(emptyList())
 
     // Service connections
-    private val mockServiceConnectionContainer: ServiceConnectionContainer = mockk()
-    private val mockLocationInfoCache: LocationInfoCache = mockk(relaxUnitFun = true)
-    private val mockRelayListListener: RelayListListener = mockk(relaxUnitFun = true)
-    private lateinit var mockAppVersionInfoCache: AppVersionInfoCache
     private val mockConnectionProxy: ConnectionProxy = mockk()
+    private val mockLocation: GeoIpLocation = mockk(relaxed = true)
 
-    // Captures
-    private val locationSlot = slot<((GeoIpLocation?) -> Unit)>()
-    private val relaySlot = slot<(RelayList, RelayItem?) -> Unit>()
+    // Account Repository
+    private val mockAccountRepository: AccountRepository = mockk(relaxed = true)
 
-    // Event notifiers
-    private val eventNotifierTunnelUiState = EventNotifier<TunnelState>(TunnelState.Disconnected)
-    private val eventNotifierTunnelRealState = EventNotifier<TunnelState>(TunnelState.Disconnected)
+    // Device Repository
+    private val mockDeviceRepository: DeviceRepository = mockk()
 
-    @Before
+    // Changelog Repository
+    private val mockChangelogRepository: ChangelogRepository = mockk()
+
+    // In App Notifications
+    private val mockInAppNotificationController: InAppNotificationController = mockk()
+
+    // Select location use case
+    private val mockSelectedLocationTitleUseCase: SelectedLocationTitleUseCase = mockk()
+
+    // Payment use case
+    private val mockPaymentUseCase: PaymentUseCase = mockk(relaxed = true)
+
+    // Flows
+    private val tunnelState = MutableStateFlow<TunnelState>(TunnelState.Disconnected())
+    private val selectedRelayItemFlow = MutableStateFlow<String?>(null)
+    private val lastKnownLocationFlow = MutableStateFlow<GeoIpLocation?>(null)
+
+    // Out Of Time Use Case
+    private val outOfTimeUseCase: OutOfTimeUseCase = mockk()
+    private val outOfTimeViewFlow = MutableStateFlow(false)
+
+    // Last known location
+    private val mockLastKnownLocationUseCase: LastKnownLocationUseCase = mockk()
+
+    @BeforeEach
     fun setup() {
-        mockkStatic(CACHE_EXTENSION_CLASS)
-
-        mockAppVersionInfoCache =
-            mockk<AppVersionInfoCache>().apply {
-                every { appVersionCallbackFlow() } returns versionInfo
-            }
-
         every { mockServiceConnectionManager.connectionState } returns serviceConnectionState
-        every { mockServiceConnectionContainer.locationInfoCache } returns mockLocationInfoCache
-        every { mockServiceConnectionContainer.relayListListener } returns mockRelayListListener
-        every { mockServiceConnectionContainer.appVersionInfoCache } returns mockAppVersionInfoCache
-        every { mockServiceConnectionContainer.connectionProxy } returns mockConnectionProxy
 
-        every { mockConnectionProxy.onUiStateChange } returns eventNotifierTunnelUiState
-        every { mockConnectionProxy.onStateChange } returns eventNotifierTunnelRealState
-        // Listeners
-        every { mockLocationInfoCache.onNewLocation = capture(locationSlot) } answers {}
-        every { mockRelayListListener.onRelayListChange = capture(relaySlot) } answers {}
-        every { mockAppVersionInfoCache.onUpdate = any() } answers {}
+        every { mockAccountRepository.accountData } returns accountExpiryState
 
-        viewModel = ConnectViewModel(mockServiceConnectionManager)
+        every { mockDeviceRepository.deviceState } returns device
+
+        coEvery { mockDeviceRepository.updateDevice() } just Runs
+
+        every { mockInAppNotificationController.notifications } returns notifications
+
+        every { mockConnectionProxy.tunnelState } returns tunnelState
+
+        every { mockLastKnownLocationUseCase.lastKnownDisconnectedLocation } returns
+            lastKnownLocationFlow
+
+        every { mockLocation.country } returns "dummy country"
+
+        // Flows
+        every { mockSelectedLocationTitleUseCase() } returns selectedRelayItemFlow
+
+        every { outOfTimeUseCase.isOutOfTime } returns outOfTimeViewFlow
+        viewModel =
+            ConnectViewModel(
+                accountRepository = mockAccountRepository,
+                deviceRepository = mockDeviceRepository,
+                changelogRepository = mockChangelogRepository,
+                inAppNotificationController = mockInAppNotificationController,
+                newDeviceRepository = mockk(),
+                outOfTimeUseCase = outOfTimeUseCase,
+                paymentUseCase = mockPaymentUseCase,
+                selectedLocationTitleUseCase = mockSelectedLocationTitleUseCase,
+                connectionProxy = mockConnectionProxy,
+                lastKnownLocationUseCase = mockLastKnownLocationUseCase,
+                resources = mockk(),
+                isPlayBuild = false,
+                isFdroidBuild = false,
+                packageName = "net.mullvad.mullvadvpn",
+            )
     }
 
-    @After
+    @AfterEach
     fun teardown() {
         viewModel.viewModelScope.coroutineContext.cancel()
         unmockkAll()
     }
 
     @Test
-    fun testInitialState() = runTest {
+    fun `uiState should emit initial state by default`() = runTest {
         viewModel.uiState.test { assertEquals(ConnectUiState.INITIAL, awaitItem()) }
     }
 
     @Test
-    fun testTunnelInfoExpandedUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val expectedResult = true
+    fun `given change in tunnel state uiState should emit new tunnel state`() = runTest {
+        val tunnelStateTestItem = TunnelState.Connected(mockk(relaxed = true), null, emptyList())
 
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(mockk())
-                relaySlot.captured.invoke(mockk(), mockk())
-                viewModel.toggleTunnelInfoExpansion()
-                val result = awaitItem()
-                assertEquals(expectedResult, result.isTunnelInfoExpanded)
-            }
+        viewModel.uiState.test {
+            assertEquals(ConnectUiState.INITIAL, awaitItem())
+            tunnelState.emit(tunnelStateTestItem)
+            val result = awaitItem()
+            assertEquals(tunnelStateTestItem, result.tunnelState)
         }
-
-    @Test
-    fun testTunnelRealStateUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val tunnelRealStateTestItem = TunnelState.Connected(mockk(), mockk())
-
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(mockk())
-                relaySlot.captured.invoke(mockk(), mockk())
-                eventNotifierTunnelRealState.notify(tunnelRealStateTestItem)
-                val result = awaitItem()
-                assertEquals(tunnelRealStateTestItem, result.tunnelRealState)
-            }
-        }
-
-    @Test
-    fun testTunnelUiStateUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val tunnelUiStateTestItem = TunnelState.Connected(mockk(), mockk())
-
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(mockk())
-                relaySlot.captured.invoke(mockk(), mockk())
-                eventNotifierTunnelUiState.notify(tunnelUiStateTestItem)
-                val result = awaitItem()
-                assertEquals(tunnelUiStateTestItem, result.tunnelUiState)
-            }
-        }
-
-    @Test
-    fun testAppVersionInfoUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val versionInfoTestItem =
-                VersionInfo(
-                    currentVersion = "1.0",
-                    upgradeVersion = "2.0",
-                    isOutdated = false,
-                    isSupported = false
-                )
-
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(mockk())
-                relaySlot.captured.invoke(mockk(), mockk())
-                versionInfo.value = versionInfoTestItem
-                val result = awaitItem()
-                assertEquals(versionInfoTestItem, result.versionInfo)
-            }
-        }
-
-    @Test
-    fun testRelayItemUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val relayTestItem =
-                RelayCountry(name = "Name", code = "Code", expanded = false, cities = emptyList())
-
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(mockk())
-                relaySlot.captured.invoke(mockk(), relayTestItem)
-                val result = awaitItem()
-                assertEquals(relayTestItem, result.relayLocation)
-            }
-        }
-
-    @Test
-    fun testLocationUpdate() =
-        runTest(testCoroutineRule.testDispatcher) {
-            val locationTestItem =
-                GeoIpLocation(
-                    ipv4 = mockk(),
-                    ipv6 = mockk(),
-                    country = "Sweden",
-                    city = "Gothenburg",
-                    hostname = "Host"
-                )
-
-            viewModel.uiState.test {
-                assertEquals(ConnectUiState.INITIAL, awaitItem())
-                serviceConnectionState.value =
-                    ServiceConnectionState.ConnectedReady(mockServiceConnectionContainer)
-                locationSlot.captured.invoke(locationTestItem)
-                relaySlot.captured.invoke(mockk(), mockk())
-                val result = awaitItem()
-                assertEquals(locationTestItem, result.location)
-            }
-        }
-
-    companion object {
-        private const val CACHE_EXTENSION_CLASS = "net.mullvad.mullvadvpn.util.CacheExtensionsKt"
     }
+
+    @Test
+    fun `given change in tunnelState uiState should emit new tunnelState`() = runTest {
+        // Arrange
+        val tunnelEndpoint: TunnelEndpoint = mockk()
+        val location: GeoIpLocation = mockk()
+        val tunnelStateTestItem = TunnelState.Connected(tunnelEndpoint, location, emptyList())
+        every { location.ipv4?.hostAddress } returns "1.1.1.1"
+        every { location.hostname } returns "hostname"
+
+        // Act, Assert
+        viewModel.uiState.test {
+            assertEquals(ConnectUiState.INITIAL, awaitItem())
+            tunnelState.emit(tunnelStateTestItem)
+            val result = awaitItem()
+            assertEquals(tunnelStateTestItem, result.tunnelState)
+        }
+    }
+
+    @Test
+    fun `given RelayListUseCase returns new selectedRelayItem uiState should emit new selectedRelayItem`() =
+        runTest {
+            val selectedRelayItemTitle = "Item"
+            viewModel.uiState.test {
+                assertEquals(ConnectUiState.INITIAL, awaitItem())
+
+                selectedRelayItemFlow.value = selectedRelayItemTitle
+                assertEquals(selectedRelayItemTitle, awaitItem().selectedRelayItemTitle)
+            }
+        }
+
+    @Test
+    fun `given new location in tunnel state uiState should emit new location`() = runTest {
+        val locationTestItem =
+            GeoIpLocation(
+                ipv4 = mockk(relaxed = true),
+                ipv6 = mockk(relaxed = true),
+                country = "Sweden",
+                city = "Gothenburg",
+                hostname = "Host",
+                entryHostname = "EntryHost",
+                latitude = 57.7065,
+                longitude = 11.967,
+            )
+
+        // Act, Assert
+        viewModel.uiState.test {
+            tunnelState.emit(TunnelState.Disconnected(null))
+
+            // Start of with no location
+            assertNull(awaitItem().location)
+
+            // After updated we show latest
+            tunnelState.emit(TunnelState.Disconnected(locationTestItem))
+            assertEquals(locationTestItem, awaitItem().location)
+        }
+    }
+
+    @Test
+    fun `initial state should not include any location`() =
+        // Arrange
+        runTest {
+            val locationTestItem = null
+
+            // Act, Assert
+            viewModel.uiState.test { assertEquals(locationTestItem, awaitItem().location) }
+        }
+
+    @Test
+    fun `onDisconnectClick should invoke disconnect on ConnectionProxy`() = runTest {
+        // Arrange
+        coEvery { mockConnectionProxy.disconnect() } returns true.right()
+
+        // Act
+        viewModel.onDisconnectClick()
+
+        // Assert
+        coVerify { mockConnectionProxy.disconnect() }
+    }
+
+    @Test
+    fun `onReconnectClick should invoke reconnect on ConnectionProxy`() = runTest {
+        // Arrange
+        coEvery { mockConnectionProxy.reconnect() } returns true.right()
+
+        // Act
+        viewModel.onReconnectClick()
+
+        // Assert
+        coVerify { mockConnectionProxy.reconnect() }
+    }
+
+    @Test
+    fun `onConnectClick should invoke connect on ConnectionProxy`() = runTest {
+        // Arrange
+        coEvery { mockConnectionProxy.connect() } returns true.right()
+
+        // Act
+        viewModel.onConnectClick()
+
+        // Asser
+        coVerify { mockConnectionProxy.connect() }
+    }
+
+    @Test
+    fun `onCancelClick should invoke disconnect on ConnectionProxy`() = runTest {
+        // Arrange
+        coEvery { mockConnectionProxy.disconnect() } returns true.right()
+
+        // Act
+        viewModel.onCancelClick()
+
+        // Assert
+        coVerify { mockConnectionProxy.disconnect() }
+    }
+
+    @Test
+    fun `given InAppNotificationController returns TunnelStateError notification uiState should emit notification`() =
+        runTest {
+            // Arrange
+            val mockErrorState: ErrorState = mockk()
+            val expectedConnectNotificationState =
+                InAppNotification.TunnelStateError(mockErrorState)
+
+            // Act, Assert
+            viewModel.uiState.test {
+                assertEquals(ConnectUiState.INITIAL, awaitItem())
+                notifications.value = listOf(expectedConnectNotificationState)
+                assertEquals(expectedConnectNotificationState, awaitItem().inAppNotification)
+            }
+        }
+
+    @Test
+    fun `onShowAccountClick call should result in uiSideEffect emitting OpenAccountManagementPageInBrowser`() =
+        runTest {
+            // Arrange
+            val mockToken = WebsiteAuthToken.fromString("154c4cc94810fddac78398662b7fa0c7")
+            coEvery { mockAccountRepository.getWebsiteAuthToken() } returns mockToken
+
+            // Act, Assert
+            viewModel.uiSideEffect.test {
+                viewModel.onManageAccountClick()
+                val action = awaitItem()
+                assertIs<ConnectViewModel.UiSideEffect.OpenAccountManagementPageInBrowser>(action)
+                assertEquals(mockToken, action.token)
+            }
+        }
+
+    @Test
+    fun `given OutOfTimeUseCase returns true uiSideEffect should emit OutOfTime`() = runTest {
+        // Arrange
+        val deferred = async { viewModel.uiSideEffect.first() }
+
+        // Act
+        viewModel.uiState.test {
+            awaitItem()
+            outOfTimeViewFlow.value = true
+        }
+
+        // Assert
+        assertIs<ConnectViewModel.UiSideEffect.OutOfTime>(deferred.await())
+    }
+
+    @Test
+    fun `given tunnel state error should emit last known disconnected location as location`() =
+        runTest {
+            // Arrange
+            val tunnel = TunnelState.Error(mockk(relaxed = true))
+            val lastKnownLocation: GeoIpLocation = mockk(relaxed = true)
+
+            // Act, Assert
+            viewModel.uiState.test {
+                assertEquals(ConnectUiState.INITIAL, awaitItem())
+                lastKnownLocationFlow.emit(lastKnownLocation)
+                tunnelState.emit(tunnel)
+                awaitItem()
+                val result = awaitItem()
+                assertEquals(lastKnownLocation, result.location)
+            }
+        }
 }

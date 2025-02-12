@@ -23,16 +23,444 @@ Line wrap the file at 100 chars.                                              Th
 
 ## [Unreleased]
 ### Added
+#### Windows
+- Add support for DAITA V2.
+- Add back wireguard-go (userspace WireGuard) support.
+
+
+## [2025.4-beta1] - 2025-02-11
+### Changed
+#### Windows
+- Replace the Electron API `shell.readShortcutLink` with a custom, native rust module
+  `win-shortcuts`.
+
+### Fixed
+#### Windows
+- Fix GUI crashing at launch on some systems by replacing Electron's shortcut parser.
+
+
+## [2025.3] - 2025-02-07
+### Changed
+- Change order of items in settings view to show DAITA and multihop at the top.
+- Update Electron from 33.2.1 to 33.4.0.
+
+
+## [2025.3-beta1] - 2025-01-21
+### Added
+#### Windows
+- Add support for Windows ARM64.
+
+### Changed
+- (Linux and macOS only) Update to DAITA v2. The main difference is that many different machines are
+  provided by relays instead of a bundled list. The bundled `maybenot_machines` file was removed.
+- Update Electron from 30.0.4 to 33.2.1.
+- Move changelog from a dialog to a separate view.
+- Reduce the setup time of PQ tunnels by pre-computing McEliece keys.
+
+### Fixed
+- (macOS and Windows only) Add the correct route when using obfuscation with Wireguard.
+
+#### macOS
+- Fix daemon ending up in blocked state if the user toggled split tunneling without having granted
+  Full Disk Access to `mullvad-daemon`. This could only ever be accomplished from the CLI.
+
+### Removed
+- Remove Google's resolvers from encrypted DNS proxy.
+
+
+## [2025.2] - 2025-01-08
+### Fixed
+- Fix crash when Wireguard tunnel setup timed out.
+
+
+## [2025.1] - 2025-01-02
+### Fixed
+#### macOS
+- Fix GUI getting stuck when opening the split tunneling view.
+
+
+## [2024.9-beta1] - 2024-12-05
+### Added
+- Add a new access method: Encrypted DNS Proxy. Encrypted DNS proxy is a way to reach the API via
+  proxies. The access method is enabled by default.
+
+#### macOS
+- Detect whether full disk access is enabled in the split tunneling view.
+- Add button to restart system service in split tunneling view. This can help mitigate edge-case
+  issues when enabling full disk access.
+
+### Changed
+- Replace the draft key encapsulation mechanism Kyber (round 3) with the standardized
+  ML-KEM (FIPS 203) dito in the handshake for Quantum-resistant tunnels.
+- Make Smart Routing override multihop if both are enabled. To manually set the entry relay,
+  explicitly enable the "Direct only" option in the DAITA settings.
+- Update maybenot from 1.1.3 to 2.0.1.
+
+#### Windows
+- Enable quantum-resistant tunnels by default (when set to `auto`).
+
+### Fixed
+- Handle network switching better when using WG over Shadowsocks.
+- Fix multihop entry location list sometimes being shown when multihop is disabled.
+
+#### macOS
+- Fix packets being duplicated on LAN when split tunneling is enabled.
+- Fix DNS issues caused by forcibly using a local DNS resolver in all states.
+  Note that this fix is not present on macOS versions between 14.6 and 15.1.
+
+### Security
+#### Windows
+- Block WSL/Hyper-V traffic in secured states (except the connected state). The normal firewall
+  (WFP) filters normally do not apply for VMs. This mitigates the issue by ensuring that it does not
+  leak (as easily) when the VPN tunnel is up. Previously, WSL would leak while in the blocked or
+  connecting state, or while lockdown mode was active.
+
+
+## [2024.8] - 2024-12-04
+### Security
+- Remove invalidly set up alternative stack for fault signal handlers on unix based systems.
+  This prevents potential stack overflow and heap memory corruption.
+  Fixes audit issue [`MLLVD-CR-24-01`].
+- Remove/disable not signal safe code from fault signal handler on unix based systems.
+  Fixes audit issue [`MLLVD-CR-24-02`].
+
+#### Windows
+- Fix issue where the installer would allow any executable named `taskkill.exe` in the working
+  directory to run as admin. This fixes audit issue [`MLLVD-CR-24-06`].
+
+#### Linux
+- Prevent attackers able to send ARP requests to the device running Mullvad from figuring out
+  the in-tunnel IP. Fixes 2024 audit issue [`MLLVD-CR-24-03`].
+
+[`MLLVD-CR-24-01`]: audits/2024-12-10-X41-D-Sec.md#MLLVD-CR-24-01
+[`MLLVD-CR-24-02`]: audits/2024-12-10-X41-D-Sec.md#MLLVD-CR-24-02
+[`MLLVD-CR-24-03`]: audits/2024-12-10-X41-D-Sec.md#MLLVD-CR-24-03
+[`MLLVD-CR-24-06`]: audits/2024-12-10-X41-D-Sec.md#MLLVD-CR-24-06
+
+## [2024.7] - 2024-10-30
+This release is identical to 2024.7-beta1.
+
+
+## [2024.7-beta1] - 2024-10-25
+### Fixed
+#### macOS
+- Fix DNS not working due to broken PF redirect.
+
+
+## [2024.6] - 2024-10-23
+### Fixed
+#### macOS
+- Disable DNS redirect when custom DNS is set to localhost.
+
+
+## [2024.6-beta2] - 2024-10-09
+### Changed
+- Move DAITA and multihop to the root settings view along with moving multihop into a dedicated
+  view with more information.
+
+#### macOS
+- Enable IPv6 by default. This fixes DNS and routing being broken on some systems.
+- Proxy DNS queries through a local resolver.
+
+### Fixed
+#### macOS
+- Fix Apple services not working by forcing stray connections out through the VPN tunnel. This fix
+  only applies to Wireguard, OpenVPN is still affected. The "bypass" toggle has been removed.
+
+
+## [2024.6-beta1] - 2024-09-26
+### Added
+- Add WireGuard over Shadowsocks obfuscation. It can be enabled in "WireGuard settings". This will
+  also be used automatically when connecting fails with other methods.
+- Add feature indicators to the main view along with redesigning the connection details.
+- Add "Smart Routing" feature which simplifies connecting to DAITA-enabled relays.
+
+#### macOS
+- Add "Apple services bypass" toggle that let's users unblock certain Apple-owned networks.
+  This is a temporary fix to the MacOS 15 issues where some Apple services are being blocked.
+
+### Changed
+- Never use OpenVPN as a fallback protocol when any of the following features is enabled:
+  multihop, quantum-resistant tunnels, or DAITA.
+- Improved output format of `mullvad status` command, which now also prints feature indicators.
+
+#### macOS
+- Disable split tunnel interface when disconnected. This prevents traffic from being sent through
+  the daemon when the VPN is disconnected.
+
+### Fixed
+#### Linux
+- Set tunnel name to `wg0-mullvad` for userspace WireGuard.
+
+#### macOS
+- Exclude programs when executed using a relative path from a shell.
+- Reduce packet loss when using split tunneling.
+- Don't block fragmented packets in the PF firewall. Fixes various issues relating to connecting
+  (and general instability) when IP fragmentation is present.
+
+#### Windows
+- Add potential fix for a rare error when creating the Mullvad Wintun-adapter for OpenVPN
+
+
+## [2024.5] - 2024-09-03
+### Fixed
+- macOS and Linux: Fix potential crash when disconnecting with DAITA enabled.
+
+
+## [2024.5-beta1] - 2024-08-20
+### Added
+- Add DAITA (Defence against AI-guided Traffic Analysis) setting for Linux and macOS.
+- Add `--json` flag to `mullvad status` CLI.
+
+### Changed
+- Ignore obfuscation protocol constraints when the obfuscation mode is set to auto.
+
+#### macOS
+- Enable quantum-resistant tunnels by default (when set to `auto`).
+
+### Fixed
+- Fix mullvad cli bug causing `mullvad status listen` command to miss events if they occurred
+  too quickly.
+- Fix bug causing app to enter blocked state when toggling DAITA on and off.
+
+#### macOS
+- Fix intermittent failures to connect with PQ enabled.
+
+
+## [2024.4] - 2024-07-23
+This release is identical to 2024.4-beta1.
+
+
+## [2024.4-beta1] - 2024-06-24
+### Added
+- Add custom bridge settings in GUI.
+- Bundle https://github.com/mullvad/apisocks5 as a standalone binary.
+
+#### macOS
+- Add support for split tunneling (beta).
+
+### Changed
+- Update Electron from 28.1.3 to 30.0.4.
+
+### Fixed
+#### Windows
+- Fix race condition that could result in crashes when DAITA was enabled during disconnects.
+
+
+## [2024.3] - 2024-05-15
+This release is identical to 2024.3-beta1.
+
+
+## [2024.3-beta1] - 2024-05-07
+### Added
+#### Windows
+- Add DAITA (Defence against AI-guided Traffic Analysis) setting. On supported servers, this makes
+  website fingerprinting more difficult by sending random padding packets along with padding all
+  packets to the same size.
+
+### Changed
+- Don't fail to start daemon when the offline monitor fails to be initialized.
+
+### Fixed
+#### Linux
+- Fix GUI not working on Ubuntu 24.04 by adding an AppArmor profile.
+- Service failed to start when IPv6 was disabled in the kernel.
+
+
+## [2024.2] - 2024-04-29
+### Fixed
+- Fix bug where the app would fail to select an existing relay in some scenarios, causing the
+  user to wrongly end up in a blocked state.
+
+#### macOS
+- DNS was not properly restored in some cases when using custom DNS.
+
+### Security
+#### macOS
+- Flush states on tunnel state changes. Previously, pre-existing connections could leak when
+  internet sharing was enabled on a device.
+
+#### Windows
+- Update electron-builder to 24.13.3 to fix CVE-2024-27303, which enabled privilege escelation when
+  running the installer.
+
+
+## [2024.2-beta1] - 2024-04-15
+### Added
+- Add automatic MTU detection for desktop platforms. This currently only uses information about
+  dropped packets and does not take fragmentation into account.
+- Add ability to import server IP overrides in GUI.
+
+### Changed
+- Change default obfuscation setting to `auto`.
+- Migrate obfuscation settings for existing users from `off` to `auto`.
+- Change [default retry connection attempts][`relay selector defaults`].
+
+[`relay selector defaults`]: docs/relay-selector.md#default-constraints-for-tunnel-endpoints
+
+### Fixed
+- Continual excessive attempts to update the API IP were made after testing access methods.
+- Fix pointless API access method rotations for concurrent requests.
+- Fix daemon rotating logs on startup even if another daemon is already running.
+- Fix missing redirect to out of time-view when running out of time.
+- Fix incorrectly showing "App lost contact with system service" notification on suspend.
+
+
+## [2024.1] - 2024-03-21
+### Fixed
+- Fix map scaling issues when changing display scale settings and when running under Wayland on
+  Linux.
+
+#### macOS
+- Fix bug that caused high CPU usage.
+- Fix bugs that caused the log to be filled with socket errors, by handling closed sockets
+  gracefully.
+
+
+## [2024.1-beta2] - 2024-02-19
+### Added
+- Add account UUID to verbose 'mullvad account get -v' output.
+- Respect OS prefer-reduced-motion setting.
+- Add CLI command for exporting settings patches: `mullvad export-settings`. Currently, it generates
+  a patch containing all patchable settings, which only includes relay IP overrides.
+- Make `mullvad status` prints if lockdown mode is enabled when disconnected.
+- Add option to configure custom API access methods. Custom API access methods allows the user to
+  circumvent censorship by proxying API traffic.
+- Add confirmation dialog when deleting a custom list.
+- Add support for custom SOCKS5 OpenVPN bridges running locally.
+
+### Fixed
+- Fix connectivity issues that would occur when using quantum-resistant tunnels with an incorrectly
+  configured MTU.
+- Fix custom list name validation by not allowing empty names.
+
+#### Linux
+- Fix Bash shell completions for subcommands in the CLI.
+- Fix out IP missing forever when am.i.mullvad.net returns error.
+
+#### macOS
+- Fix default route not being restored when disconnecting when the gateway was a link-local IPv6
+  address.
+- Fix app sometimes getting stuck in error state when the connection is unstable. This occurred
+  when the default route was removed while connecting.
+- Improve multihop performance by preventing fragmentation in the tunnel. This is done by setting
+  an MTU on the default route.
+
+### Changed
+- Remove `--location` flag from `mullvad status` CLI. Location and IP will now always
+  be printed (if available). `mullvad status listen` no longer prints location info.
+- Change CLI interface for custom SOCKS5 bridges as part of supporting bridges running locally.
+- Upgrade the background map to a new WebGL 3D map. This should both look better and be more
+  performant.
+- Update Electron from 26.3.0 to 28.1.3.
+- Improve the "Connecting to system service"-view with information about the situation and
+  troubleshooting tips.
+- Update support email address to new email address, support@mullvadvpn.net.
+
+#### Linux
+- Enable quantum-resistant tunnels by default (when set to `auto`). On other platforms, `auto` still
+  always means the same thing as `off`.
+
+#### Windows
+- Add information to error notification about an error that is often caused by an incompatibility
+  with VMWare.
+
+
+## [2024.1-beta1] - 2023-12-14
+### Added
+- Add CLI support for applying patches to the settings with `mullvad import-settings`.
+
+### Changed
+- CLI command `mullvad relay set tunnel wireguard entry-location` changed to
+  `mullvad relay set tunnel wireguard entry location`, as the `location` subcommand can now be
+  swapped for `custom-list` to select entry relays using a custom list.
+
+#### Linux
+- Rename interface name from `wg-mullvad` to `wg0-mullvad`.
+
+### Fixed
+- Validate that hostname matches correct server type for CLI commands `mullvad relay set location`,
+  `mullvad bridge set location`, and `mullvad relay set tunnel wireguard entry location`.
+
+#### Linux
+- Prevent fragmentation when multihop is enabled by setting a default route MTU.
+- Fix stable releases being considered a downgrade from a beta version by `dnf`.
+
+
+## [2023.6] - 2023-12-06
+### Changed
+- Update OpenVPN to 2.6.8 from 2.6.0.
+
+### Security
+- Update OpenVPN to 2.6.8 to fix CVE-2023-46850, which could cause freed memory to be sent to the
+  peer.
+
+
+## [2023.6-beta1] - 2023-11-23
+### Added
+- Add customizable relay lists to the CLI on desktop. Custom lists can be managed through
+  `mullvad custom-lists` and can be selected through `mullvad relay set` and `mullvad bridge set`.
+- Add custom lists to location selector in desktop app.
+- Add custom API access methods to the CLI on desktop. Custom API access methods allow the user to
+  proxy API traffic through a peer before connecting to a tunnel. They are managed through
+  `mullvad api-access`, and the initially supported network protocols are `Shadowsocks` and
+  `SOCKS5`.
+- Add social media content blocker.
+- Add ability to override server IPs to the CLI.
+
+### Changed
+- Update Electron from 25.2.0 to 26.3.0.
+
+#### Linux
+- Don't block forwarding of traffic when the split tunnel mark (ct mark) is set.
+
+### Removed
+#### Windows
+- Remove wireguard-go (userspace WireGuard) support.
+
+### Fixed
+- Show correct endpoint in CLI for custom relays.
+- Lower risk of being rate limited.
+- Fix error dialog when failing to write to console by handling the thrown error.
+- Fix error dialog displayed when the daemon was killed.
+- Fix desktop app freezing when navigations occur in very quick succession.
+
+#### Windows
+- Correctly detect whether OS is Windows Server (primarily for logging in daemon.log).
+
+### Security
+#### Windows
+- Fix possible privilege escalation by setting stricter permissions on mullvad directories such as
+  the directory in ProgramData (CVE-2023-50446).
+
+
+## [2023.5] - 2023-10-10
+### Added
+#### Linux
+- Start signing the deb and rpm files (GPG)
+
+### Fixed
+#### macOS
+- Fix connectivity issues when switching between networks or disconnecting.
+
+
+## [2023.5-beta2] - 2023-09-20
+### Fixed
+#### macOS
+- Ensure that the default tunnel route is added back after waking from hibernation. Previously, the
+  tunnel became unusable despite the app appearing to be connected.
+- Work around issue where the default route was lost after disconnecting after switching between
+  networks.
+- Fix slow offline detection.
+- Fix inability to switch from a network to a higher-priority network without the tunnel timing out.
+
+
+## [2023.5-beta1] - 2023-07-13
+### Added
 - Add `--help` and `--version` options to the desktop GUI application.
 - Add creation date below device name in the device list screen.
-- Add settings view button in main view in the desktop app.
+- Add account view button in main view in the desktop app.
 - Add time left and device name in the header bar in the desktop app.
-
-#### Android
-- Add UDP-over-TCP.
-- Prevent incoming connections from outside the VPN in Android 11+ when Local Network Sharing
-  is turned off.
-- Add quantum resistant tunneling.
 
 ### Changed
 - In the CLI, update the `tunnel` subcommand to resemble `relay` more. For example, by adding a
@@ -40,30 +468,21 @@ Line wrap the file at 100 chars.                                              Th
   `mullvad tunnel ipv6 get`.
 - Update the CLI multihop settings to make it possible to set the entry location without toggling
   multihop on or off.
-- In the CLI, the `mullvad account get` command will now print the account
-  number (if there is one) after the device has been revoked.
-- Update the CLI relay, multihop & bridge selection interface to accept a
-  hostname as sole argument, inheriting the behavior of `mullvad relay set
-  hostname`. This is in addition to accepting a geographical location as basis
-  for filtering relays.
+- In the CLI, the `mullvad account get` command will now print the account number (if there is one)
+  after the device has been revoked.
+- Update the CLI relay, multihop & bridge selection interface to accept a hostname as sole argument,
+  inheriting the behavior of `mullvad relay set hostname`. This is in addition to accepting a
+  geographical location as basis for filtering relays.
 - Silence OpenVPN "replay attack" warnings.
+- Update Electron from 23.2.0 to 25.2.0.
 
 #### Windows
 - In the CLI, add a unified `mullvad split-tunnel get` command to replace the old commands
   `mullvad split-tunnel pid list` and `mullvad split-tunnel get`.
 
-#### Android
-- Rename "Advanced settings" to "VPN Settings".
-- Move the "Split tunneling" menu item up a level from "VPN settings" to "Settings".
-- Migrate split tunneling view to compose.
-- Migrate select Location view to compose.
-
 ### Fixed
 - Update relay list after logging in. Previously, if the user wasn't logged in when the daemon
   started, the relay list would only be updated after attempting to connect to the VPN.
-
-#### Android
-- Fix connection header flickering.
 
 #### macOS
 - Fix inability to sync iCloud and Safari bookmarks while connected to the VPN.
@@ -75,59 +494,6 @@ Line wrap the file at 100 chars.                                              Th
 ## [2023.4] - 2023-06-27
 ### Fixed
 - Fix misaligned read in `shadowsocks` leading to a panic on some platforms.
-
-
-## [android/2023.3] - 2023-06-27
-### Changed
-#### Android
-- Change so that all links and texts leading to the mullvad webpage display a modified version of
-  the webpage that does not include links to the account page in order to comply with
-  the Google Play payment policies. This doesn't apply to F-Droid builds.
-- Hide the FAQs and Guides button for Google Play users.
-
-
-## [android/2023.2] - 2023-05-22
-### Changed
-#### Android
-- Change so that all links and texts leading to the account web page (which also includes a payment
-  flow) are either hidden or leads to the app itself (notification actions) in order to comply with
-  the Google Play payment policies. This doesn't apply to F-Droid builds.
-
-
-## [android/2023.1] - 2023-05-16
-### Fixed
-#### Android
-- Fix DNS input keyboard type.
-
-
-## [android/2023.1-beta2] - 2023-05-09
-### Added
-#### Android
-- Add "Manage account" button to the account view.
-
-### Fixed
-#### Android
-- Fix missing payment info in out-of-time view.
-
-
-## [android/2023.1-beta1] - 2023-05-03
-### Added
-#### Android
-- Add themed icon.
-- Add DNS content blockers.
-
-### Changed
-#### Android
-- Clarify some of the error messages throughout the app.
-- Increase WireGuard key rotation interval to 14 days.
-- Change the DNS/MTU input to rely on dialogs in order to improve the UX on some devices.
-- Hide "Buy more credit" buttons in the default release build published to Google Play, our website
-  and GitHub. The buttons are still visible for F-Droid builds.
-
-### Fixed
-#### Android
-- Fix adaptive app icon which previously had a displaced nose and some other oddities.
-- Fix app version sometimes missing in the settings menu.
 
 
 ## [2023.4-beta1] - 2023-05-02
@@ -159,6 +525,7 @@ Line wrap the file at 100 chars.                                              Th
 #### macOS
 - Fix tray window behaviour when opening mission control and switching between full-screen
   workspaces.
+- Fix issue where app stopped responding on ARM Macs.
 
 #### Linux
 - Fix RPM package containing unecessary files causing conflicts with other electron-builder based
@@ -177,7 +544,7 @@ Line wrap the file at 100 chars.                                              Th
   Quantum-resistant-tunnels feature now mixes both Classic McEliece and Kyber for added protection.
 - Add notification dot to tray icon and system notification throttling.
 - Add troubleshooting information to some in-app notifications.
-- Add setting for quantum resistant tunnels to the desktop GUI.
+- Add setting for quantum-resistant tunnels to the desktop GUI.
 - Enable `TCP_NODELAY` for the socket used by WireGuard over TCP. Improves latency and performance.
 
 ### Changed
@@ -275,17 +642,6 @@ Line wrap the file at 100 chars.                                              Th
   queries to servers that would normally be blocked.
 
 
-## [android/2022.3] - 2022-11-14
-### Added
-#### Android
-- Add privacy policy link in settings.
-- Add initial privacy consent which is showed on each start until approved.
-
-
-## [android/2022.2] - 2022-10-17
-Identical to android/2022.2-beta2 except for updated translations.
-
-
 ## [2022.5] - 2022-10-14
 ### Fixed
 #### Linux
@@ -363,8 +719,8 @@ Identical to android/2022.2-beta2 except for updated translations.
 
 ### Security
 - When the system service is being shut down and the target state is _secured_, maintain the
-  blocking firewall rules. Unless it's possible to deduce that the system isn't shutting down and the
-  system service is being stopped by the user intentionally. This is to prevent leaks that might
+  blocking firewall rules. Unless it's possible to deduce that the system isn't shutting down and
+  the system service is being stopped by the user intentionally. This is to prevent leaks that might
   occur during system shutdown. Fixes 2022 Mullvad app audit issue item `MUL22-02`.
 
 #### Windows
@@ -375,22 +731,6 @@ Identical to android/2022.2-beta2 except for updated translations.
 - Added traffic blocking during early boot, before the daemon starts, to prevent leaks in the case
   that the system service starts after a networking daemon has already configured a network
   interface.
-
-
-## [android/2022.2-beta2] - 2022-09-09
-### Changed
-#### Android
-- Refresh device data when opening the account view to ensure the local data is up-to-date and that
-  the device hasn't been revoked.
-- Disable settings button during login.
-
-### Fixed
-#### Android
-- Fix crash sometimes occurring during account creation.
-- Fix tunnel info expansion state not remembered during pause and resume.
-- Fix crash during some view transitions.
-- Fix disabled login button on login failure. Instead, the login button will now still be enabled
-  on login failures to let the user re-attempt the login.
 
 
 ## [2022.4] - 2022-08-19
@@ -407,36 +747,6 @@ Identical to android/2022.2-beta2 except for updated translations.
   which was the hardcoded default before the automatic detection was implemented.
   This solves issues where the physical interface MTU was set higher than it could
   actually transport.
-
-
-## [android/2022.2-beta1] - 2022-08-11
-### Added
-#### Android
-- Add device management to the Android app. This simplifies knowing which device is which and adds
-  the option to log other devices out when the account already has five devices.
-
-### Changed
-#### Android
-- Lowered default MTU to 1280 on Android.
-- Disable app icon badge for tunnel state notification/status.
-
-### Removed
-#### Android
-- Remove WireGuard view as it's no longer needed with the new way of managing devices.
-
-### Fixed
-#### Android
-- Fix unused dependencies loaded in the service/tile DI graph.
-- Fix missing IPC message unregistration causing multiple copies of some messages to be received.
-- Fix quick settings tile being unresponsive and causing crashes on some devices.
-- Fix quick settings tile not working when the device is locked. It will now prompt the user to
-  unlock the device before attempting to toggle the tunnel state.
-- Fix crash when clicking in-app URL notifications.
-
-### Security
-#### Android
-- Prevent location request responses from being received outside the tunnel when in the connected
-  state.
 
 
 ## [2022.3] - 2022-08-10
@@ -576,10 +886,6 @@ This release is identical to 2022.2-beta2.
   one application.
 
 
-## [android/2022.1] - 2022-03-01
-Identical to android/2022.1-beta3 except for a few updated translations.
-
-
 ## [2022.1] - 2022-03-01
 This release is for desktop only.
 
@@ -676,62 +982,6 @@ This release is identical to 2022.1-beta2 except that it has translations for ne
   whereas on Linux and macOS only root processes are able to reach the API.
 
 
-## [android/2022.1-beta3] - 2022-02-08
-### Fixed
-#### Android
-- Fix app crash caused by quick settings tile.
-
-
-## [android/2022.1-beta2] - 2022-01-27
-### Fixed
-#### Android
-- Fix app sometimes crashing during startup on Android TVs.
-
-
-## [android/2022.1-beta1] - 2022-01-26
-### Added
-#### Android
-- Add toggle for Split tunneling view to be able to show system apps
-- Add support of adaptive icons (available only from Android 8).
-
-### Changed
-- Gradually increase the WireGuard connectivity check timeout, lowering the timeout for the first
-  few attempts.
-
-#### Android
-- Improve stability by running the UI and the tunnel management logic in separate processes.
-- Remove dialog warning that only custom local DNS servers are supported, since public custom DNS
-  servers are now supported.
-- Drop support for Android 7/7.1 (Android 8/API level 26 or later is now required).
-- Change so that swiping the notification no longer kills the service since that isn't a common way
-  of handling the lifecycle in Android. Instead rely on the following mechanisms to kill the
-  service:
-  * Swiping to remove app from the Recents/Overview screen.
-  * Android Background Execution Limits.
-  * The System Settings way of killing apps ("Force Stop").
-- Change Quick Settings tile label to reflect the action of clicking the tile. Also add a subtitle
-  on supported Android versions (Q and above) to reflect the state.
-- Hide the tunnel state notification from the lock screen.
-
-### Fixed
-#### Android
-- Fix banner sometimes incorrectly showing (e.g. "BLOCKING INTERNET").
-- Fix tunnel state notification sometimes re-appearing after being dismissed.
-- Fix invalid URLs. Rely on browser locale rather than app/system language.
-- Automatically disable custom DNS when no servers have been added.
-- Fix issue where erasing wireguard MTU value did not clear its setting.
-- Fix initial state of Split tunneling excluded apps list. Previously it was not notified the daemon
-properly after initialization.
-- Fix UI sometimes not updating correctly while no split screen or after having a dialog from
-  another app appear on top.
-- Fix request to connect from notification or quick-settings tile not connecting if VPN permission
-  isn't granted to the app. The app will now show the UI to ask for the permission and correctly
-  connect after it is granted.
-- Fix quick-settings tile sometimes showing the wrong tunnel state.
-- Fix TV-only apps not appearing in the Split Tunneling screen.
-- Fix status bar having the wrong color after logging out.
-
-
 ## [2021.6] - 2021-11-17
 ### Fixed
 - Fix the font for Russian. Issue introduced in 2021.6-beta1.
@@ -775,8 +1025,8 @@ properly after initialization.
 - Move window after dragging tray icon to new position.
 
 #### Linux
-- Greatly simplify behavior around custom DNS when using systemd-resolved, by not setting DNS config on interfaces other
-  than our tunnel interface.
+- Greatly simplify behavior around custom DNS when using systemd-resolved, by not setting DNS config
+  on interfaces other than our tunnel interface.
 
 
 ## [2021.5] - 2021-10-25
@@ -952,56 +1202,15 @@ So there might be warnings when installing this for a while.
 This release is for desktop only.
 
 ### Added
-- Preserve log of old daemon instance when upgrading on Desktop.
-
-#### Linux
-- Always enable `src_valid_mark` config option when connecting to allow policty based routing.
-
-### Changed
-- Allow whitespace in account token in CLI.
-- Read account token from standard input unless given as an argument in CLI.
-- Make WireGuard automatic key rotation interval mandatory and between 1 and 7 days.
-- Show default, minimum, and maximum key rotation intervals in CLI.
-- Attempt to send problem reports using other endpoints if using the primary one fails.
-- Upgrade wireguard-go to version 20210225140808 (Windows: v0.3.8)
-- Settings format updated to `v3`.
-
-### Fixed
-- Fix GUI not showing correct view if disconnected from the daemon during app startup.
-- Fix incorrectly displayed "inconsistent version" text in settings if disconnected from daemon on
-  startup.
-
-#### Linux
-- Further improve offline monitor to properly receive `ENETUNREACH`.
-
-### Security
-- Always reconnect appropriately after an upgrade. Previously, installing the app twice in
-  succession, with auto-connect disabled, would cause it to re-launch in the disconnected state.
-
-
-## [android/2021.1] - 2021-05-04
-This release is for Android only.
-
-This release is identical to android/2021.1-beta1.
-This is our first non beta release for the Android platform!
-
-
-## [android/2021.1-beta1] - 2021-04-06
-This release is for Android only. From now on, Android releases will have this new header format
-that is the same as the git tag they receive: `android/<version>`.
-
-### Added
 - Enable isolation of the Electron renderer process to protect against potentially malicious third
   party dependencies.
+- Preserve log of old daemon instance when upgrading on Desktop.
 - Add 51820 to list of WireGuard ports in app settings.
 - Add option to connect to WireGuard relays over IPv6.
 - Add Burmese translations.
 
-#### Android
-- Allow reaching the API server when connecting, disconnecting or in a blocked state.
-- Add FAQs & Guides menu entry to the Settings screen.
-- Add TV banner for better user experience and requirements.
-- Style StatucBar and NavigationBar to make our app a bit more beautiful.
+#### Linux
+- Always enable `src_valid_mark` config option when connecting to allow policty based routing.
 
 ### Changed
 - Update Electron from 11.0.2 to 11.2.1 which includes a newer Chromium version and
@@ -1010,9 +1219,13 @@ that is the same as the git tag they receive: `android/<version>`.
 - Only download a new relay list if it has been modified.
 - Connect to the API only via TLS 1.3
 - Shrink account history capactity from 3 account entries to 1.
-
-#### Android
-- WireGuard key is now rotated sooner: every four days instead of seven.
+- Allow whitespace in account token in CLI.
+- Read account token from standard input unless given as an argument in CLI.
+- Make WireGuard automatic key rotation interval mandatory and between 1 and 7 days.
+- Show default, minimum, and maximum key rotation intervals in CLI.
+- Attempt to send problem reports using other endpoints if using the primary one fails.
+- Upgrade wireguard-go to version 20210225140808 (Windows: v0.3.8)
+- Settings format updated to `v3`.
 
 #### Windows
 - Upgrade Wintun from 0.9.2 to 0.10.1.
@@ -1020,6 +1233,9 @@ that is the same as the git tag they receive: `android/<version>`.
 ### Fixed
 - Fix delay in showing/hiding update notification when toggling beta program.
 - Improve responsiveness when reconnecting after some failed connection attempts.
+- Fix GUI not showing correct view if disconnected from the daemon during app startup.
+- Fix incorrectly displayed "inconsistent version" text in settings if disconnected from daemon on
+  startup.
 
 #### Windows
 - Fix "cannot find the file" error while creating a Wintun adapter by upgrading Wintun.
@@ -1029,9 +1245,11 @@ that is the same as the git tag they receive: `android/<version>`.
 - Stop using NM for managing DNS if it's newer than 1.26.
 - Fix DNS issues where NM would overwrite Mullvad tunnel's DNS config in systemd-resolved.
 - Fix issues with hosts where the firewall is doing reverse path filtering.
+- Further improve offline monitor to properly receive `ENETUNREACH`.
 
-#### Android
-- Fix input area sometimes disappearing when returning to the Login screen.
+### Security
+- Always reconnect appropriately after an upgrade. Previously, installing the app twice in
+  succession, with auto-connect disabled, would cause it to re-launch in the disconnected state.
 
 
 ## [2021.2] - 2021-02-18
@@ -1226,7 +1444,8 @@ This release is for Android only.
 - Fix issues managing DNS when dnsmasq is used with NetworkManager.
 - Fix issues with managing kernel WireGuard device via NetworkManager.
 - Disable NetworkManager's connectivity check before applying firewall rules to avoid triggering
-  NetworkManager's [bug](https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/issues/312#note_453724)
+  NetworkManager's
+  [bug](https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/issues/312#note_453724)
 
 ### Security
 - Restore the last target state if the daemon crashes. Previously, if auto-connect and

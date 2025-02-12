@@ -1,5 +1,3 @@
-#[cfg(target_os = "android")]
-use jnix::IntoJava;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -21,7 +19,8 @@ pub struct Location {
 const RAIDUS_OF_EARTH: f64 = 6372.8;
 
 impl Location {
-    pub fn distance_from(&self, other: &Coordinates) -> f64 {
+    pub fn distance_from(&self, other: impl Into<Coordinates>) -> f64 {
+        let other: Coordinates = other.into();
         haversine_dist_deg(
             self.latitude,
             self.longitude,
@@ -35,7 +34,7 @@ impl Location {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
@@ -63,7 +62,7 @@ impl Coordinates {
     /// back to spherical coordinates. This is approximate, because the semi-minor (polar)
     /// axis is assumed to equal the semi-major (equatorial) axis.
     ///
-    /// https://en.wikipedia.org/wiki/Spherical_coordinate_system#Cartesian_coordinates
+    /// <https://en.wikipedia.org/wiki/Spherical_coordinate_system#Cartesian_coordinates>
     pub fn midpoint(locations: &[Location]) -> Self {
         Self::midpoint_inner(locations.iter().map(Coordinates::from))
     }
@@ -110,7 +109,7 @@ fn haversine_dist_deg(lat: f64, lon: f64, other_lat: f64, other_lon: f64) -> f64
         other_lon.to_radians(),
     )
 }
-/// Implemented as per https://en.wikipedia.org/wiki/Haversine_formula and https://rosettacode.org/wiki/Haversine_formula#Rust
+/// Implemented as per <https://en.wikipedia.org/wiki/Haversine_formula> and <https://rosettacode.org/wiki/Haversine_formula#Rust>
 /// Takes input as radians, outputs kilometers.
 fn haversine_dist_rad(lat: f64, lon: f64, other_lat: f64, other_lon: f64) -> f64 {
     let d_lat = lat - other_lat;
@@ -136,25 +135,17 @@ pub struct AmIMullvad {
 
 /// GeoIP information exposed from the daemon to frontends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub struct GeoIpLocation {
     pub ipv4: Option<Ipv4Addr>,
     pub ipv6: Option<Ipv6Addr>,
     pub country: String,
     pub city: Option<String>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub latitude: f64,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub longitude: f64,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub mullvad_exit_ip: bool,
     pub hostname: Option<String>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub bridge_hostname: Option<String>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub entry_hostname: Option<String>,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub obfuscator_hostname: Option<String>,
 }
 
@@ -179,6 +170,13 @@ impl From<AmIMullvad> for GeoIpLocation {
             obfuscator_hostname: None,
         }
     }
+}
+
+pub struct LocationEventData {
+    /// Keep track of which request led to this event being triggered
+    pub request_id: usize,
+    /// New location information
+    pub location: GeoIpLocation,
 }
 
 #[cfg(test)]

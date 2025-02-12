@@ -16,36 +16,35 @@ pub const NET_CLS_CLASSID: u32 = 0x4d9f41;
 pub const MARK: i32 = 0xf41;
 
 /// Errors related to split tunneling.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Unable to create cgroup.
-    #[error(display = "Unable to initialize net_cls cgroup instance")]
-    InitNetClsCGroup(#[error(source)] nix::Error),
+    #[error("Unable to initialize net_cls cgroup instance")]
+    InitNetClsCGroup(#[source] nix::Error),
 
     /// Unable to create cgroup.
-    #[error(display = "Unable to create cgroup for excluded processes")]
-    CreateCGroup(#[error(source)] io::Error),
+    #[error("Unable to create cgroup for excluded processes")]
+    CreateCGroup(#[source] io::Error),
 
     /// Unable to set class ID for cgroup.
-    #[error(display = "Unable to set cgroup class ID")]
-    SetCGroupClassId(#[error(source)] io::Error),
+    #[error("Unable to set cgroup class ID")]
+    SetCGroupClassId(#[source] io::Error),
 
     /// Unable to add PID to cgroup.procs.
-    #[error(display = "Unable to add PID to cgroup.procs")]
-    AddCGroupPid(#[error(source)] io::Error),
+    #[error("Unable to add PID to cgroup.procs")]
+    AddCGroupPid(#[source] io::Error),
 
     /// Unable to remove PID to cgroup.procs.
-    #[error(display = "Unable to remove PID from cgroup")]
-    RemoveCGroupPid(#[error(source)] io::Error),
+    #[error("Unable to remove PID from cgroup")]
+    RemoveCGroupPid(#[source] io::Error),
 
     /// Unable to read cgroup.procs.
-    #[error(display = "Unable to obtain PIDs from cgroup.procs")]
-    ListCGroupPids(#[error(source)] io::Error),
+    #[error("Unable to obtain PIDs from cgroup.procs")]
+    ListCGroupPids(#[source] io::Error),
 
     /// Unable to read /proc/mounts
-    #[error(display = "Failed to read /proc/mounts")]
-    ListMounts(#[error(source)] io::Error),
+    #[error("Failed to read /proc/mounts")]
+    ListMounts(#[source] io::Error),
 }
 
 /// Manages PIDs in the Linux Cgroup excluded from the VPN tunnel.
@@ -114,6 +113,7 @@ impl PidManager {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(exclusions_path)
             .map_err(Error::AddCGroupPid)?;
 
@@ -125,12 +125,8 @@ impl PidManager {
     pub fn remove(&self, pid: i32) -> Result<(), Error> {
         // FIXME: We remove PIDs from our cgroup here by adding
         //        them to the parent cgroup. This seems wrong.
-        let exclusions_path = self.net_cls_path.join("cgroup.procs");
-
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(exclusions_path)
+        let mut file = self
+            .open_parent_cgroup_handle()
             .map_err(Error::RemoveCGroupPid)?;
 
         file.write_all(pid.to_string().as_bytes())
@@ -160,13 +156,24 @@ impl PidManager {
 
     /// Removes all PIDs from the Cgroup.
     pub fn clear(&self) -> Result<(), Error> {
-        // TODO: reuse file handle
         let pids = self.list()?;
 
+        let mut file = self
+            .open_parent_cgroup_handle()
+            .map_err(Error::RemoveCGroupPid)?;
         for pid in pids {
-            self.remove(pid)?;
+            file.write_all(pid.to_string().as_bytes())
+                .map_err(Error::RemoveCGroupPid)?;
         }
 
         Ok(())
+    }
+
+    fn open_parent_cgroup_handle(&self) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.net_cls_path.join("cgroup.procs"))
     }
 }

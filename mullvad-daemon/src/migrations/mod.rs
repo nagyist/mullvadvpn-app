@@ -25,8 +25,8 @@
 //! # Creating a migration
 //!
 //! 1. Copy `vX.rs.template` to `vX.rs` where `X` is the latest settings version right now.
-//! 1. Add the new version (`Y = X+1`) to `SettingsVersion` and bump `CURRENT_SETTINGS_VERSION`
-//!    to `Y`.
+//! 1. Add the new version (`Y = X+1`) to `SettingsVersion` and bump `CURRENT_SETTINGS_VERSION` to
+//!    `Y`.
 //! 1. Write a comment in the new module about how the format changed, what it needs to migrate.
 //! 1. Implement the migration and add adequate tests.
 //! 1. Add to the changelog: "Settings format updated to `vY`"
@@ -51,45 +51,47 @@ mod v3;
 mod v4;
 mod v5;
 mod v6;
+mod v7;
+mod v8;
+mod v9;
 
 const SETTINGS_FILE: &str = "settings.json";
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to read the settings")]
-    Read(#[error(source)] io::Error),
+    #[error("Failed to read the settings")]
+    Read(#[source] io::Error),
 
-    #[error(display = "Failed to deserialize settings")]
-    Deserialize(#[error(source)] serde_json::Error),
+    #[error("Failed to deserialize settings")]
+    Deserialize(#[source] serde_json::Error),
 
-    #[error(display = "Unexpected settings format")]
+    #[error("Unexpected settings format")]
     InvalidSettingsContent,
 
-    #[error(display = "Unable to serialize settings to JSON")]
-    Serialize(#[error(source)] serde_json::Error),
+    #[error("Unable to serialize settings to JSON")]
+    Serialize(#[source] serde_json::Error),
 
-    #[error(display = "Unable to open settings for writing")]
-    Open(#[error(source)] io::Error),
+    #[error("Unable to open settings for writing")]
+    Open(#[source] io::Error),
 
-    #[error(display = "Unable to write new settings")]
-    Write(#[error(source)] io::Error),
+    #[error("Unable to write new settings")]
+    Write(#[source] io::Error),
 
-    #[error(display = "Unable to sync settings to disk")]
-    SyncSettings(#[error(source)] io::Error),
+    #[error("Unable to sync settings to disk")]
+    SyncSettings(#[source] io::Error),
 
-    #[error(display = "Failed to read the account history")]
-    ReadHistory(#[error(source)] io::Error),
+    #[error("Failed to read the account history")]
+    ReadHistory(#[source] io::Error),
 
-    #[error(display = "Failed to write new account history")]
-    WriteHistory(#[error(source)] io::Error),
+    #[error("Failed to write new account history")]
+    WriteHistory(#[source] io::Error),
 
-    #[error(display = "Failed to parse account history")]
-    ParseHistoryError,
+    #[error("Failed to parse account history")]
+    ParseHistory,
 
     #[cfg(windows)]
-    #[error(display = "Failed to restore Windows update backup")]
-    WinMigrationError(#[error(source)] windows::Error),
+    #[error("Failed to restore Windows update backup")]
+    WinMigration(#[source] windows::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -115,11 +117,17 @@ impl MigrationComplete {
 /// Contains discarded data that may be useful for later work.
 pub type MigrationData = v5::MigrationData;
 
+/// Directories that may be passed to the migration logic.
+pub struct Directories<'path> {
+    cache_dir: &'path Path,
+    settings_dir: &'path Path,
+}
+
 pub async fn migrate_all(cache_dir: &Path, settings_dir: &Path) -> Result<Option<MigrationData>> {
     #[cfg(windows)]
     windows::migrate_after_windows_update(settings_dir)
         .await
-        .map_err(Error::WinMigrationError)?;
+        .map_err(Error::WinMigration)?;
 
     let path = settings_dir.join(SETTINGS_FILE);
 
@@ -132,22 +140,13 @@ pub async fn migrate_all(cache_dir: &Path, settings_dir: &Path) -> Result<Option
     let mut settings: serde_json::Value =
         serde_json::from_reader(&settings_bytes[..]).map_err(Error::Deserialize)?;
 
-    if !settings.is_object() {
-        return Err(Error::InvalidSettingsContent);
-    }
-
     let old_settings = settings.clone();
+    let directories = Directories {
+        cache_dir,
+        settings_dir,
+    };
 
-    v1::migrate(&mut settings)?;
-    v2::migrate(&mut settings)?;
-    v3::migrate(&mut settings)?;
-    v4::migrate(&mut settings)?;
-
-    account_history::migrate_location(cache_dir, settings_dir).await;
-    account_history::migrate_formats(settings_dir, &mut settings).await?;
-
-    let migration_data = v5::migrate(&mut settings)?;
-    v6::migrate(&mut settings)?;
+    let migration_data = migrate_settings(Some(directories), &mut settings).await?;
 
     if settings == old_settings {
         // Nothing changed
@@ -173,6 +172,44 @@ pub async fn migrate_all(cache_dir: &Path, settings_dir: &Path) -> Result<Option
     Ok(migration_data)
 }
 
+async fn migrate_settings(
+    directories: Option<Directories<'_>>,
+    settings: &mut serde_json::Value,
+) -> Result<Option<MigrationData>> {
+    if !settings.is_object() {
+        return Err(Error::InvalidSettingsContent);
+    }
+
+    v1::migrate(settings)?;
+    v2::migrate(settings)?;
+    v3::migrate(settings)?;
+    v4::migrate(settings)?;
+
+    if let Some(Directories {
+        cache_dir,
+        settings_dir,
+    }) = directories
+    {
+        account_history::migrate_location(cache_dir, settings_dir).await;
+        account_history::migrate_formats(settings_dir, settings).await?;
+    }
+
+    let migration_data = v5::migrate(settings)?;
+    v6::migrate(settings)?;
+    v7::migrate(settings)?;
+    v8::migrate(settings)?;
+
+    v9::migrate(
+        settings,
+        #[cfg(target_os = "android")]
+        directories.map(|directories| v9::Directories {
+            settings: directories.settings_dir,
+        }),
+    )?;
+
+    Ok(migration_data)
+}
+
 pub(crate) fn migrate_device(
     migration_data: MigrationData,
     rest_handle: mullvad_api::rest::MullvadRestHandle,
@@ -194,13 +231,12 @@ mod windows {
     use talpid_types::ErrorExt;
     use tokio::fs;
     use windows_sys::Win32::{
-        Foundation::{ERROR_SUCCESS, HANDLE, PSID},
+        Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL, PSID},
         Security::{
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SE_OBJECT_TYPE},
             IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
             OWNER_SECURITY_INFORMATION, SECURITY_DESCRIPTOR, SID, WELL_KNOWN_SID_TYPE,
         },
-        System::Memory::LocalFree,
     };
 
     #[allow(non_camel_case_types)]
@@ -213,20 +249,19 @@ mod windows {
         ("account-history.json", false),
     ];
 
-    #[derive(err_derive::Error, Debug)]
-    #[error(no_from)]
+    #[derive(thiserror::Error, Debug)]
     pub enum Error {
-        #[error(display = "Unable to find local appdata directory")]
+        #[error("Unable to find local appdata directory")]
         FindAppData,
 
-        #[error(display = "Could not acquire security descriptor of backup directory")]
-        SecurityInformation(#[error(source)] io::Error),
+        #[error("Could not acquire security descriptor of backup directory")]
+        SecurityInformation(#[source] io::Error),
 
-        #[error(display = "Backup directory is not owned by SYSTEM or Built-in Administrators")]
+        #[error("Backup directory is not owned by SYSTEM or Built-in Administrators")]
         WrongOwner,
 
-        #[error(display = "Failed to copy files during migration")]
-        Io(#[error(source)] io::Error),
+        #[error("Failed to copy files during migration")]
+        Io(#[source] io::Error),
     }
 
     /// Attempts to restore the Mullvad settings from `C:\windows.old` after an update of Windows.
@@ -235,7 +270,7 @@ mod windows {
     pub async fn migrate_after_windows_update(
         destination_settings_dir: &Path,
     ) -> Result<bool, Error> {
-        let system_appdata_dir = dirs_next::data_local_dir().ok_or(Error::FindAppData)?;
+        let system_appdata_dir = dirs::data_local_dir().ok_or(Error::FindAppData)?;
         if !destination_settings_dir.starts_with(system_appdata_dir) {
             return Ok(false);
         }
@@ -369,17 +404,36 @@ mod windows {
         pub fn owner(&self) -> Option<&SID> {
             unsafe { (self.owner as *const SID).as_ref() }
         }
-
-        // TODO: Can be expanded with `group()`, `dacl()`, and `sacl()`.
     }
 
     impl Drop for SecurityInformation {
         fn drop(&mut self) {
-            unsafe { LocalFree(self.security_descriptor as HANDLE) };
+            unsafe { LocalFree(self.security_descriptor as HLOCAL) };
         }
     }
 
     fn is_well_known_sid(sid: &SID, well_known_sid_type: WELL_KNOWN_SID_TYPE) -> bool {
         unsafe { IsWellKnownSid(sid as *const SID as *mut _, well_known_sid_type) == 1 }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use mullvad_types::settings::Settings;
+
+    use crate::migrations::migrate_settings;
+
+    /// Ensure that no migration logic runs for the default settings by checking whether anything
+    /// has changed after running the migration code
+    #[tokio::test]
+    async fn test_settings_format_version() {
+        let default_settings = serde_json::to_value(Settings::default()).unwrap();
+        let mut migrated_settings = default_settings.clone();
+
+        migrate_settings(None, &mut migrated_settings)
+            .await
+            .unwrap();
+
+        assert_eq!(default_settings, migrated_settings);
     }
 }

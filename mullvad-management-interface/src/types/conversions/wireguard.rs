@@ -1,5 +1,6 @@
 use super::FromProtobufTypeError;
 use crate::types::proto;
+use chrono::DateTime;
 use prost_types::Timestamp;
 
 impl From<mullvad_types::wireguard::PublicKey> for proto::PublicKey {
@@ -23,13 +24,14 @@ impl TryFrom<proto::PublicKey> for mullvad_types::wireguard::PublicKey {
             .ok_or(FromProtobufTypeError::InvalidArgument(
                 "missing 'created' timestamp",
             ))?;
-        let ndt = chrono::NaiveDateTime::from_timestamp_opt(created.seconds, created.nanos as u32)
-            .unwrap();
+
+        let created = DateTime::from_timestamp(created.seconds, created.nanos as u32)
+            .ok_or(FromProtobufTypeError::InvalidArgument("invalid timestamp"))?;
 
         Ok(mullvad_types::wireguard::PublicKey {
             key: talpid_types::net::wireguard::PublicKey::try_from(public_key.key.as_slice())
                 .map_err(|_| FromProtobufTypeError::InvalidArgument("invalid wireguard key"))?,
-            created: chrono::DateTime::<chrono::Utc>::from_utc(ndt, chrono::Utc),
+            created,
         })
     }
 }
@@ -54,19 +56,39 @@ impl TryFrom<proto::QuantumResistantState> for mullvad_types::wireguard::Quantum
     type Error = FromProtobufTypeError;
 
     fn try_from(state: proto::QuantumResistantState) -> Result<Self, Self::Error> {
-        match proto::quantum_resistant_state::State::from_i32(state.state) {
-            Some(proto::quantum_resistant_state::State::Auto) => {
+        match proto::quantum_resistant_state::State::try_from(state.state) {
+            Ok(proto::quantum_resistant_state::State::Auto) => {
                 Ok(mullvad_types::wireguard::QuantumResistantState::Auto)
             }
-            Some(proto::quantum_resistant_state::State::On) => {
+            Ok(proto::quantum_resistant_state::State::On) => {
                 Ok(mullvad_types::wireguard::QuantumResistantState::On)
             }
-            Some(proto::quantum_resistant_state::State::Off) => {
+            Ok(proto::quantum_resistant_state::State::Off) => {
                 Ok(mullvad_types::wireguard::QuantumResistantState::Off)
             }
-            None => Err(FromProtobufTypeError::InvalidArgument(
+            Err(_) => Err(FromProtobufTypeError::InvalidArgument(
                 "invalid quantum resistance state",
             )),
+        }
+    }
+}
+
+#[cfg(daita)]
+impl From<mullvad_types::wireguard::DaitaSettings> for proto::DaitaSettings {
+    fn from(settings: mullvad_types::wireguard::DaitaSettings) -> Self {
+        proto::DaitaSettings {
+            enabled: settings.enabled,
+            direct_only: !settings.use_multihop_if_necessary,
+        }
+    }
+}
+
+#[cfg(daita)]
+impl From<proto::DaitaSettings> for mullvad_types::wireguard::DaitaSettings {
+    fn from(settings: proto::DaitaSettings) -> Self {
+        mullvad_types::wireguard::DaitaSettings {
+            enabled: settings.enabled,
+            use_multihop_if_necessary: !settings.direct_only,
         }
     }
 }

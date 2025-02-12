@@ -9,12 +9,16 @@ on:
       - 'building/*-container-image.txt'
   workflow_dispatch:
 env:
-  RUST_NIGHTLY_TOOLCHAIN: nightly-2023-01-13
+  # Pinning nightly just to avoid random breakage. It's fine to bump this at any time
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2024-10-02
+
+permissions: {}
+
 jobs:
   prepare-containers:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Fetch container image names
         run: |
@@ -38,15 +42,16 @@ jobs:
         run: echo "HOME=/root" >> $GITHUB_ENV
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Checkout binaries submodule
+      - name: Checkout submodules
         run: |
           git config --global --add safe.directory '*'
           git submodule update --init --depth=1 dist-assets/binaries
+          git submodule update --init wireguard-go-rs/libwg/wireguard-go
 
       - name: Install nightly Rust toolchain
-        run: rustup default $RUST_NIGHTLY_TOOLCHAIN
+        run: rustup override set $RUST_NIGHTLY_TOOLCHAIN
 
       - uses: taiki-e/install-action@v2
         with:
@@ -69,11 +74,16 @@ jobs:
         run: echo "HOME=/root" >> $GITHUB_ENV
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Install nightly Rust toolchain
+      - name: Checkout wireguard-go submodule
         run: |
-          rustup default $RUST_NIGHTLY_TOOLCHAIN
+          git config --global --add safe.directory '*'
+          git submodule update --init wireguard-go-rs/libwg/wireguard-go
+
+      - name: Install nightly Rust
+        run: |
+          rustup override set ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
           rustup target add aarch64-linux-android
 
       - uses: taiki-e/install-action@v2
@@ -86,28 +96,45 @@ jobs:
   cargo-udeps:
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Checkout wireguard-go submodule
+        run: |
+          git config --global --add safe.directory '*'
+          git submodule update --init --depth=1
+          git submodule update --init wireguard-go-rs/libwg/wireguard-go
+
+      - name: Install msbuild
+        if: matrix.os == 'windows-latest'
+        uses: microsoft/setup-msbuild@v1.0.2
+        with:
+          vs-version: 16
+
+      - name: Install latest zig
+        if: matrix.os == 'windows-latest'
+        uses: mlugg/setup-zig@v1
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v1
+        uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1.0.6
-        with:
-          toolchain: ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
-          default: true
-          profile: minimal
+      - name: Install nightly Rust
+        run: rustup override set ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-udeps
+
+      - name: Install Go
+        if: matrix.os == 'macos-latest'
+        uses: actions/setup-go@v3
+        with:
+          go-version: 1.21.3
 
       - name: Check for unused dependencies
         shell: bash

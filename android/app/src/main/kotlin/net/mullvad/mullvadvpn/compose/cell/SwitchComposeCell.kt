@@ -1,58 +1,52 @@
 package net.mullvad.mullvadvpn.compose.cell
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.material.Icon
-import androidx.compose.material.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
-import androidx.core.text.HtmlCompat
-import androidx.core.text.HtmlCompat.FROM_HTML_MODE_COMPACT
 import net.mullvad.mullvadvpn.R
-import net.mullvad.mullvadvpn.compose.component.CellSwitch
+import net.mullvad.mullvadvpn.compose.component.MullvadSwitch
 import net.mullvad.mullvadvpn.compose.component.SpacedColumn
 import net.mullvad.mullvadvpn.compose.component.textResource
-import net.mullvad.mullvadvpn.compose.extensions.toAnnotatedString
-import net.mullvad.mullvadvpn.compose.theme.AppTheme
-import net.mullvad.mullvadvpn.compose.theme.Dimens
+import net.mullvad.mullvadvpn.lib.theme.AppTheme
+import net.mullvad.mullvadvpn.lib.theme.Dimens
+import net.mullvad.mullvadvpn.lib.theme.color.AlphaDisabled
 
 @Preview
 @Composable
 private fun PreviewSwitchComposeCell() {
     AppTheme {
-        SpacedColumn {
-            HeaderSwitchComposeCell(
-                title = "Checkbox Title",
-                isEnabled = true,
-                isToggled = true,
-                onCellClicked = {},
-                onInfoClicked = {}
-            )
+        SpacedColumn(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
             HeaderSwitchComposeCell(
                 title = "Checkbox Title",
                 isEnabled = true,
                 isToggled = true,
                 onCellClicked = {},
                 onInfoClicked = {},
-                subtitle = "Subtitle"
             )
             NormalSwitchComposeCell(
                 title = "Checkbox Item",
                 isEnabled = true,
                 isToggled = true,
                 onCellClicked = {},
-                onInfoClicked = {}
+                onInfoClicked = {},
             )
         }
     }
@@ -63,21 +57,28 @@ fun NormalSwitchComposeCell(
     title: String,
     isToggled: Boolean,
     startPadding: Dp = Dimens.indentedCellStartPadding,
-    subtitle: String? = null,
     isEnabled: Boolean = true,
-    background: Color = MaterialTheme.colorScheme.primary,
-    onCellClicked: (Boolean) -> Unit = {},
-    onInfoClicked: (() -> Unit)? = null
+    background: Color = MaterialTheme.colorScheme.surfaceContainerLow,
+    onBackground: Color = MaterialTheme.colorScheme.onSurface,
+    onCellClicked: (Boolean) -> Unit,
+    onInfoClicked: (() -> Unit)? = null,
 ) {
     SwitchComposeCell(
-        titleView = { BaseCellTitle(title = title, style = MaterialTheme.typography.labelLarge) },
+        titleView = {
+            BaseCellTitle(
+                title = title,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f, true),
+                textColor = if (isEnabled) onBackground else onBackground.copy(AlphaDisabled),
+            )
+        },
         isToggled = isToggled,
         startPadding = startPadding,
-        subtitle = subtitle,
         isEnabled = isEnabled,
         background = background,
+        onBackground = onBackground,
         onCellClicked = onCellClicked,
-        onInfoClicked = onInfoClicked
+        onInfoClicked = onInfoClicked,
     )
 }
 
@@ -85,60 +86,62 @@ fun NormalSwitchComposeCell(
 fun HeaderSwitchComposeCell(
     title: String,
     isToggled: Boolean,
+    modifier: Modifier = Modifier,
     startPadding: Dp = Dimens.cellStartPadding,
-    subtitle: String? = null,
     isEnabled: Boolean = true,
     background: Color = MaterialTheme.colorScheme.primary,
-    onCellClicked: (Boolean) -> Unit = {},
-    onInfoClicked: (() -> Unit)? = null
+    onBackground: Color = MaterialTheme.colorScheme.onPrimary,
+    onCellClicked: (Boolean) -> Unit,
+    onInfoClicked: (() -> Unit)? = null,
 ) {
     SwitchComposeCell(
-        titleView = { BaseCellTitle(title = title, style = MaterialTheme.typography.titleMedium) },
+        titleView = {
+            BaseCellTitle(
+                title = title,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f, fill = true),
+                textColor = onBackground,
+            )
+        },
         isToggled = isToggled,
         startPadding = startPadding,
-        subtitle = subtitle,
         isEnabled = isEnabled,
         background = background,
+        onBackground = onBackground,
         onCellClicked = onCellClicked,
-        onInfoClicked = onInfoClicked
+        onInfoClicked = onInfoClicked,
+        modifier,
     )
 }
 
 @Composable
 private fun SwitchComposeCell(
-    titleView: @Composable () -> Unit,
+    titleView: @Composable RowScope.() -> Unit,
     isToggled: Boolean,
     startPadding: Dp,
-    subtitle: String?,
     isEnabled: Boolean,
     background: Color,
+    onBackground: Color,
     onCellClicked: (Boolean) -> Unit,
-    onInfoClicked: (() -> Unit)?
+    onInfoClicked: (() -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     BaseCell(
-        title = titleView,
-        subtitle =
-            subtitle?.let {
-                @Composable {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSecondary
-                    )
-                }
-            },
+        modifier = modifier.focusProperties { canFocus = false },
+        headlineContent = titleView,
         isRowEnabled = isEnabled,
         bodyView = {
             SwitchCellView(
-                onSwitchClicked = null,
+                onSwitchClicked = onCellClicked,
                 isEnabled = isEnabled,
                 isToggled = isToggled,
-                onInfoClicked = onInfoClicked
+                iconColor = onBackground,
+                onInfoClicked = onInfoClicked,
             )
         },
         background = background,
         onCellClicked = { onCellClicked(!isToggled) },
-        startPadding = startPadding
+        startPadding = startPadding,
     )
 }
 
@@ -146,55 +149,67 @@ private fun SwitchComposeCell(
 fun SwitchCellView(
     isEnabled: Boolean,
     isToggled: Boolean,
+    iconColor: Color,
     modifier: Modifier = Modifier,
     onSwitchClicked: ((Boolean) -> Unit)? = null,
-    onInfoClicked: (() -> Unit)? = null
+    onInfoClicked: (() -> Unit)? = null,
 ) {
-    val horizontalPadding = Dimens.mediumPadding
-    val verticalPadding = 13.dp
     Row(
         modifier = modifier.wrapContentWidth().wrapContentHeight(),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onInfoClicked != null) {
-            Icon(
+            IconButton(
                 modifier =
-                    Modifier.clickable { onInfoClicked() }
-                        .padding(
-                            start = horizontalPadding,
-                            end = horizontalPadding,
-                            top = verticalPadding,
-                            bottom = verticalPadding
-                        )
-                        .align(Alignment.CenterVertically),
-                painter = painterResource(id = R.drawable.icon_info),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary
-            )
+                    Modifier.align(Alignment.CenterVertically)
+                        .padding(horizontal = Dimens.miniPadding),
+                onClick = onInfoClicked,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = stringResource(id = R.string.more_information),
+                    tint = iconColor,
+                )
+            }
         }
 
-        CellSwitch(isChecked = isToggled, isEnabled = isEnabled, onCheckedChange = onSwitchClicked)
+        MullvadSwitch(checked = isToggled, onCheckedChange = onSwitchClicked, enabled = isEnabled)
     }
 }
 
 @Composable
 fun CustomDnsCellSubtitle(isCellClickable: Boolean, modifier: Modifier) {
-    val spanned =
-        HtmlCompat.fromHtml(
-            if (isCellClickable) {
-                textResource(id = R.string.custom_dns_footer)
-            } else {
-                textResource(
-                    id = R.string.custom_dns_disable_mode_subtitle,
-                    textResource(id = R.string.dns_content_blockers_title)
-                )
-            },
-            FROM_HTML_MODE_COMPACT
-        )
+    val text =
+        if (isCellClickable) {
+            textResource(id = R.string.custom_dns_footer)
+        } else {
+            textResource(
+                id = R.string.custom_dns_disable_mode_subtitle,
+                textResource(id = R.string.dns_content_blockers_title),
+            )
+        }
     Text(
-        text = spanned.toAnnotatedString(boldFontWeight = FontWeight.ExtraBold),
+        text = text,
         style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSecondary,
-        modifier = modifier
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier,
     )
+}
+
+@Composable
+fun SwitchComposeSubtitleCell(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    BaseSubtitleCell(text = text, modifier = modifier, color = color)
+}
+
+@Composable
+fun SwitchComposeSubtitleCell(
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    BaseSubtitleCell(text = text, modifier = modifier, color = color)
 }
