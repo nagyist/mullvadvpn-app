@@ -2,11 +2,12 @@ use anyhow::Result;
 use clap::Subcommand;
 use mullvad_management_interface::MullvadProxyClient;
 use mullvad_types::{
-    relay_constraints::Constraint,
+    constraints::Constraint,
     wireguard::{QuantumResistantState, RotationInterval, DEFAULT_ROTATION_INTERVAL},
 };
 
 use super::BooleanOption;
+use crate::print_option;
 
 #[derive(Subcommand, Debug)]
 pub enum Tunnel {
@@ -37,6 +38,12 @@ pub enum TunnelOptions {
         /// Configure quantum-resistant key exchange
         #[arg(long)]
         quantum_resistant: Option<QuantumResistantState>,
+        /// Configure whether to enable DAITA
+        #[arg(long)]
+        daita: Option<BooleanOption>,
+        /// Configure whether to enable DAITA direct only
+        #[arg(long)]
+        daita_direct_only: Option<BooleanOption>,
         /// The key rotation interval. Number of hours, or 'any'
         #[arg(long)]
         rotation_interval: Option<Constraint<RotationInterval>>,
@@ -70,10 +77,8 @@ impl Tunnel {
 
         println!("OpenVPN options");
 
-        println!(
-            "{:<4}{:<24}{}",
-            "",
-            "mssfix:",
+        print_option!(
+            "mssfix",
             tunnel_options
                 .openvpn
                 .mssfix
@@ -83,33 +88,29 @@ impl Tunnel {
 
         println!("WireGuard options");
 
-        println!(
-            "{:<4}{:<24}{}",
-            "",
-            "MTU:",
+        print_option!(
+            "MTU",
             tunnel_options
                 .wireguard
                 .mtu
                 .map(|val| val.to_string())
                 .unwrap_or("unset".to_string()),
         );
-        println!(
-            "{:<4}{:<24}{}",
-            "", "Quantum resistance:", tunnel_options.wireguard.quantum_resistant,
+        print_option!(
+            "Quantum resistance",
+            tunnel_options.wireguard.quantum_resistant,
         );
 
+        print_option!("DAITA", tunnel_options.wireguard.daita.enabled);
+
         let key = rpc.get_wireguard_key().await?;
-        println!("{:<4}{:<24}{}", "", "Public key:", key.key,);
-        println!(
-            "{:<4}{:<24}{}",
-            "",
-            "",
-            format_args!("Created {}", key.created.with_timezone(&chrono::Local)),
-        );
-        println!(
-            "{:<4}{:<24}{}",
-            "",
-            "Rotation interval:",
+        print_option!("Public key", key.key,);
+        print_option!(format_args!(
+            "Created {}",
+            key.created.with_timezone(&chrono::Local)
+        ),);
+        print_option!(
+            "Rotation interval",
             match tunnel_options.wireguard.rotation_interval {
                 Some(interval) => interval.to_string(),
                 None => "unset".to_string(),
@@ -118,11 +119,14 @@ impl Tunnel {
 
         println!("Generic options");
 
-        if tunnel_options.generic.enable_ipv6 {
-            println!("{:<4}{:<24}on", "", "IPv6:");
-        } else {
-            println!("{:<4}{:<24}off", "", "IPv6:");
-        }
+        print_option!(
+            "IPv6",
+            if tunnel_options.generic.enable_ipv6 {
+                "on"
+            } else {
+                "off"
+            }
+        );
 
         Ok(())
     }
@@ -133,10 +137,20 @@ impl Tunnel {
             TunnelOptions::Wireguard {
                 mtu,
                 quantum_resistant,
+                daita,
+                daita_direct_only,
                 rotation_interval,
                 rotate_key,
             } => {
-                Self::handle_wireguard(mtu, quantum_resistant, rotation_interval, rotate_key).await
+                Self::handle_wireguard(
+                    mtu,
+                    quantum_resistant,
+                    daita,
+                    daita_direct_only,
+                    rotation_interval,
+                    rotate_key,
+                )
+                .await
             }
             TunnelOptions::Ipv6 { state } => Self::handle_ipv6(state).await,
         }
@@ -163,6 +177,8 @@ impl Tunnel {
     async fn handle_wireguard(
         mtu: Option<Constraint<u16>>,
         quantum_resistant: Option<QuantumResistantState>,
+        daita: Option<BooleanOption>,
+        daita_direct_only: Option<BooleanOption>,
         rotation_interval: Option<Constraint<RotationInterval>>,
         rotate_key: Option<RotateKey>,
     ) -> Result<()> {
@@ -176,6 +192,17 @@ impl Tunnel {
         if let Some(quantum_resistant) = quantum_resistant {
             rpc.set_quantum_resistant_tunnel(quantum_resistant).await?;
             println!("Quantum resistant setting has been updated");
+        }
+
+        if let Some(enable_daita) = daita {
+            rpc.set_enable_daita(*enable_daita).await?;
+            println!("DAITA setting has been updated");
+            println!("Direct only setting has been updated");
+        }
+
+        if let Some(daita_direct_only) = daita_direct_only {
+            rpc.set_daita_direct_only(*daita_direct_only).await?;
+            println!("Direct only setting has been updated");
         }
 
         if let Some(interval) = rotation_interval {

@@ -3,25 +3,26 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 12/05/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
 
-class UpdateAccountDataOperation: ResultOperation<Void> {
+class UpdateAccountDataOperation: ResultOperation<Void>, @unchecked Sendable {
     private let logger = Logger(label: "UpdateAccountDataOperation")
     private let interactor: TunnelInteractor
-    private let accountsProxy: REST.AccountsProxy
+    private let accountsProxy: RESTAccountHandling
     private var task: Cancellable?
 
     init(
         dispatchQueue: DispatchQueue,
         interactor: TunnelInteractor,
-        accountsProxy: REST.AccountsProxy
+        accountsProxy: RESTAccountHandling
     ) {
         self.interactor = interactor
         self.accountsProxy = accountsProxy
@@ -35,8 +36,7 @@ class UpdateAccountDataOperation: ResultOperation<Void> {
             return
         }
 
-        task = accountsProxy.getAccountData(
-            accountNumber: accountData.number,
+        task = accountsProxy.getAccountData(accountNumber: accountData.number).execute(
             retryStrategy: .default
         ) { result in
             self.dispatchQueue.async {

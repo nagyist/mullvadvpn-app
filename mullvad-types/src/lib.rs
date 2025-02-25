@@ -1,9 +1,11 @@
-#![deny(rust_2018_idioms)]
-
+pub mod access_method;
 pub mod account;
 pub mod auth_failed;
+pub mod constraints;
+pub mod custom_list;
 pub mod device;
 pub mod endpoint;
+pub mod features;
 pub mod location;
 pub mod relay_constraints;
 pub mod relay_list;
@@ -20,3 +22,6 @@ pub use crate::custom_tunnel::*;
 pub const TUNNEL_TABLE_ID: u32 = 0x6d6f6c65;
 #[cfg(target_os = "linux")]
 pub const TUNNEL_FWMARK: u32 = 0x6d6f6c65;
+
+pub use constraints::Intersection;
+pub use intersection_derive::Intersection;

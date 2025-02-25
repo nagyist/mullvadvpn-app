@@ -1,28 +1,54 @@
 #![allow(clippy::identity_op)]
 use chrono::{offset::Utc, DateTime};
-#[cfg(target_os = "android")]
-use jnix::{FromJava, IntoJava};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{convert::TryFrom, fmt, str::FromStr, time::Duration};
+use std::{fmt, str::FromStr, time::Duration};
 use talpid_types::net::wireguard;
 
+use crate::Intersection;
+
 pub const MIN_ROTATION_INTERVAL: Duration = Duration::from_secs(1 * 24 * 60 * 60);
-pub const MAX_ROTATION_INTERVAL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+pub const MAX_ROTATION_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const DEFAULT_ROTATION_INTERVAL: Duration = MAX_ROTATION_INTERVAL;
 
-/// Whether to enable or disable quantum resistant tunnels when the setting
-/// is set to `QuantumResistantState::Auto`.
-const QUANTUM_RESISTANT_AUTO_STATE: bool = false;
+/// Whether to enable or disable quantum resistant tunnels when the setting is set to
+/// `QuantumResistantState::Auto`. It is currently enabled by default on desktop,
+/// but disabled on Android.
+const QUANTUM_RESISTANT_AUTO_STATE: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+));
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(target_os = "android", derive(IntoJava, FromJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
+#[derive(Serialize, Deserialize, Default, Copy, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum QuantumResistantState {
+    #[default]
     Auto,
     On,
     Off,
+}
+
+impl QuantumResistantState {
+    pub fn enabled(&self) -> bool {
+        match self {
+            QuantumResistantState::Auto => QUANTUM_RESISTANT_AUTO_STATE,
+            QuantumResistantState::Off => false,
+            QuantumResistantState::On => true,
+        }
+    }
+}
+
+impl Intersection for QuantumResistantState {
+    fn intersection(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (QuantumResistantState::Auto, other) | (other, QuantumResistantState::Auto) => {
+                Some(other)
+            }
+            (val0, val1) if val0 == val1 => Some(val0),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for QuantumResistantState {
@@ -50,9 +76,38 @@ impl FromStr for QuantumResistantState {
 
 /// Returned when `QuantumResistantState::from_str` fails to convert a string into a
 /// [`QuantumResistantState`] object.
-#[derive(err_derive::Error, Debug, Clone, PartialEq, Eq)]
-#[error(display = "Not a valid state")]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[error("Not a valid state")]
 pub struct QuantumResistantStateParseError;
+
+#[cfg(daita)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DaitaSettings {
+    pub enabled: bool,
+
+    #[serde(default = "DaitaSettings::default_use_multihop_if_necessary")]
+    /// Whether to use multihop if the selected relay is not DAITA-compatible. Note that this is
+    /// the inverse of of "Direct only" in the GUI.
+    pub use_multihop_if_necessary: bool,
+}
+
+#[cfg(daita)]
+impl DaitaSettings {
+    /// This setting should be enabled by default.
+    const fn default_use_multihop_if_necessary() -> bool {
+        true
+    }
+}
+
+#[cfg(daita)]
+impl Default for DaitaSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            use_multihop_if_necessary: Self::default_use_multihop_if_necessary(),
+        }
+    }
+}
 
 /// Contains account specific wireguard data
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -155,7 +210,7 @@ impl clap::builder::ValueParserFactory for RotationInterval {
     fn value_parser() -> Self::Parser {
         clap::builder::RangedU64ValueParser::new().range(
             (MIN_ROTATION_INTERVAL.as_secs() / 60 / 60)
-                ..(MAX_ROTATION_INTERVAL.as_secs() / 60 / 60),
+                ..=(MAX_ROTATION_INTERVAL.as_secs() / 60 / 60),
         )
     }
 }
@@ -186,26 +241,15 @@ impl Default for RotationInterval {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(
-    target_os = "android",
-    jnix(class_name = "net.mullvad.mullvadvpn.model.WireguardTunnelOptions")
-)]
 pub struct TunnelOptions {
     /// MTU for the wireguard tunnel
-    #[cfg_attr(
-        target_os = "android",
-        jnix(map = "|maybe_mtu| maybe_mtu.map(|mtu| mtu as i32)")
-    )]
     pub mtu: Option<u16>,
-    /// Temporary switch for wireguard-nt
-    #[cfg(windows)]
-    #[serde(rename = "wireguard_nt")]
-    pub use_wireguard_nt: bool,
     /// Obtain a PSK using the relay config client.
     pub quantum_resistant: QuantumResistantState,
+    /// Configure DAITA
+    #[cfg(daita)]
+    pub daita: DaitaSettings,
     /// Interval used for automatic key rotation
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub rotation_interval: Option<RotationInterval>,
 }
 
@@ -215,8 +259,8 @@ impl Default for TunnelOptions {
         TunnelOptions {
             mtu: None,
             quantum_resistant: QuantumResistantState::Auto,
-            #[cfg(windows)]
-            use_wireguard_nt: true,
+            #[cfg(daita)]
+            daita: DaitaSettings::default(),
             rotation_interval: None,
         }
     }
@@ -226,25 +270,17 @@ impl TunnelOptions {
     pub fn into_talpid_tunnel_options(self) -> wireguard::TunnelOptions {
         wireguard::TunnelOptions {
             mtu: self.mtu,
-            #[cfg(windows)]
-            use_wireguard_nt: self.use_wireguard_nt,
-            quantum_resistant: match self.quantum_resistant {
-                QuantumResistantState::Auto => QUANTUM_RESISTANT_AUTO_STATE,
-                QuantumResistantState::On => true,
-                QuantumResistantState::Off => false,
-            },
+            quantum_resistant: self.quantum_resistant.enabled(),
+            #[cfg(daita)]
+            daita: self.daita.enabled,
         }
     }
 }
 
 /// Represents a published public key
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub struct PublicKey {
-    #[cfg_attr(target_os = "android", jnix(map = "|key| *key.as_bytes()"))]
     pub key: wireguard::PublicKey,
-    #[cfg_attr(target_os = "android", jnix(map = "|date_time| date_time.to_string()"))]
     pub created: DateTime<Utc>,
 }
 

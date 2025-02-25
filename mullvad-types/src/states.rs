@@ -1,10 +1,9 @@
-use crate::location::GeoIpLocation;
-#[cfg(target_os = "android")]
-use jnix::IntoJava;
+use crate::{features::FeatureIndicators, location::GeoIpLocation};
+use either::Either;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use talpid_types::{
-    net::TunnelEndpoint,
+    net::{TunnelEndpoint, TunnelType},
     tunnel::{ActionAfterDisconnect, ErrorState},
 };
 
@@ -16,6 +15,44 @@ use talpid_types::{
 pub enum TargetState {
     Unsecured,
     Secured,
+}
+
+impl TargetState {
+    pub const fn to_strict(
+        &self,
+    ) -> Either<TargetStateStrict<Unsecured>, TargetStateStrict<Secured>> {
+        match self {
+            TargetState::Unsecured => Either::Left(TargetStateStrict::<Unsecured>::new()),
+            TargetState::Secured => Either::Right(TargetStateStrict::<Secured>::new()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TargetStateStrict<T> {
+    _state: std::marker::PhantomData<T>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Unsecured;
+
+#[derive(Clone, Copy)]
+pub struct Secured;
+
+impl TargetStateStrict<Unsecured> {
+    const fn new() -> Self {
+        Self {
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl TargetStateStrict<Secured> {
+    const fn new() -> Self {
+        Self {
+            _state: std::marker::PhantomData,
+        }
+    }
 }
 
 impl fmt::Display for TargetState {
@@ -31,17 +68,22 @@ impl fmt::Display for TargetState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "details")]
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub enum TunnelState {
-    Disconnected,
+    Disconnected {
+        location: Option<GeoIpLocation>,
+        /// Whether internet access is blocked due to lockdown mode
+        #[cfg(not(target_os = "android"))]
+        locked_down: bool,
+    },
     Connecting {
         endpoint: TunnelEndpoint,
         location: Option<GeoIpLocation>,
+        feature_indicators: FeatureIndicators,
     },
     Connected {
         endpoint: TunnelEndpoint,
         location: Option<GeoIpLocation>,
+        feature_indicators: FeatureIndicators,
     },
     Disconnecting(ActionAfterDisconnect),
     Error(ErrorState),
@@ -49,17 +91,37 @@ pub enum TunnelState {
 
 impl TunnelState {
     /// Returns true if the tunnel state is in the error state.
-    pub fn is_in_error_state(&self) -> bool {
+    pub const fn is_in_error_state(&self) -> bool {
         matches!(self, TunnelState::Error(_))
     }
 
     /// Returns true if the tunnel state is in the connected state.
-    pub fn is_connected(&self) -> bool {
+    pub const fn is_connected(&self) -> bool {
         matches!(self, TunnelState::Connected { .. })
     }
 
     /// Returns true if the tunnel state is in the disconnected state.
-    pub fn is_disconnected(&self) -> bool {
-        matches!(self, TunnelState::Disconnected)
+    pub const fn is_disconnected(&self) -> bool {
+        matches!(self, TunnelState::Disconnected { .. })
+    }
+
+    /// Returns the tunnel endpoint for an active connection.
+    /// This value exists in the connecting and connected states.
+    pub const fn endpoint(&self) -> Option<&TunnelEndpoint> {
+        match self {
+            TunnelState::Connecting { endpoint, .. } | TunnelState::Connected { endpoint, .. } => {
+                Some(endpoint)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the tunnel type for an active connection.
+    /// This value exists in the connecting and connected states.
+    pub const fn get_tunnel_type(&self) -> Option<TunnelType> {
+        match self.endpoint() {
+            Some(endpoint) => Some(endpoint.tunnel_type),
+            None => None,
+        }
     }
 }

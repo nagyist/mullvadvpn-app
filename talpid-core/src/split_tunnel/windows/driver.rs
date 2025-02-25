@@ -1,6 +1,8 @@
+#![allow(clippy::undocumented_unsafe_blocks)] // Remove me if you dare.
+
 use super::windows::{
-    get_device_path, get_process_creation_time, get_process_device_path, open_process, Event,
-    Overlapped, ProcessAccess, ProcessSnapshot,
+    get_device_path, get_process_creation_time, get_process_device_path, open_process,
+    ProcessAccess,
 };
 use bitflags::bitflags;
 use memoffset::offset_of;
@@ -22,6 +24,7 @@ use std::{
     time::Duration,
 };
 use talpid_types::ErrorExt;
+use talpid_windows::{io::Overlapped, process::ProcessSnapshot, sync::Event};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING,
@@ -32,8 +35,7 @@ use windows_sys::Win32::{
     System::{
         Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
         Ioctl::{FILE_ANY_ACCESS, METHOD_BUFFERED, METHOD_NEITHER},
-        Threading::{WaitForMultipleObjects, WaitForSingleObject},
-        WindowsProgramming::INFINITE,
+        Threading::{WaitForMultipleObjects, WaitForSingleObject, INFINITE},
         IO::{DeviceIoControl, GetOverlappedResult, OVERLAPPED},
     },
 };
@@ -42,7 +44,7 @@ const DRIVER_SYMBOLIC_NAME: &str = "\\\\.\\MULLVADSPLITTUNNEL";
 const ST_DEVICE_TYPE: u32 = 0x8000;
 
 const fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
-    device_type << 16 | access << 14 | function << 2 | method
+    (device_type << 16) | (access << 14) | (function << 2) | method
 }
 
 #[repr(u32)]
@@ -81,8 +83,8 @@ pub enum DriverState {
     Terminating = 5,
 }
 
-#[derive(err_derive::Error, Debug)]
-#[error(display = "Unknown driver state: {}", _0)]
+#[derive(thiserror::Error, Debug)]
+#[error("Unknown driver state: {0}")]
 pub struct UnknownDriverState(u64);
 
 impl TryFrom<u64> for DriverState {
@@ -117,8 +119,8 @@ pub enum EventId {
     ErrorMessage,
 }
 
-#[derive(err_derive::Error, Debug)]
-#[error(display = "Unknown event id: {}", _0)]
+#[derive(thiserror::Error, Debug)]
+#[error("Unknown event id: {0}")]
 pub struct UnknownEventId(u32);
 
 impl TryFrom<u32> for EventId {
@@ -155,6 +157,7 @@ pub enum EventBody {
 }
 
 bitflags! {
+    #[derive(Debug)]
     pub struct SplittingChangeReason: u32 {
         const BY_INHERITANCE = 1;
         const BY_CONFIG = 2;
@@ -170,42 +173,45 @@ pub struct DeviceHandle {
 unsafe impl Sync for DeviceHandle {}
 unsafe impl Send for DeviceHandle {}
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum DeviceHandleError {
     /// Failed to connect because there's no such device
-    #[error(display = "Failed to connect to driver, no such device. \
-            The driver is probably not loaded")]
+    #[error(
+        "Failed to connect to driver, no such device. \
+            The driver is probably not loaded"
+    )]
     ConnectionFailed,
 
     /// Failed to connect because the connection was denied
-    #[error(display = "Failed to connect to driver, connection denied. \
-            The exclusive connection is probably hogged")]
+    #[error(
+        "Failed to connect to driver, connection denied. \
+            The exclusive connection is probably hogged"
+    )]
     ConnectionDenied,
 
     /// Failed to connect to driver
-    #[error(display = "Failed to connect to driver")]
-    ConnectionError(#[error(source)] io::Error),
+    #[error("Failed to connect to driver")]
+    ConnectionError(#[source] io::Error),
 
     /// Failed to inquire about driver state
-    #[error(display = "Failed to inquire about driver state")]
-    GetStateError(#[error(source)] io::Error),
+    #[error("Failed to inquire about driver state")]
+    GetStateError(#[source] io::Error),
 
     /// Failed to initialize driver
-    #[error(display = "Failed to initialize driver")]
-    InitializationError(#[error(source)] io::Error),
+    #[error("Failed to initialize driver")]
+    InitializationError(#[source] io::Error),
 
     /// Failed to register process tree with driver
-    #[error(display = "Failed to register process tree with driver")]
-    RegisterProcessesError(#[error(source)] io::Error),
+    #[error("Failed to register process tree with driver")]
+    RegisterProcessesError(#[source] io::Error),
 
     /// Failed to clear configuration in driver
-    #[error(display = "Failed to clear configuration in driver")]
-    ClearConfigError(#[error(source)] io::Error),
+    #[error("Failed to clear configuration in driver")]
+    ClearConfigError(#[source] io::Error),
 
     /// Failed to reset driver state to "started"
-    #[error(display = "Failed to reset driver state")]
-    ResetError(#[error(source)] io::Error),
+    #[error("Failed to reset driver state")]
+    ResetError(#[source] io::Error),
 }
 
 impl DeviceHandle {
@@ -274,7 +280,13 @@ impl DeviceHandle {
         internet_ipv4: Option<Ipv4Addr>,
         internet_ipv6: Option<Ipv6Addr>,
     ) -> io::Result<()> {
-        log::debug!("Register IPs: tunnel IPv4: {:?}, tunnel IPv6 {:?}, internet IPv4: {:?}, internet IPv6: {:?}", tunnel_ipv4, tunnel_ipv6, internet_ipv4, internet_ipv6);
+        log::debug!(
+            "Register IPs: tunnel IPv4: {:?}, tunnel IPv6 {:?}, internet IPv4: {:?}, internet IPv6: {:?}",
+            tunnel_ipv4,
+            tunnel_ipv6,
+            internet_ipv4,
+            internet_ipv6
+        );
         let mut addresses: SplitTunnelAddresses = unsafe { mem::zeroed() };
 
         unsafe {
@@ -486,7 +498,7 @@ fn build_process_tree() -> io::Result<Vec<ProcessInfo>> {
     let mut process_info = HashMap::new();
 
     let snap = ProcessSnapshot::new(TH32CS_SNAPPROCESS, 0)?;
-    for entry in snap.entries() {
+    for entry in snap.processes() {
         let entry = entry?;
 
         let process = match open_process(ProcessAccess::QueryLimitedInformation, false, entry.pid) {
@@ -836,18 +848,20 @@ pub unsafe fn device_io_control_buffer_async(
     };
     let input_len = input.map(|input| input.len()).unwrap_or(0);
 
-    let result = DeviceIoControl(
-        device.as_raw_handle() as HANDLE,
-        ioctl_code,
-        input_ptr,
-        u32::try_from(input_len).map_err(|_error| {
-            io::Error::new(io::ErrorKind::InvalidInput, "the input buffer is too large")
-        })?,
-        output_ptr as *mut _,
-        output_len,
-        ptr::null_mut(),
-        overlapped,
-    );
+    let result = unsafe {
+        DeviceIoControl(
+            device.as_raw_handle() as HANDLE,
+            ioctl_code,
+            input_ptr,
+            u32::try_from(input_len).map_err(|_error| {
+                io::Error::new(io::ErrorKind::InvalidInput, "the input buffer is too large")
+            })?,
+            output_ptr as *mut _,
+            output_len,
+            ptr::null_mut(),
+            overlapped,
+        )
+    };
 
     if result != 0 {
         return Err(io::Error::new(
@@ -878,7 +892,7 @@ pub fn get_overlapped_result(
     let event = overlapped.get_event().unwrap();
 
     // SAFETY: This is a valid event object.
-    unsafe { wait_for_single_object(event.as_handle(), None) }?;
+    unsafe { wait_for_single_object(event.as_raw(), None) }?;
 
     // SAFETY: The handle and overlapped object are valid.
     let mut returned_bytes = 0u32;
@@ -908,7 +922,7 @@ pub unsafe fn wait_for_single_object(object: HANDLE, timeout: Option<Duration>) 
         })?,
         None => INFINITE,
     };
-    let result = WaitForSingleObject(object, timeout);
+    let result = unsafe { WaitForSingleObject(object, timeout) };
     match result {
         WAIT_OBJECT_0 => Ok(()),
         WAIT_FAILED => Err(io::Error::last_os_error()),
@@ -924,22 +938,24 @@ pub unsafe fn wait_for_single_object(object: HANDLE, timeout: Option<Duration>) 
 ///
 /// * `objects` must be a slice of valid objects that can be signaled, such as event objects.
 pub unsafe fn wait_for_multiple_objects(objects: &[HANDLE], wait_all: bool) -> io::Result<HANDLE> {
-    let objects_len = u32::try_from(objects.len())
-        .map_err(|_error| io::Error::new(io::ErrorKind::InvalidInput, "too many objects"))?;
-    let result = WaitForMultipleObjects(
-        objects_len,
-        objects.as_ptr(),
-        if wait_all { 1 } else { 0 },
-        INFINITE,
-    );
-    let signaled_index = if result < objects_len {
-        result
-    } else if result >= WAIT_ABANDONED_0 && result < WAIT_ABANDONED_0 + objects_len {
-        return Err(io::Error::new(io::ErrorKind::Other, "abandoned mutex"));
-    } else {
-        return Err(io::Error::last_os_error());
-    };
-    Ok(objects[usize::try_from(signaled_index).expect("usize must be larger than u32")])
+    unsafe {
+        let objects_len = u32::try_from(objects.len())
+            .map_err(|_error| io::Error::new(io::ErrorKind::InvalidInput, "too many objects"))?;
+        let result = WaitForMultipleObjects(
+            objects_len,
+            objects.as_ptr(),
+            if wait_all { 1 } else { 0 },
+            INFINITE,
+        );
+        let signaled_index = if result < objects_len {
+            result
+        } else if result >= WAIT_ABANDONED_0 && result < WAIT_ABANDONED_0 + objects_len {
+            return Err(io::Error::new(io::ErrorKind::Other, "abandoned mutex"));
+        } else {
+            return Err(io::Error::last_os_error());
+        };
+        Ok(objects[usize::try_from(signaled_index).expect("usize must be larger than u32")])
+    }
 }
 
 /// Reads the value from `buffer`, zeroing any remaining bytes.
@@ -955,17 +971,18 @@ unsafe fn deserialize_buffer<T>(buffer: &[u8]) -> T {
     assert!(buffer.len() <= mem::size_of::<T>());
 
     let mut instance = MaybeUninit::zeroed();
-    ptr::copy_nonoverlapping(
-        buffer.as_ptr(),
-        instance.as_mut_ptr() as *mut u8,
-        buffer.len(),
-    );
-    instance.assume_init()
+    unsafe {
+        ptr::copy_nonoverlapping(
+            buffer.as_ptr(),
+            instance.as_mut_ptr() as *mut u8,
+            buffer.len(),
+        );
+        instance.assume_init()
+    }
 }
 
 fn buffer_to_osstring(buffer: &[u8]) -> OsString {
-    let mut out_buf = Vec::new();
-    out_buf.resize((buffer.len() + 1) / mem::size_of::<u16>(), 0u16);
+    let mut out_buf = vec![0u16; (buffer.len() + 1) / mem::size_of::<u16>()];
 
     // SAFETY: `out_buf` contains enough bytes to store all of `buffer`.
     unsafe {

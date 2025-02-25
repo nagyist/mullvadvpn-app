@@ -1,15 +1,18 @@
 [package]
 name = "translations-converter"
-version = "0.1.0"
-authors = ["Mullvad VPN"]
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+description = "Converts between PO and Android style localization formats"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-derive_more = "0.99"
+thiserror = { workspace = true }
 htmlize = { version = "1.0.2", features = ["unescape"] }
-lazy_static = "1"
 regex = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 quick-xml = { version = "0.27.1", features = ["serialize"] }

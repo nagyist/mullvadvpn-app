@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 12/02/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -173,6 +173,8 @@ class ProblemReportSubmissionOverlayView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+
+        setAccessibilityIdentifier(.problemReportSubmittedView)
 
         addSubviews()
         transitionToState(state)

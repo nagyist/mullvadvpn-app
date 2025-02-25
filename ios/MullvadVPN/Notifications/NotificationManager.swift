@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 31/05/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -16,6 +16,9 @@ final class NotificationManager: NotificationProviderDelegate {
     private var inAppNotificationDescriptors: [InAppNotificationDescriptor] = []
 
     var notificationProviders: [NotificationProvider] {
+        get {
+            _notificationProviders
+        }
         set(newNotificationProviders) {
             dispatchPrecondition(condition: .onQueue(.main))
 
@@ -27,10 +30,7 @@ final class NotificationManager: NotificationProviderDelegate {
                 newNotificationProvider.delegate = self
             }
 
-            _notificationProviders = newNotificationProviders
-        }
-        get {
-            _notificationProviders
+            _notificationProviders = newNotificationProviders.sorted { $0.priority > $1.priority }
         }
     }
 
@@ -48,7 +48,7 @@ final class NotificationManager: NotificationProviderDelegate {
         }
     }
 
-    static let shared = NotificationManager()
+    nonisolated(unsafe) static let shared = NotificationManager()
 
     private init() {}
 
@@ -207,7 +207,10 @@ final class NotificationManager: NotificationProviderDelegate {
             }
         }
 
-        // Invalidate in-app notification
+        invalidateInAppNotification(notificationProvider)
+    }
+
+    private func invalidateInAppNotification(_ notificationProvider: NotificationProvider) {
         if let notificationProvider = notificationProvider as? InAppNotificationProvider {
             var newNotificationDescriptors = inAppNotificationDescriptors
 

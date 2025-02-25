@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by Jon Petersson on 2023-04-06.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -23,7 +23,7 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
 
     let infoButton: UIButton = {
         let button = UIButton(type: .custom)
-        button.accessibilityIdentifier = "InfoButton"
+        button.setAccessibilityIdentifier(.infoButton)
         button.tintColor = .white
         button.setImage(UIImage(named: "IconInfo"), for: .normal)
         return button
@@ -31,8 +31,7 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
 
     let collapseButton: UIButton = {
         let button = UIButton(type: .custom)
-        button.accessibilityIdentifier = "CollapseButton"
-        button.isAccessibilityElement = false
+        button.setAccessibilityIdentifier(.expandButton)
         button.tintColor = .white
         return button
     }()
@@ -44,8 +43,16 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
         }
     }
 
+    var accessibilityCustomActionName = "" {
+        didSet {
+            updateAccessibilityCustomActions()
+        }
+    }
+
     var didCollapseHandler: CollapseHandler?
-    var infoButtonHandler: InfoButtonHandler?
+    var infoButtonHandler: InfoButtonHandler? { didSet {
+        infoButton.isHidden = infoButtonHandler == nil
+    }}
 
     private let chevronDown = UIImage(named: "IconChevronDown")
     private let chevronUp = UIImage(named: "IconChevronUp")
@@ -54,6 +61,7 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
     override init(reuseIdentifier: String?) {
         super.init(reuseIdentifier: reuseIdentifier)
 
+        infoButton.isHidden = true
         infoButton.addTarget(
             self,
             action: #selector(handleInfoButton(_:)),
@@ -66,8 +74,8 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
             for: .touchUpInside
         )
 
-        contentView.directionalLayoutMargins = UIMetrics.settingsCellLayoutMargins
-        contentView.backgroundColor = UIColor.Cell.backgroundColor
+        contentView.directionalLayoutMargins = UIMetrics.SettingsCell.layoutMargins
+        contentView.backgroundColor = UIColor.Cell.Background.normal
 
         let buttonAreaWidth = UIMetrics.contentLayoutMargins.leading + UIMetrics
             .contentLayoutMargins.trailing + buttonWidth
@@ -92,7 +100,6 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
         }
 
         updateCollapseImage()
-        updateAccessibilityCustomActions()
     }
 
     required init?(coder: NSCoder) {
@@ -116,20 +123,21 @@ class SettingsHeaderView: UITableViewHeaderFooterView {
         let image = isExpanded ? chevronUp : chevronDown
 
         collapseButton.setImage(image, for: .normal)
+        collapseButton.setAccessibilityIdentifier(isExpanded ? .collapseButton : .expandButton)
     }
 
     private func updateAccessibilityCustomActions() {
         let actionName = isExpanded
             ? NSLocalizedString(
-                "CONTENT_BLOCKERS_COLLAPSE_ACCESSIBILITY_ACTION",
+                "SETTINGS_HEADER_COLLAPSE_ACCESSIBILITY_ACTION",
                 tableName: "Settings",
-                value: "Collapse content blockers",
+                value: "Collapse \(accessibilityCustomActionName)",
                 comment: ""
             )
             : NSLocalizedString(
-                "CONTENT_BLOCKERS_EXPAND_ACCESSIBILITY_ACTION",
+                "SETTINGS_HEADER_EXPAND_ACCESSIBILITY_ACTION",
                 tableName: "Settings",
-                value: "Expand content blockers",
+                value: "Expand \(accessibilityCustomActionName)",
                 comment: ""
             )
 

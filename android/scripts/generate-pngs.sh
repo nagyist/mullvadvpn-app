@@ -27,15 +27,15 @@ BLACK_MONO_ICON_PATH="../../graphics/icon-shaved.svg"
 #
 # Examples:
 #
-# The following will generate a 50 by 50 image in android/app/src/main/res/drawable-hdpi/my_image.png
+# The following will generate a 50 by 50 image in android/lib/resource/src/main/res/drawable-hdpi/my_image.png
 #
 #     convert_image /tmp/my-image.svg hdpi-50
 #
-# The following will generate a 50 by 50 image in android/app/src/main/res/drawable-mdpi/other_image.png
+# The following will generate a 50 by 50 image in android/lib/resource/src/main/res/drawable-mdpi/other_image.png
 #
 #     convert_image /tmp/my-other-image.svg mdpi-50 other_image
 #
-# The following will generate a 50 by 50 image in android/app/src/main/res/mipmap-xxhdpi/my_icon.png
+# The following will generate a 50 by 50 image in android/lib/resource/src/main/res/mipmap-xxhdpi/my_icon.png
 #
 #     convert_image /tmp/my-final-image.svg xxhdpi-50 my_icon mipmap
 function convert_image() {
@@ -46,11 +46,12 @@ function convert_image() {
 
     local source_image="$1"
     local dpi_config="$2"
+    local destination_image
 
     if (( $# >= 3 )); then
-        local destination_image="$3"
+        destination_image="$3"
     else
-        local destination_image="$(basename "$source_image" .svg | sed -e 's/-/_/g')"
+        destination_image="$(basename "$source_image" .svg | sed -e 's/-/_/g')"
     fi
 
     if (( $# >= 4 )); then
@@ -59,10 +60,12 @@ function convert_image() {
         local destination_dir="drawable"
     fi
 
-    local dpi="$(echo "$dpi_config" | cut -f1 -d'-')"
-    local size="$(echo "$dpi_config" | cut -f2 -d'-')"
+    local dpi
+    dpi="$(echo "$dpi_config" | cut -f1 -d'-')"
+    local size
+    size="$(echo "$dpi_config" | cut -f2 -d'-')"
 
-    local dpi_dir="../app/src/main/res/${destination_dir}-${dpi}"
+    local dpi_dir="../lib/resource/src/main/res/${destination_dir}-${dpi}"
 
     echo "$source_image -> ($size x $size) ${dpi_dir}/${destination_image}.png"
     mkdir -p "$dpi_dir"

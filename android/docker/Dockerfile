@@ -8,7 +8,7 @@
 #     -v $GRADLE_CACHE_VOLUME_NAME:/root/.gradle:Z \
 #     -v $ANDROID_CREDENTIALS_DIR:/build/android/credentials:Z \
 #     -v /path/to/repository_root:/build:Z \
-#     mullvadvpn-app-build-android ./build-apk.sh --dev-build --no-docker
+#     mullvadvpn-app-build-android ./android/build.sh --dev-build
 #
 # See the base image Dockerfile in the repository root (../../Dockerfile)
 # for more information.
@@ -19,7 +19,7 @@
 # patch for a given go version can be identified by checking the wireguard-android
 # repo: https://git.zx2c4.com/wireguard-android/tree/tunnel/tools/libwg-go.
 # It's also important to keep the go path in sync.
-FROM ghcr.io/mullvad/mullvadvpn-app-build:3461d7d2c
+FROM ghcr.io/mullvad/mullvadvpn-app-build:85fa990a4
 
 # === Metadata ===
 LABEL org.opencontainers.image.source=https://github.com/mullvad/mullvadvpn-app
@@ -28,22 +28,23 @@ LABEL org.opencontainers.image.licenses=GPL-3.0
 
 # === Define toolchain versions and paths ===
 
-ARG SDK_VERSION=platforms;android-33 \
-    BUILD_TOOLS_VERSION=build-tools;30.0.3
+ARG SDK_VERSION=platforms;android-35 \
+    BUILD_TOOLS_VERSION=build-tools;35.0.0
 
-# Command line tools and checksum from: https://developer.android.com/studio#command-tools
-ARG COMMAND_LINE_TOOLS_VERSION=9123335 \
-    COMMAND_LINE_TOOLS_SHA256_CHECKSUM=0bebf59339eaa534f4217f8aa0972d14dc49e7207be225511073c661ae01da0a
+# Command line tools and checksum from: https://developer.android.com/studio#command-line-tools-only
+ARG COMMAND_LINE_TOOLS_VERSION=11076708 \
+    COMMAND_LINE_TOOLS_SHA256_CHECKSUM=2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258
 
 # NDK and checksum from: https://github.com/android/ndk/wiki#supported-downloads
-ARG NDK_VERSION=r25c \
-    NDK_SHA1_CHECKSUM=53af80a1cce9144025b81c78c8cd556bff42bd0e \
-    MIN_SDK_VERSION=26
+ARG NDK_VERSION_NAME=r27c \
+    NDK_SHA1_CHECKSUM=090e8083a715fdb1a3e402d0763c388abb03fb4e \
+    MIN_SDK_VERSION=26 \
+    NDK_VERSION=27.2.12479018
 
 ENV ANDROID_SDK_ROOT=/opt/android
 # ANDROID_HOME is kept for backwards compatibility
 ENV ANDROID_HOME=$ANDROID_SDK_ROOT
-ENV ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/android-ndk-${NDK_VERSION}
+ENV ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}
 ENV NDK_TOOLCHAIN_DIR=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin
 ENV GRADLE_USER_HOME=/root/.gradle
 
@@ -67,6 +68,9 @@ ENV AR_x86_64_linux_android=${NDK_TOOLCHAIN_DIR}/llvm-ar \
     CC_x86_64_linux_android=${NDK_TOOLCHAIN_DIR}/x86_64-linux-android${MIN_SDK_VERSION}-clang \
     CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${NDK_TOOLCHAIN_DIR}/x86_64-linux-android${MIN_SDK_VERSION}-clang
 
+# Set up python3 path for the rust gradle plugin
+ENV RUST_ANDROID_GRADLE_PYTHON_COMMAND=/usr/bin/python3
+
 # === Install/set up the image ===
 
 RUN apt-get update -y && apt-get install -y \
@@ -76,13 +80,14 @@ RUN apt-get update -y && apt-get install -y \
     python \
     software-properties-common \
     unzip \
-    openjdk-11-jdk \
+    ca-certificates-java \
+    openjdk-17-jdk \
     tidy \
     && rm -rf /var/lib/apt/lists/*
 
 # Set default java version
-RUN update-alternatives --set java  /usr/lib/jvm/java-11-openjdk-amd64/bin/java
-RUN update-alternatives --set javac /usr/lib/jvm/java-11-openjdk-amd64/bin/javac
+RUN update-alternatives --set java  /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+RUN update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac
 
 # Install Android command line tools
 RUN curl -sfLo /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-${COMMAND_LINE_TOOLS_VERSION}_latest.zip && \
@@ -96,9 +101,11 @@ RUN curl -sfLo /tmp/cmdline-tools.zip https://dl.google.com/android/repository/c
 RUN yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager $SDK_VERSION $BUILD_TOOLS_VERSION "platform-tools"
 
 # Install Android NDK
-RUN curl -sfLo /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip && \
+RUN mkdir -p ${ANDROID_SDK_ROOT}/ndk && \
+    curl -sfLo /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-${NDK_VERSION_NAME}-linux.zip && \
     echo "$NDK_SHA1_CHECKSUM /tmp/ndk.zip" | sha1sum -c && \
-    unzip -q /tmp/ndk.zip -d $ANDROID_SDK_ROOT && \
+    unzip -q /tmp/ndk.zip -d /tmp && \
+    mv /tmp/android-ndk-${NDK_VERSION_NAME} ${ANDROID_NDK_HOME} && \
     rm /tmp/ndk.zip
 
 # Apply go patch required for Android

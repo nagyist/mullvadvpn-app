@@ -3,12 +3,12 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 28/11/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import NetworkExtension
 
-extension NEVPNStatus: CustomStringConvertible {
+extension NEVPNStatus: Swift.CustomStringConvertible {
     public var description: String {
         switch self {
         case .connected:

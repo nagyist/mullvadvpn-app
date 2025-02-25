@@ -3,12 +3,13 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 25/05/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+import Routing
 import UIKit
 
-enum HeaderBarStyle {
+enum HeaderBarStyle: Sendable {
     case transparent, `default`, unsecured, secured
 
     fileprivate func backgroundColor() -> UIColor {
@@ -25,7 +26,7 @@ enum HeaderBarStyle {
     }
 }
 
-struct HeaderBarPresentation {
+struct HeaderBarPresentation: Sendable {
     let style: HeaderBarStyle
     let showsDivider: Bool
 
@@ -35,15 +36,32 @@ struct HeaderBarPresentation {
 }
 
 /// A protocol that defines the relationship between the root container and its child controllers
-protocol RootContainment {
+@MainActor
+protocol RootContainment: Sendable {
     /// Return the preferred header bar style
     var preferredHeaderBarPresentation: HeaderBarPresentation { get }
 
     /// Return true if the view controller prefers header bar hidden
     var prefersHeaderBarHidden: Bool { get }
+
+    /// Return true if the view controller prefers notification bar hidden
+    var prefersNotificationBarHidden: Bool { get }
+
+    /// Return true if the view controller prefers device info bar hidden
+    var prefersDeviceInfoBarHidden: Bool { get }
 }
 
-protocol RootContainerViewControllerDelegate: AnyObject {
+extension RootContainment {
+    var prefersNotificationBarHidden: Bool {
+        true
+    }
+
+    var prefersDeviceInfoBarHidden: Bool {
+        false
+    }
+}
+
+protocol RootContainerViewControllerDelegate: AnyObject, Sendable {
     func rootContainerViewControllerShouldShowAccount(
         _ controller: RootContainerViewController,
         animated: Bool
@@ -81,6 +99,18 @@ class RootContainerViewController: UIViewController {
     private var appearingController: UIViewController?
     private var disappearingController: UIViewController?
     private var interfaceOrientationMask: UIInterfaceOrientationMask?
+    private var isNavigationBarHidden = false {
+        didSet {
+            guard let notificationController else {
+                return
+            }
+            if isNavigationBarHidden {
+                removeNotificationController(notificationController)
+            } else {
+                addNotificationController(notificationController)
+            }
+        }
+    }
 
     var topViewController: UIViewController? {
         viewControllers.last
@@ -279,40 +309,6 @@ class RootContainerViewController: UIViewController {
         )
     }
 
-    /// Add account and settings bar buttons into the presentation container to make them accessible even
-    /// when the root container is covered with a modal.
-    func addTrailingButtonsToPresentationContainer(_ presentationContainer: UIView) {
-        let accountButton = getPresentationContainerAccountButton()
-        let settingsButton = getPresentationContainerSettingsButton()
-
-        presentationContainerAccountButton = accountButton
-        presentationContainerSettingsButton = settingsButton
-
-        // Hide the account button inside the header bar to avoid color blending issues
-        headerBarView.accountButton.alpha = 0
-        headerBarView.settingsButton.alpha = 0
-
-        presentationContainer.addConstrainedSubviews([accountButton, settingsButton]) {
-            accountButton.centerXAnchor
-                .constraint(equalTo: headerBarView.accountButton.centerXAnchor)
-            accountButton.centerYAnchor
-                .constraint(equalTo: headerBarView.accountButton.centerYAnchor)
-
-            settingsButton.centerXAnchor
-                .constraint(equalTo: headerBarView.settingsButton.centerXAnchor)
-            settingsButton.centerYAnchor
-                .constraint(equalTo: headerBarView.settingsButton.centerYAnchor)
-        }
-    }
-
-    func removeTrailingButtonsFromPresentationContainer() {
-        presentationContainerAccountButton?.removeFromSuperview()
-        presentationContainerSettingsButton?.removeFromSuperview()
-
-        headerBarView.accountButton.alpha = 1
-        headerBarView.settingsButton.alpha = 1
-    }
-
     func setOverrideHeaderBarHidden(_ isHidden: Bool?, animated: Bool) {
         overrideHeaderBarHidden = isHidden
 
@@ -321,6 +317,11 @@ class RootContainerViewController: UIViewController {
         } else {
             updateHeaderBarHiddenFromChildPreferences(animated: animated)
         }
+    }
+
+    func enableHeaderBarButtons(_ enabled: Bool) {
+        headerBarView.accountButton.isEnabled = enabled
+        headerBarView.settingsButton.isEnabled = enabled
     }
 
     // MARK: - Accessibility
@@ -423,6 +424,7 @@ class RootContainerViewController: UIViewController {
         showSettings(animated: true)
     }
 
+    // swiftlint:disable:next function_body_length
     private func setViewControllersInternal(
         _ newViewControllers: [UIViewController],
         isUnwinding: Bool,
@@ -451,52 +453,144 @@ class RootContainerViewController: UIViewController {
         let viewControllersToAdd = newViewControllers.filter { !viewControllers.contains($0) }
         let viewControllersToRemove = viewControllers.filter { !newViewControllers.contains($0) }
 
-        let finishTransition = {
-            /*
-             Finish transition appearance.
-             Note this has to be done before the call to `didMove(to:)` or `removeFromParent()`
-             otherwise `endAppearanceTransition()` will fire `didMove(to:)` twice.
-             */
-            if shouldHandleAppearanceEvents {
-                if let targetViewController,
-                   sourceViewController != targetViewController {
-                    self.endChildControllerTransition(targetViewController)
-                }
+        // hide in-App notificationBanner when the container decides to keep it invisible
+        isNavigationBarHidden = (targetViewController as? RootContainment)?.prefersNotificationBarHidden ?? false
 
-                if let sourceViewController,
-                   sourceViewController != targetViewController {
-                    self.endChildControllerTransition(sourceViewController)
-                }
-            }
+        configureViewControllers(
+            viewControllersToAdd: viewControllersToAdd,
+            newViewControllers: newViewControllers,
+            targetViewController: targetViewController,
+            viewControllersToRemove: viewControllersToRemove
+        )
 
-            // Notify the added controllers that they finished a transition into the container
-            for child in viewControllersToAdd {
-                child.didMove(toParent: self)
-            }
+        beginTransition(
+            shouldHandleAppearanceEvents: shouldHandleAppearanceEvents,
+            targetViewController: targetViewController,
+            shouldAnimate: shouldAnimate,
+            sourceViewController: sourceViewController
+        )
 
-            // Remove the controllers that transitioned out of the container
-            // The call to removeFromParent() automatically calls child.didMove()
-            for child in viewControllersToRemove {
-                child.view.removeFromSuperview()
-                child.removeFromParent()
-            }
-
-            // Remove the source controller from view hierarchy
-            if sourceViewController != targetViewController {
-                sourceViewController?.view.removeFromSuperview()
-            }
-
-            self.updateInterfaceOrientation(attemptRotateToDeviceOrientation: true)
-            self.updateAccessibilityElementsAndNotifyScreenChange()
+        let finishTransition = { [weak self] in
+            self?.onTransitionEnd(
+                shouldHandleAppearanceEvents: shouldHandleAppearanceEvents,
+                sourceViewController: sourceViewController,
+                targetViewController: targetViewController,
+                viewControllersToAdd: viewControllersToAdd,
+                viewControllersToRemove: viewControllersToRemove
+            )
 
             completion?()
         }
 
-        let alongSideAnimations = {
-            self.updateHeaderBarStyleFromChildPreferences(animated: shouldAnimate)
-            self.updateHeaderBarHiddenFromChildPreferences(animated: shouldAnimate)
+        let alongSideAnimations = { [weak self] in
+            guard let self else { return }
+
+            updateHeaderBarStyleFromChildPreferences(animated: shouldAnimate)
+            updateHeaderBarHiddenFromChildPreferences(animated: shouldAnimate)
+            updateNotificationBarHiddenFromChildPreferences()
+            updateDeviceInfoBarHiddenFromChildPreferences()
         }
 
+        if shouldAnimate {
+            CATransaction.begin()
+            CATransaction.setCompletionBlock {
+                finishTransition()
+            }
+
+            animateTransition(
+                sourceViewController: sourceViewController,
+                newViewControllers: newViewControllers,
+                targetViewController: targetViewController,
+                isUnwinding: isUnwinding,
+                alongSideAnimations: alongSideAnimations
+            )
+
+            CATransaction.commit()
+        } else {
+            alongSideAnimations()
+            finishTransition()
+        }
+    }
+
+    private func animateTransition(
+        sourceViewController: UIViewController?,
+        newViewControllers: [UIViewController],
+        targetViewController: UIViewController?,
+        isUnwinding: Bool,
+        alongSideAnimations: () -> Void
+    ) {
+        let transition = CATransition()
+        transition.duration = 0.35
+        transition.type = .push
+
+        // Pick the animation movement direction
+        let sourceIndex = sourceViewController.flatMap { newViewControllers.firstIndex(of: $0) }
+        let targetIndex = targetViewController.flatMap { newViewControllers.firstIndex(of: $0) }
+
+        switch (sourceIndex, targetIndex) {
+        case let (.some(lhs), .some(rhs)):
+            transition.subtype = lhs > rhs ? .fromLeft : .fromRight
+        case (.none, .some):
+            transition.subtype = isUnwinding ? .fromLeft : .fromRight
+        default:
+            transition.subtype = .fromRight
+        }
+
+        transitionContainer.layer.add(transition, forKey: "transition")
+        alongSideAnimations()
+    }
+
+    private func onTransitionEnd(
+        shouldHandleAppearanceEvents: Bool,
+        sourceViewController: UIViewController?,
+        targetViewController: UIViewController?,
+        viewControllersToAdd: [UIViewController],
+        viewControllersToRemove: [UIViewController]
+    ) {
+        /*
+         Finish transition appearance.
+         Note this has to be done before the call to `didMove(to:)` or `removeFromParent()`
+         otherwise `endAppearanceTransition()` will fire `didMove(to:)` twice.
+         */
+        if shouldHandleAppearanceEvents {
+            if let targetViewController,
+               sourceViewController != targetViewController {
+                self.endChildControllerTransition(targetViewController)
+            }
+
+            if let sourceViewController,
+               sourceViewController != targetViewController {
+                self.endChildControllerTransition(sourceViewController)
+            }
+        }
+
+        // Notify the added controllers that they finished a transition into the container
+        for child in viewControllersToAdd {
+            child.didMove(toParent: self)
+        }
+
+        // Remove the controllers that transitioned out of the container
+        // The call to removeFromParent() automatically calls child.didMove()
+        for child in viewControllersToRemove {
+            child.view.removeFromSuperview()
+            child.removeFromParent()
+        }
+
+        // Remove the source controller from view hierarchy
+        if sourceViewController != targetViewController {
+            sourceViewController?.view.removeFromSuperview()
+        }
+
+        self.updateInterfaceOrientation(attemptRotateToDeviceOrientation: true)
+        self.updateAccessibilityElementsAndNotifyScreenChange()
+    }
+
+    private func configureViewControllers(
+        viewControllersToAdd: [UIViewController],
+        newViewControllers: [UIViewController],
+        targetViewController: UIViewController?,
+        viewControllersToRemove: [UIViewController]
+    ) {
         // Add new child controllers. The call to addChild() automatically calls child.willMove()
         // Children have to be registered in the container for Storyboard unwind segues to function
         // properly, however the child controller views don't have to be added immediately, and
@@ -523,8 +617,14 @@ class RootContainerViewController: UIViewController {
         }
 
         viewControllers = newViewControllers
+    }
 
-        // Begin appearance transition
+    private func beginTransition(
+        shouldHandleAppearanceEvents: Bool,
+        targetViewController: UIViewController?,
+        shouldAnimate: Bool,
+        sourceViewController: UIViewController?
+    ) {
         if shouldHandleAppearanceEvents {
             if let sourceViewController,
                sourceViewController != targetViewController {
@@ -543,38 +643,6 @@ class RootContainerViewController: UIViewController {
                 )
             }
             setNeedsStatusBarAppearanceUpdate()
-        }
-
-        if shouldAnimate {
-            CATransaction.begin()
-            CATransaction.setCompletionBlock {
-                finishTransition()
-            }
-
-            let transition = CATransition()
-            transition.duration = 0.35
-            transition.type = .push
-
-            // Pick the animation movement direction
-            let sourceIndex = sourceViewController.flatMap { newViewControllers.firstIndex(of: $0) }
-            let targetIndex = targetViewController.flatMap { newViewControllers.firstIndex(of: $0) }
-
-            switch (sourceIndex, targetIndex) {
-            case let (.some(lhs), .some(rhs)):
-                transition.subtype = lhs > rhs ? .fromLeft : .fromRight
-            case (.none, .some):
-                transition.subtype = isUnwinding ? .fromLeft : .fromRight
-            default:
-                transition.subtype = .fromRight
-            }
-
-            transitionContainer.layer.add(transition, forKey: "transition")
-            alongSideAnimations()
-
-            CATransaction.commit()
-        } else {
-            alongSideAnimations()
-            finishTransition()
         }
     }
 
@@ -642,6 +710,23 @@ class RootContainerViewController: UIViewController {
     private func updateHeaderBarStyleFromChildPreferences(animated: Bool) {
         if let conforming = topViewController as? RootContainment {
             setHeaderBarPresentation(conforming.preferredHeaderBarPresentation, animated: animated)
+        }
+    }
+
+    private func updateDeviceInfoBarHiddenFromChildPreferences() {
+        if let conforming = topViewController as? RootContainment {
+            headerBarView.isDeviceInfoHidden = conforming.prefersDeviceInfoBarHidden
+        }
+    }
+
+    private func updateNotificationBarHiddenFromChildPreferences() {
+        if let notificationController,
+           let conforming = topViewController as? RootContainment {
+            if conforming.prefersNotificationBarHidden {
+                removeNotificationController(notificationController)
+            } else {
+                addNotificationController(notificationController)
+            }
         }
     }
 
@@ -789,7 +874,5 @@ extension RootContainerViewController {
         headerBarView.update(configuration: configuration)
     }
 
-    func hideDeviceInfo() {
-        update(configuration: RootConfiguration(showsAccountButton: false))
-    }
+    // swiftlint:disable:next file_length
 }

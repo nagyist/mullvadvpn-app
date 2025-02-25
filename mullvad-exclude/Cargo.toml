@@ -1,12 +1,16 @@
 [package]
 name = "mullvad-exclude"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+description = "Runs programs outside the Mullvad VPN tunnel on Linux"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = "0.23"
-err-derive = "0.3.1"
+thiserror = { workspace = true }
 talpid-types = { path = "../talpid-types" }

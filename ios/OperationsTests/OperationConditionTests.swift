@@ -3,12 +3,14 @@
 //  MullvadVPNTests
 //
 //  Created by pronebird on 02/06/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+@testable import MullvadMockData
 import Operations
 import XCTest
 
+@MainActor
 class OperationConditionTests: XCTestCase {
     func testTrueCondition() {
         let expectConditionEvaluation = expectation(description: "Expect condition evaluation")
@@ -18,7 +20,7 @@ class OperationConditionTests: XCTestCase {
             expectOperationToExecute.fulfill()
         }
 
-        let blockCondition = BlockCondition { op, completion in
+        let blockCondition = BlockCondition { _, completion in
             expectConditionEvaluation.fulfill()
             completion(true)
         }
@@ -28,7 +30,7 @@ class OperationConditionTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperation(operation)
 
-        waitForExpectations(timeout: 1)
+        waitForExpectations(timeout: .UnitTest.timeout)
     }
 
     func testFalseCondition() {
@@ -42,7 +44,7 @@ class OperationConditionTests: XCTestCase {
             expectOperationToNeverExecute.fulfill()
         }
 
-        let blockCondition = BlockCondition { op, completion in
+        let blockCondition = BlockCondition { _, completion in
             expectConditionEvaluation.fulfill()
             completion(false)
         }
@@ -52,7 +54,8 @@ class OperationConditionTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperation(operation)
 
-        waitForExpectations(timeout: 1)
+        wait(for: [expectOperationToNeverExecute], timeout: .UnitTest.invertedTimeout)
+        wait(for: [expectConditionEvaluation], timeout: .UnitTest.timeout)
     }
 
     func testNoCancelledDependenciesCondition() {
@@ -71,7 +74,7 @@ class OperationConditionTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperations([parent, child], waitUntilFinished: false)
 
-        waitForExpectations(timeout: 1)
+        waitForExpectations(timeout: .UnitTest.invertedTimeout)
     }
 
     func testNoFailedDependenciesCondition() {
@@ -91,7 +94,7 @@ class OperationConditionTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperations([parent, child], waitUntilFinished: false)
 
-        waitForExpectations(timeout: 1)
+        waitForExpectations(timeout: .UnitTest.invertedTimeout)
     }
 
     func testNoFailedDependenciesIgnoringCancellationsCondition() {
@@ -109,7 +112,7 @@ class OperationConditionTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperations([parent, child], waitUntilFinished: false)
 
-        waitForExpectations(timeout: 1)
+        waitForExpectations(timeout: .UnitTest.timeout)
     }
 
     func testMutuallyExclusiveCondition() {
@@ -139,6 +142,6 @@ class OperationConditionTests: XCTestCase {
         operationQueue.addOperations([firstOperation, secondOperation], waitUntilFinished: false)
 
         let expectations = [expectFirstOperationExecution, expectSecondOperationExecution]
-        wait(for: expectations, timeout: 2, enforceOrder: true)
+        wait(for: expectations, timeout: .UnitTest.timeout, enforceOrder: true)
     }
 }

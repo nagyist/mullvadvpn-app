@@ -86,7 +86,7 @@
 !macro ExtractDriverlogic
 
 	SetOutPath "$PLUGINSDIR"
-	File "${BUILD_RESOURCES_DIR}\..\windows\driverlogic\bin\x64-$%CPP_BUILD_MODE%\driverlogic.exe"
+	File "${BUILD_RESOURCES_DIR}\..\windows\driverlogic\bin\$%CPP_BUILD_TARGET%-$%CPP_BUILD_MODE%\driverlogic.exe"
 
 !macroend
 
@@ -100,8 +100,8 @@
 !macro ExtractWireGuard
 
 	SetOutPath "$PLUGINSDIR"
-	File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\wintun\wintun.dll"
-	File "${BUILD_RESOURCES_DIR}\binaries\x86_64-pc-windows-msvc\wireguard-nt\mullvad-wireguard.dll"
+	File "${BUILD_RESOURCES_DIR}\binaries\$%TARGET_TRIPLE%\wintun\wintun.dll"
+	File "${BUILD_RESOURCES_DIR}\binaries\$%TARGET_TRIPLE%\wireguard-nt\mullvad-wireguard.dll"
 
 !macroend
 
@@ -115,8 +115,8 @@
 !macro ExtractMullvadSetup
 
 	SetOutPath "$PLUGINSDIR"
-	File "${BUILD_RESOURCES_DIR}\mullvad-setup.exe"
-	File "${BUILD_RESOURCES_DIR}\..\windows\winfw\bin\x64-$%CPP_BUILD_MODE%\winfw.dll"
+	File "${BUILD_RESOURCES_DIR}\$%SETUP_SUBDIR%\mullvad-setup.exe"
+	File "${BUILD_RESOURCES_DIR}\..\windows\winfw\bin\$%CPP_BUILD_TARGET%-$%CPP_BUILD_MODE%\winfw.dll"
 
 !macroend
 
@@ -690,6 +690,22 @@
 		Abort
 	${EndIf}
 
+	Var /GLOBAL NativeTarget
+	${If} ${IsNativeAMD64}
+		StrCpy $NativeTarget "x64"
+	${ElseIf} ${IsNativeARM64}
+		StrCpy $NativeTarget "arm64"
+	${Else}
+		StrCpy $NativeTarget "unsupported arch"
+	${EndIf}
+
+	# $%TARGET_ARCHITECTURE% is set by distribution.js to the corresponding architecture
+	# in https://www.electron.build/builder-util.typealias.archtype
+	${If} $%TARGET_ARCHITECTURE% != $NativeTarget
+		MessageBox MB_ICONSTOP|MB_TOPMOST|MB_OK "This build of the app does not run on $NativeTarget Windows. Please find the appropriate installer on the website."
+		Abort
+	${EndIf}
+
 	# Application settings key
 	# Migrate 2018.(x<6) to current
 	registry::MoveKey "HKLM\SOFTWARE\8fa2c331-e09e-5709-bc74-c59df61f0c7e" "HKLM\SOFTWARE\${PRODUCT_NAME}"
@@ -751,7 +767,7 @@
 	${EndIf}
 
 	# Killing without /f will likely cause the daemon to disconnect.
-	nsExec::Exec `taskkill /f /t /im "${APP_EXECUTABLE_FILENAME}"` $R0
+	nsExec::Exec `"$SYSDIR\taskkill.exe" /f /t /im "${APP_EXECUTABLE_FILENAME}"` $R0
 	Sleep 500
 
 	customCheckAppRunning_skip_kill:
@@ -874,7 +890,7 @@
 	${ExtractMullvadSetup}
 	${ClearFirewallRules}
 
-	MessageBox MB_OK "Failed to uninstall a previous version. Contact support or review the logs for more information."
+	MessageBox MB_OK "Failed to uninstall a previous version. Please try restarting your computer and try again. If you still have this issue, please contact support."
 	SetErrorLevel 5
 	Abort
 
@@ -1051,9 +1067,9 @@
 
 	Pop $FullUninstall
 
-	nsExec::Exec `taskkill /t /im "${APP_EXECUTABLE_FILENAME}"` $0
+	nsExec::Exec `"$SYSDIR\taskkill.exe" /t /im "${APP_EXECUTABLE_FILENAME}"` $0
 	Sleep 500
-	nsExec::Exec `taskkill /f /t /im "${APP_EXECUTABLE_FILENAME}"` $0
+	nsExec::Exec `"$SYSDIR\taskkill.exe" /f /t /im "${APP_EXECUTABLE_FILENAME}"` $0
 
 	${If} $FullUninstall == 0
 		# Save the target tunnel state if we're upgrading

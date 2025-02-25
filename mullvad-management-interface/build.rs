@@ -1,5 +1,7 @@
 fn main() {
-    const PROTO_FILE: &str = "proto/management_interface.proto";
-    tonic_build::compile_protos(PROTO_FILE).unwrap();
-    println!("cargo:rerun-if-changed={PROTO_FILE}");
+    tonic_build::compile_protos("proto/management_interface.proto").unwrap();
+
+    // Enable DAITA by default on desktop and android
+    println!("cargo::rustc-check-cfg=cfg(daita)");
+    println!(r#"cargo::rustc-cfg=daita"#);
 }

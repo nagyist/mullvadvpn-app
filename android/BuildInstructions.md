@@ -17,6 +17,9 @@ the Gradle CLI or the Android Studio GUI.
 
 ## Build with provided container (recommended)
 
+> __*NOTE:*__ Build with provided container is only supported on Linux and may not work on other
+> platforms.
+
 Building both the native libraries and Android project can easily be achieved by running the
 [containerized-build.sh](../building/containerized-build.sh) script, which helps using the correct
 tag and mounting volumes. The script relies on [podman](https://podman.io/getting-started/installation.html)
@@ -54,14 +57,17 @@ directory configured in step 1:
 ../building/containerized-build.sh android --app-bundle
 ```
 
-## Build without* the provided container (not recommended)
+## Build without* the provided container
+
+> __*NOTE:*__ This guide is only supported on Linux and may not work on other platforms, if you are
+> using macOS please refer to [macOS build instructions](./docs/BuildInstructions.macos.md)
 
 Building without the provided container requires installing multiple Sdk:s and toolchains, and is
-therefore not recommended.
+therefore more complex.
 
-*: A container is still used to build `wireguard-go` for Android since it requires a patched version
-of `go`. See [this patch](https://git.zx2c4.com/wireguard-android/tree/tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff)
-for more information.
+> __*\*:*__ A container is still used to build `wireguard-go` for Android since it requires a
+> patched version of `go`. See [this patch](https://git.zx2c4.com/wireguard-android/tree/tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff)
+> for more information.
 
 ### Setup build environment
 These steps explain how to manually setup the build environment on a Linux system.
@@ -83,16 +89,8 @@ Linux distro:
 
 - Install the JDK
 
-  **Linux**
-
   ```bash
-  sudo apt install zip openjdk-11-jdk
-  ```
-
-  **macOS**
-
-  ```bash
-  brew install openjdk@11
+  sudo apt install zip openjdk-17-jdk
   ```
 
 - Install the SDK
@@ -107,8 +105,8 @@ Linux distro:
   cd /opt/android     # Or some other directory to place the Android SDK
   export ANDROID_HOME=$PWD
 
-  wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip
-  unzip commandlinetools-linux-6609375_latest.zip
+  wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+  unzip commandlinetools-linux-11076708_latest.zip
   ./tools/bin/sdkmanager "platforms;android-33" "build-tools;30.0.3" "platform-tools"
   ```
 
@@ -120,10 +118,10 @@ Linux distro:
 
   ```bash
   cd "$ANDROID_HOME"  # Or some other directory to place the Android NDK
-  wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-  unzip android-ndk-r25c-linux.zip
+  wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+  unzip android-ndk-r27c-linux.zip
 
-  cd android-ndk-r25c
+  cd android-ndk-r27c
   export ANDROID_NDK_HOME="$PWD"
   ```
 
@@ -134,24 +132,9 @@ Linux distro:
 - Configure Android cross-compilation targets and set up linker and archiver. This can be done by setting the following
 environment variables:
 
-  **Linux**
-
   Add to `~/.bashrc` or equivalent:
   ```
   export NDK_TOOLCHAIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-  ```
-
-  **macOS**
-
-  Add to `~/.zshrc` or equivalent:
-  ```
-  export NDK_TOOLCHAIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-  ```
-
-  **Both platforms**
-
-  Add the following to the same file as above:
-  ```
   export AR_aarch64_linux_android="$NDK_TOOLCHAIN_DIR/llvm-ar"
   export AR_armv7_linux_androideabi="$NDK_TOOLCHAIN_DIR/llvm-ar"
   export AR_x86_64_linux_android="$NDK_TOOLCHAIN_DIR/llvm-ar"
@@ -168,13 +151,22 @@ environment variables:
 
 - Install Android targets
   ```bash
-  rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+  ./scripts/setup-rust android
   ```
+
+- (Optional) Run the following to install a git `post-checkout` hook that will automatically
+  run the `setup-rust` script when the Rust version specified in the `rust-toolchain.toml` file changes:
+  ```bash
+  .scripts/setup-rust install-hook
+  ```
+
+#### 6. Download wireguard-go-rs submodule
+Run the following command to download wireguard-go-rs submodule: `git submodule update --init wireguard-go-rs/libwg/wireguard-go`
 
 ### Debug build
 Run the following command to build a debug build:
 ```bash
-../build-apk.sh --dev-build
+../android/build.sh --dev-build
 ```
 
 ### Release build
@@ -182,7 +174,7 @@ Run the following command to build a debug build:
 2. Move, copy or symlink the directory from step 1 to [./credentials/](./credentials/) (`<repository>/android/credentials/`).
 3. Run the following command to build:
    ```bash
-   ../build-apk.sh --app-bundle
+   ../android/build.sh --app-bundle
    ```
 
 ## Configure signing key
@@ -213,10 +205,13 @@ This lockfile helps ensuring the integrity of the gradle dependencies in the pro
 When adding or updating dependencies, it's necessary to also update the lockfile. This can be done
 in the following way:
 
-1. Run update script (requires `podman`):
+1. Run update script:
    ```bash
    ./scripts/update-lockfile.sh
    ```
+
+   If you're on macOS make sure GNU sed is installed. Install with `brew install gnu-sed` and add it to your `PATH` so that it is used instead of the `sed` macOS ships with `PATH="$HOMEBREW_PREFIX/opt/gnu-sed/libexec/gnubin:$PATH"`
+
 2. Check diff before committing.
 
 ### Disable during development
@@ -227,13 +222,6 @@ rm ./gradle/verification-metadata.xml
 
 ## Gradle properties
 Some gradle properties can be set to simplify development. These are listed below.
-
-### Always show changelog
-For development purposes, `ALWAYS_SHOW_CHANGELOG` can be set in `local.properties` to always show
-the changelog dialog on each app start. For example:
-```
-ALWAYS_SHOW_CHANGELOG=true
-```
 
 ### Override version code and version name
 To avoid or override the rust based version generation, the `OVERRIDE_VERSION_CODE` and
@@ -249,3 +237,6 @@ the `ENABLE_IN_APP_VERSION_NOTIFICATIONS` property can be set in `local.properti
 ```
 ENABLE_IN_APP_VERSION_NOTIFICATIONS=false
 ```
+
+### Run tests highly affected by rate limiting
+To avoid being rate limited we avoid running tests sending requests that are highly rate limited too often. If you want to run these tests you can set `enable_highly_rate_limited_tests=true` in `local.properties`. The default value is `false`.

@@ -1,0 +1,7 @@
+/node_modules
+/build
+/scripts/out/
+/test/e2e/screenshots/
+/test-results/
+/standalone-tests.sea.blob
+/build-standalone

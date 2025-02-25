@@ -1,25 +1,24 @@
 plugins {
-    id(Dependencies.Plugin.androidLibraryId)
-    id(Dependencies.Plugin.kotlinAndroidId)
-    id(Dependencies.Plugin.kotlinParcelizeId)
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.parcelize)
 }
 
 android {
     namespace = "net.mullvad.mullvadvpn.test.common"
-    compileSdk = Versions.Android.compileSdkVersion
+    compileSdk = Versions.compileSdkVersion
+    buildToolsVersion = Versions.buildToolsVersion
 
-    defaultConfig {
-        minSdk = Versions.Android.minSdkVersion
-        targetSdk = Versions.Android.targetSdkVersion
-    }
+    defaultConfig { minSdk = Versions.minSdkVersion }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
         jvmTarget = Versions.jvmTarget
+        allWarningsAsErrors = true
     }
 
     lint {
@@ -27,25 +26,35 @@ android {
         abortOnError = true
         warningsAsErrors = true
     }
-}
 
-androidComponents {
-    beforeVariants { variantBuilder ->
-        variantBuilder.apply {
-            enable = name != "release"
+    packaging {
+        resources {
+            pickFirsts +=
+                setOf(
+                    // Fixes packaging error caused by: jetified-junit-*
+                    "META-INF/LICENSE.md",
+                    "META-INF/LICENSE-notice.md",
+                )
         }
     }
 }
 
+androidComponents {
+    beforeVariants { variantBuilder ->
+        variantBuilder.apply { enable = name != BuildTypes.RELEASE }
+    }
+}
+
 dependencies {
-    implementation(project(Dependencies.Mullvad.endpointLib))
+    implementation(projects.lib.endpoint)
 
-    implementation(Dependencies.AndroidX.testCore)
-    implementation(Dependencies.AndroidX.testRunner)
-    implementation(Dependencies.AndroidX.testRules)
-    implementation(Dependencies.AndroidX.testUiAutomator)
-    implementation(Dependencies.junit)
-    implementation(Dependencies.Kotlin.stdlib)
+    implementation(libs.androidx.test.core)
+    implementation(libs.androidx.test.runner)
+    implementation(libs.androidx.test.rules)
+    implementation(libs.androidx.test.uiautomator)
+    implementation(Dependencies.junitJupiterEngine)
+    implementation(libs.kermit)
+    implementation(libs.kotlin.stdlib)
 
-    androidTestUtil(Dependencies.AndroidX.testOrchestrator)
+    androidTestUtil(libs.androidx.test.orchestrator)
 }

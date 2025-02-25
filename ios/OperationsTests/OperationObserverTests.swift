@@ -3,9 +3,10 @@
 //  MullvadVPNTests
 //
 //  Created by pronebird on 02/06/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+@testable import MullvadMockData
 import Operations
 import XCTest
 
@@ -19,13 +20,13 @@ class OperationObserverTests: XCTestCase {
 
         let operation = AsyncBlockOperation {}
         operation.addBlockObserver(OperationBlockObserver(
-            didAttach: { op in
+            didAttach: { _ in
                 expectDidAttach.fulfill()
-            }, didStart: { op in
+            }, didStart: { _ in
                 expectDidStart.fulfill()
-            }, didCancel: { op in
+            }, didCancel: { _ in
                 expectDidCancel.fulfill()
-            }, didFinish: { op, error in
+            }, didFinish: { _, _ in
                 expectDidFinish.fulfill()
             }
         ))
@@ -33,8 +34,8 @@ class OperationObserverTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperation(operation)
 
-        let expectations = [expectDidCancel, expectDidAttach, expectDidStart, expectDidFinish]
-        wait(for: expectations, timeout: 1, enforceOrder: true)
+        wait(for: [expectDidCancel], timeout: .UnitTest.invertedTimeout)
+        wait(for: [expectDidAttach, expectDidStart, expectDidFinish], timeout: .UnitTest.timeout, enforceOrder: true)
     }
 
     func testBlockObserverWithCancelledOperation() {
@@ -46,13 +47,13 @@ class OperationObserverTests: XCTestCase {
 
         let operation = AsyncBlockOperation {}
         operation.addBlockObserver(OperationBlockObserver(
-            didAttach: { op in
+            didAttach: { _ in
                 expectDidAttach.fulfill()
-            }, didStart: { op in
+            }, didStart: { _ in
                 expectDidStart.fulfill()
-            }, didCancel: { op in
+            }, didCancel: { _ in
                 expectDidCancel.fulfill()
-            }, didFinish: { op, error in
+            }, didFinish: { _, _ in
                 expectDidFinish.fulfill()
             }
         ))
@@ -61,7 +62,7 @@ class OperationObserverTests: XCTestCase {
         let operationQueue = AsyncOperationQueue()
         operationQueue.addOperation(operation)
 
-        let expectations = [expectDidAttach, expectDidCancel, expectDidStart, expectDidFinish]
-        wait(for: expectations, timeout: 1, enforceOrder: true)
+        wait(for: [expectDidStart], timeout: .UnitTest.invertedTimeout)
+        wait(for: [expectDidAttach, expectDidCancel, expectDidFinish], timeout: .UnitTest.timeout, enforceOrder: true)
     }
 }

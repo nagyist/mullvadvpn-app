@@ -3,30 +3,33 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 27/01/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
-import MullvadLogging
+@preconcurrency import MullvadLogging
+import MullvadSettings
 
-final class LoginInteractor {
+final class LoginInteractor: @unchecked Sendable {
     private let tunnelManager: TunnelManager
     private let logger = Logger(label: "LoginInteractor")
+    private var tunnelObserver: TunnelObserver?
+    var didCreateAccount: (@MainActor @Sendable () -> Void)?
+    var suggestPreferredAccountNumber: (@Sendable (String) -> Void)?
 
     init(tunnelManager: TunnelManager) {
         self.tunnelManager = tunnelManager
     }
 
-    func setAccount(accountNumber: String, completion: @escaping (Error?) -> Void) {
-        tunnelManager.setExistingAccount(accountNumber: accountNumber) { result in
-            completion(result.error)
-        }
+    func setAccount(accountNumber: String) async throws {
+        _ = try await tunnelManager.setExistingAccount(accountNumber: accountNumber)
     }
 
-    func createAccount(completion: @escaping (Result<String, Error>) -> Void) {
-        tunnelManager.setNewAccount { result in
-            completion(result.map { $0.number })
-        }
+    func createAccount() async throws -> String {
+        let accountNumber = try await tunnelManager.setNewAccount().number
+        await didCreateAccount?()
+
+        return accountNumber
     }
 
     func getLastUsedAccount() -> String? {

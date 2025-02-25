@@ -3,15 +3,14 @@
 //  MullvadTypes
 //
 //  Created by pronebird on 12/06/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
-import struct Network.IPv4Address
-import struct Network.IPv6Address
+import Network
 
 /// Contains server data needed to connect to a single mullvad endpoint.
-public struct MullvadEndpoint: Equatable, Codable {
+public struct MullvadEndpoint: Equatable, Codable, Sendable {
     public let ipv4Relay: IPv4Endpoint
     public let ipv6Relay: IPv6Endpoint?
     public let ipv4Gateway: IPv4Address
@@ -30,5 +29,15 @@ public struct MullvadEndpoint: Equatable, Codable {
         self.ipv4Gateway = ipv4Gateway
         self.ipv6Gateway = ipv6Gateway
         self.publicKey = publicKey
+    }
+
+    public func override(ipv4Relay: IPv4Endpoint) -> Self {
+        MullvadEndpoint(
+            ipv4Relay: ipv4Relay,
+            ipv6Relay: ipv6Relay,
+            ipv4Gateway: ipv4Gateway,
+            ipv6Gateway: ipv6Gateway,
+            publicKey: publicKey
+        )
     }
 }

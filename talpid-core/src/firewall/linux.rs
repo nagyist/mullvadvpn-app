@@ -1,82 +1,87 @@
 use super::{FirewallArguments, FirewallPolicy};
 use crate::{split_tunnel, tunnel};
 use ipnetwork::IpNetwork;
-use lazy_static::lazy_static;
-use libc;
 use nftnl::{
-    self,
     expr::{self, IcmpCode, Payload, RejectionType, Verdict},
     nft_expr, table, Batch, Chain, FinalizedBatch, ProtoFamily, Rule, Table,
 };
 use std::{
     env,
-    ffi::{CStr, CString},
+    ffi::CStr,
     fs, io,
     net::{IpAddr, Ipv4Addr},
+    sync::LazyLock,
 };
-use talpid_types::net::{AllowedTunnelTraffic, Endpoint, TransportProtocol};
+use talpid_types::net::{
+    AllowedEndpoint, AllowedTunnelTraffic, Endpoint, TransportProtocol, ALLOWED_LAN_MULTICAST_NETS,
+    ALLOWED_LAN_NETS,
+};
 
 /// Priority for rules that tag split tunneling packets. Equals NF_IP_PRI_MANGLE.
 const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const PREROUTING_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_CONNTRACK + 1;
 const PROC_SYS_NET_IPV4_CONF_SRC_VALID_MARK: &str = "/proc/sys/net/ipv4/conf/all/src_valid_mark";
+const PROC_SYS_NET_IPV4_CONF_ARP_IGNORE: &str = "/proc/sys/net/ipv4/conf/all/arp_ignore";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can happen when interacting with Linux netfilter.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Unable to open netlink socket to netfilter.
-    #[error(display = "Unable to open netlink socket to netfilter")]
-    NetlinkOpenError(#[error(source)] io::Error),
+    #[error("Unable to open netlink socket to netfilter")]
+    NetlinkOpenError(#[source] io::Error),
 
     /// Unable to send netlink command to netfilter.
-    #[error(display = "Unable to send netlink command to netfilter")]
-    NetlinkSendError(#[error(source)] io::Error),
+    #[error("Unable to send netlink command to netfilter")]
+    NetlinkSendError(#[source] io::Error),
 
     /// Error while reading from netlink socket.
-    #[error(display = "Error while reading from netlink socket")]
-    NetlinkRecvError(#[error(source)] io::Error),
+    #[error("Error while reading from netlink socket")]
+    NetlinkRecvError(#[source] io::Error),
 
     /// Error while processing an incoming netlink message.
-    #[error(display = "Error while processing an incoming netlink message")]
-    ProcessNetlinkError(#[error(source)] io::Error),
+    #[error("Error while processing an incoming netlink message")]
+    ProcessNetlinkError(#[source] io::Error),
 
     /// Failed to verify that our tables are set. Probably means that
     /// it's the host that does not support nftables properly.
-    #[error(display = "Failed to set firewall rules")]
+    #[error("Failed to set firewall rules")]
     NetfilterTableNotSetError,
 
     /// Unable to translate network interface name into index.
-    #[error(
-        display = "Unable to translate network interface name \"{}\" into index",
-        _0
-    )]
-    LookupIfaceIndexError(String, #[error(source)] crate::linux::IfaceIndexLookupError),
+    #[error("Unable to translate network interface name \"{0}\" into index")]
+    LookupIfaceIndexError(String, #[source] crate::linux::IfaceIndexLookupError),
 }
 
-lazy_static! {
-    /// TODO(linus): This crate is not supposed to be Mullvad-aware. So at some point this should be
-    /// replaced by allowing the table name to be configured from the public API of this crate.
-    static ref TABLE_NAME: CString = CString::new("mullvad").unwrap();
-    static ref IN_CHAIN_NAME: CString = CString::new("input").unwrap();
-    static ref OUT_CHAIN_NAME: CString = CString::new("output").unwrap();
-    static ref FORWARD_CHAIN_NAME: CString = CString::new("forward").unwrap();
-    static ref PREROUTING_CHAIN_NAME: CString = CString::new("prerouting").unwrap();
-    static ref MANGLE_CHAIN_NAME: CString = CString::new("mangle").unwrap();
-    static ref NAT_CHAIN_NAME: CString = CString::new("nat").unwrap();
+/// TODO(linus): This crate is not supposed to be Mullvad-aware. So at some point this should be
+/// replaced by allowing the table name to be configured from the public API of this crate.
+const TABLE_NAME: &CStr = c"mullvad";
+const IN_CHAIN_NAME: &CStr = c"input";
+const OUT_CHAIN_NAME: &CStr = c"output";
+const FORWARD_CHAIN_NAME: &CStr = c"forward";
+const PREROUTING_CHAIN_NAME: &CStr = c"prerouting";
+const MANGLE_CHAIN_NAME: &CStr = c"mangle";
+const NAT_CHAIN_NAME: &CStr = c"nat";
 
-    /// Allows controlling whether firewall rules should have packet counters or not from an env
-    /// variable. Useful for debugging the rules.
-    static ref ADD_COUNTERS: bool = env::var("TALPID_FIREWALL_DEBUG")
+/// Allows controlling whether firewall rules should have packet counters or not from an env
+/// variable. Useful for debugging the rules.
+static ADD_COUNTERS: LazyLock<bool> = LazyLock::new(|| {
+    env::var("TALPID_FIREWALL_DEBUG")
         .map(|v| v != "0")
-        .unwrap_or(false);
+        .unwrap_or(false)
+});
 
-    static ref DONT_SET_SRC_VALID_MARK: bool = env::var("TALPID_FIREWALL_DONT_SET_SRC_VALID_MARK")
+static DONT_SET_SRC_VALID_MARK: LazyLock<bool> = LazyLock::new(|| {
+    env::var("TALPID_FIREWALL_DONT_SET_SRC_VALID_MARK")
         .map(|v| v != "0")
-        .unwrap_or(false);
-}
+        .unwrap_or(false)
+});
+static DONT_SET_ARP_IGNORE: LazyLock<bool> = LazyLock::new(|| {
+    env::var("TALPID_FIREWALL_DONT_SET_ARP_IGNORE")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+});
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 enum Direction {
@@ -105,15 +110,15 @@ impl Firewall {
     }
 
     pub fn apply_policy(&mut self, policy: FirewallPolicy) -> Result<()> {
-        let table = Table::new(&*TABLE_NAME, ProtoFamily::Inet);
+        let table = Table::new(&TABLE_NAME, ProtoFamily::Inet);
         let batch = PolicyBatch::new(&table).finalize(&policy, self.fwmark)?;
         Self::send_and_process(&batch)?;
         Self::apply_kernel_config(&policy);
-        self.verify_tables(&[&TABLE_NAME])
+        self.verify_tables(&[TABLE_NAME])
     }
 
     pub fn reset_policy(&mut self) -> Result<()> {
-        let table = Table::new(&*TABLE_NAME, ProtoFamily::Inet);
+        let table = Table::new(&TABLE_NAME, ProtoFamily::Inet);
         let mut batch = Batch::new();
 
         // Our batch will add and remove the table even though the goal is just to remove
@@ -135,12 +140,27 @@ impl Firewall {
     fn apply_kernel_config(policy: &FirewallPolicy) {
         if *DONT_SET_SRC_VALID_MARK {
             log::debug!("Not setting src_valid_mark");
-            return;
-        }
-
-        if let FirewallPolicy::Connecting { .. } = policy {
+        } else if let FirewallPolicy::Connecting { .. } = policy {
             if let Err(err) = set_src_valid_mark_sysctl() {
                 log::error!("Failed to apply src_valid_mark: {}", err);
+            }
+        }
+
+        // When we have a tunnel with an IP configured, we configure the system
+        // to not reply to arp requests for this tunnel IP *on other interfaces*.
+        // By default, Linux responds to incoming arp requests for any IP configured on any
+        // interface on the system. This makes it possible to via ARP-pinging figure out the
+        // VPN in-tunnel IP by spamming ARP requests to any physical interface on the device.
+        //
+        // We never store the initial value and restore it. We deem the default value
+        // to be too relaxed and don't see any reason why anyone would want a more relaxed
+        // setting than the one we are setting here.
+        if *DONT_SET_ARP_IGNORE {
+            log::debug!("Not setting arp_ignore");
+        } else if let FirewallPolicy::Connecting { .. } | FirewallPolicy::Connected { .. } = policy
+        {
+            if let Err(err) = lock_down_arp_ignore_sysctl() {
+                log::error!("Failed to apply arp_ignore: {}", err);
             }
         }
     }
@@ -236,33 +256,33 @@ impl<'a> PolicyBatch<'a> {
         batch.add(table, nftnl::MsgType::Del);
         batch.add(table, nftnl::MsgType::Add);
 
-        let mut prerouting_chain = Chain::new(&*PREROUTING_CHAIN_NAME, table);
+        let mut prerouting_chain = Chain::new(&PREROUTING_CHAIN_NAME, table);
         prerouting_chain.set_hook(nftnl::Hook::PreRouting, PREROUTING_CHAIN_PRIORITY);
         prerouting_chain.set_type(nftnl::ChainType::Filter);
         batch.add(&prerouting_chain, nftnl::MsgType::Add);
 
-        let mut out_chain = Chain::new(&*OUT_CHAIN_NAME, table);
+        let mut out_chain = Chain::new(&OUT_CHAIN_NAME, table);
         out_chain.set_hook(nftnl::Hook::Out, 0);
         out_chain.set_policy(nftnl::Policy::Drop);
         batch.add(&out_chain, nftnl::MsgType::Add);
 
-        let mut in_chain = Chain::new(&*IN_CHAIN_NAME, table);
+        let mut in_chain = Chain::new(&IN_CHAIN_NAME, table);
         in_chain.set_hook(nftnl::Hook::In, 0);
         in_chain.set_policy(nftnl::Policy::Drop);
         batch.add(&in_chain, nftnl::MsgType::Add);
 
-        let mut forward_chain = Chain::new(&*FORWARD_CHAIN_NAME, table);
+        let mut forward_chain = Chain::new(&FORWARD_CHAIN_NAME, table);
         forward_chain.set_hook(nftnl::Hook::Forward, 0);
         forward_chain.set_policy(nftnl::Policy::Drop);
         batch.add(&forward_chain, nftnl::MsgType::Add);
 
-        let mut mangle_chain = Chain::new(&*MANGLE_CHAIN_NAME, table);
+        let mut mangle_chain = Chain::new(&MANGLE_CHAIN_NAME, table);
         mangle_chain.set_hook(nftnl::Hook::Out, MANGLE_CHAIN_PRIORITY);
         mangle_chain.set_type(nftnl::ChainType::Route);
         mangle_chain.set_policy(nftnl::Policy::Accept);
         batch.add(&mangle_chain, nftnl::MsgType::Add);
 
-        let mut nat_chain = Chain::new(&*NAT_CHAIN_NAME, table);
+        let mut nat_chain = Chain::new(&NAT_CHAIN_NAME, table);
         nat_chain.set_hook(nftnl::Hook::PostRouting, libc::NF_IP_PRI_NAT_SRC);
         nat_chain.set_type(nftnl::ChainType::Nat);
         nat_chain.set_policy(nftnl::Policy::Accept);
@@ -294,15 +314,10 @@ impl<'a> PolicyBatch<'a> {
     fn add_split_tunneling_rules(&mut self, policy: &FirewallPolicy, fwmark: u32) -> Result<()> {
         // Send select DNS requests in the tunnel
         if let FirewallPolicy::Connected {
-            tunnel,
-            dns_servers,
-            ..
+            tunnel, dns_config, ..
         } = policy
         {
-            for server in dns_servers
-                .iter()
-                .filter(|server| !is_local_dns_address(tunnel, server))
-            {
+            for server in dns_config.tunnel_config() {
                 let allow_rule = allow_tunnel_dns_rule(
                     &self.mangle_chain,
                     &tunnel.interface,
@@ -320,16 +335,26 @@ impl<'a> PolicyBatch<'a> {
             }
         }
 
+        // Split tunneled processes have their PIDs added to a net_cls cgroup.
+        // This causes all packets sent by that process to be marked with the
+        // cgroups classid (`NET_CLS_CLASSID`). This rule checks incoming packets for that classid.
+        // If the packet has the classid set then the packet will have two new marks applied to it.
+        // The `split_tunnel::MARK` as a connection tracking mark and the `fwmark` as packet
+        // metadata.
         let mut rule = Rule::new(&self.mangle_chain);
         rule.add_expr(&nft_expr!(meta cgroup));
         rule.add_expr(&nft_expr!(cmp == split_tunnel::NET_CLS_CLASSID));
+        // Loads `split_tunnel::MARK` into first nftnl register
         rule.add_expr(&nft_expr!(immediate data split_tunnel::MARK));
+        // Sets `split_tunnel::MARK` as connection tracker mark
         rule.add_expr(&nft_expr!(ct mark set));
+        // Loads `fwmark` into first nftnl register
         rule.add_expr(&nft_expr!(immediate data fwmark));
+        // Sets `fwmark` as metadata mark for packet
         rule.add_expr(&nft_expr!(meta mark set));
         self.batch.add(&rule, nftnl::MsgType::Add);
 
-        for chain in &[&self.in_chain, &self.out_chain] {
+        for chain in &[&self.in_chain, &self.out_chain, &self.forward_chain] {
             let mut rule = Rule::new(chain);
             rule.add_expr(&nft_expr!(ct mark));
             rule.add_expr(&nft_expr!(cmp == split_tunnel::MARK));
@@ -439,6 +464,9 @@ impl<'a> PolicyBatch<'a> {
     }
 
     fn add_ndp_rules(&mut self) {
+        // The non-0 constants used are icmpv6 transport header types corresponding
+        // to the type of message that each block deals with.
+
         // Outgoing Router solicitation (part of NDP)
         for chain in &[&self.out_chain, &self.forward_chain] {
             let mut rule = Rule::new(chain);
@@ -517,7 +545,7 @@ impl<'a> PolicyBatch<'a> {
                 allowed_tunnel_traffic,
             } => {
                 self.add_allow_tunnel_endpoint_rules(peer_endpoint, fwmark);
-                self.add_allow_endpoint_rules(&allowed_endpoint.endpoint);
+                self.add_allow_endpoint_rules(allowed_endpoint);
 
                 // Important to block DNS after allow relay rule (so the relay can operate
                 // over port 53) but before allow LAN (so DNS does not leak to the LAN)
@@ -547,11 +575,35 @@ impl<'a> PolicyBatch<'a> {
                 peer_endpoint,
                 tunnel,
                 allow_lan,
-                dns_servers,
+                dns_config,
             } => {
                 self.add_allow_tunnel_endpoint_rules(peer_endpoint, fwmark);
-                self.add_allow_dns_rules(tunnel, dns_servers, TransportProtocol::Udp)?;
-                self.add_allow_dns_rules(tunnel, dns_servers, TransportProtocol::Tcp)?;
+
+                for server in dns_config.tunnel_config() {
+                    self.add_allow_tunnel_dns_rule(
+                        &tunnel.interface,
+                        TransportProtocol::Udp,
+                        *server,
+                    )?;
+                    self.add_allow_tunnel_dns_rule(
+                        &tunnel.interface,
+                        TransportProtocol::Tcp,
+                        *server,
+                    )?;
+                }
+                for server in dns_config.non_tunnel_config() {
+                    self.add_allow_local_dns_rule(
+                        &tunnel.interface,
+                        TransportProtocol::Udp,
+                        *server,
+                    )?;
+                    self.add_allow_local_dns_rule(
+                        &tunnel.interface,
+                        TransportProtocol::Tcp,
+                        *server,
+                    )?;
+                }
+
                 // Important to block DNS *before* we allow the tunnel and allow LAN. So DNS
                 // can't leak to the wrong IPs in the tunnel or on the LAN.
                 self.add_drop_dns_rule();
@@ -566,7 +618,7 @@ impl<'a> PolicyBatch<'a> {
                 allowed_endpoint,
             } => {
                 if let Some(endpoint) = allowed_endpoint {
-                    self.add_allow_endpoint_rules(&endpoint.endpoint);
+                    self.add_allow_endpoint_rules(endpoint);
                 }
 
                 // Important to drop DNS before allowing LAN (to stop DNS leaking to the LAN)
@@ -592,9 +644,10 @@ impl<'a> PolicyBatch<'a> {
         Ok(())
     }
 
-    fn add_allow_tunnel_endpoint_rules(&mut self, endpoint: &Endpoint, fwmark: u32) {
+    fn add_allow_tunnel_endpoint_rules(&mut self, endpoint: &AllowedEndpoint, fwmark: u32) {
         let mut prerouting_rule = Rule::new(&self.prerouting_chain);
-        check_endpoint(&mut prerouting_rule, End::Src, endpoint);
+        // Mark incoming traffic from endpoint with fwmark
+        check_endpoint(&mut prerouting_rule, End::Src, &endpoint.endpoint);
         prerouting_rule.add_expr(&nft_expr!(immediate data fwmark));
         prerouting_rule.add_expr(&nft_expr!(meta mark set));
 
@@ -605,69 +658,70 @@ impl<'a> PolicyBatch<'a> {
         self.batch.add(&prerouting_rule, nftnl::MsgType::Add);
 
         let mut in_rule = Rule::new(&self.in_chain);
-        check_endpoint(&mut in_rule, End::Src, endpoint);
+        check_endpoint(&mut in_rule, End::Src, &endpoint.endpoint);
 
-        in_rule.add_expr(&nft_expr!(ct state));
+        // Allow all incoming traffic from established connections to the endpoint
         let allowed_states = nftnl::expr::ct::States::ESTABLISHED.bits();
+        // bitwise mask will bitwise-and the allowed_states and the ct state. It will then xor it
+        // will 0 (which changes nothing). This means it works as a bitwise-and which checks that
+        // the ESTABLISHED bit is set in the connection state.
+        in_rule.add_expr(&nft_expr!(ct state));
         in_rule.add_expr(&nft_expr!(bitwise mask allowed_states, xor 0u32));
         in_rule.add_expr(&nft_expr!(cmp != 0u32));
         add_verdict(&mut in_rule, &Verdict::Accept);
 
         self.batch.add(&in_rule, nftnl::MsgType::Add);
 
+        // Allow any traffic to the endpoint which is marked with fwmark
         let mut out_rule = Rule::new(&self.out_chain);
-        check_endpoint(&mut out_rule, End::Dst, endpoint);
+        check_endpoint(&mut out_rule, End::Dst, &endpoint.endpoint);
         out_rule.add_expr(&nft_expr!(meta mark));
         out_rule.add_expr(&nft_expr!(cmp == fwmark));
         add_verdict(&mut out_rule, &Verdict::Accept);
 
         self.batch.add(&out_rule, nftnl::MsgType::Add);
+
+        // Used for local custom bridge, allows some local socks5 proxy to send traffic to the
+        // endpoint
+        if endpoint.clients.allow_all() {
+            let mut rule = Rule::new(&self.mangle_chain);
+            check_endpoint(&mut rule, End::Dst, &endpoint.endpoint);
+            rule.add_expr(&nft_expr!(immediate data split_tunnel::MARK));
+            rule.add_expr(&nft_expr!(ct mark set));
+            rule.add_expr(&nft_expr!(immediate data fwmark));
+            rule.add_expr(&nft_expr!(meta mark set));
+            self.batch.add(&rule, nftnl::MsgType::Add);
+        }
     }
 
     /// Adds firewall rules allow traffic to flow to the API. Allows the app to reach the API in
     /// blocked states.
-    fn add_allow_endpoint_rules(&mut self, endpoint: &Endpoint) {
+    fn add_allow_endpoint_rules(&mut self, endpoint: &AllowedEndpoint) {
         let mut in_rule = Rule::new(&self.in_chain);
-        check_endpoint(&mut in_rule, End::Src, endpoint);
+        // Allow incoming traffic from established connections to the endpoint
+        check_endpoint(&mut in_rule, End::Src, &endpoint.endpoint);
         let allowed_states = nftnl::expr::ct::States::ESTABLISHED.bits();
         in_rule.add_expr(&nft_expr!(ct state));
         in_rule.add_expr(&nft_expr!(bitwise mask allowed_states, xor 0u32));
         in_rule.add_expr(&nft_expr!(cmp != 0u32));
-        in_rule.add_expr(&nft_expr!(meta skuid));
-        in_rule.add_expr(&nft_expr!(cmp == super::ROOT_UID));
+        if !endpoint.clients.allow_all() {
+            in_rule.add_expr(&nft_expr!(meta skuid));
+            in_rule.add_expr(&nft_expr!(cmp == super::ROOT_UID));
+        }
 
         add_verdict(&mut in_rule, &Verdict::Accept);
 
         self.batch.add(&in_rule, nftnl::MsgType::Add);
 
         let mut out_rule = Rule::new(&self.out_chain);
-        check_endpoint(&mut out_rule, End::Dst, endpoint);
-        out_rule.add_expr(&nft_expr!(meta skuid));
-        out_rule.add_expr(&nft_expr!(cmp == super::ROOT_UID));
+        check_endpoint(&mut out_rule, End::Dst, &endpoint.endpoint);
+        if !endpoint.clients.allow_all() {
+            out_rule.add_expr(&nft_expr!(meta skuid));
+            out_rule.add_expr(&nft_expr!(cmp == super::ROOT_UID));
+        }
         add_verdict(&mut out_rule, &Verdict::Accept);
 
         self.batch.add(&out_rule, nftnl::MsgType::Add);
-    }
-
-    fn add_allow_dns_rules(
-        &mut self,
-        tunnel: &tunnel::TunnelMetadata,
-        dns_servers: &[IpAddr],
-        protocol: TransportProtocol,
-    ) -> Result<()> {
-        let (local_resolvers, remote_resolvers): (Vec<IpAddr>, Vec<IpAddr>) = dns_servers
-            .iter()
-            .partition(|server| is_local_dns_address(tunnel, server));
-
-        for resolver in &local_resolvers {
-            self.add_allow_local_dns_rule(&tunnel.interface, protocol, *resolver)?;
-        }
-
-        for resolver in &remote_resolvers {
-            self.add_allow_tunnel_dns_rule(&tunnel.interface, protocol, *resolver)?;
-        }
-
-        Ok(())
     }
 
     fn add_allow_tunnel_dns_rule(
@@ -775,6 +829,8 @@ impl<'a> PolicyBatch<'a> {
             nftnl::MsgType::Add,
         );
 
+        // Forward packets coming from the tunnel interface only if they are from established
+        // connections.
         let mut interface_rule = Rule::new(&self.forward_chain);
         check_iface(&mut interface_rule, Direction::In, tunnel_interface)?;
         interface_rule.add_expr(&nft_expr!(ct state));
@@ -805,7 +861,7 @@ impl<'a> PolicyBatch<'a> {
         // Output and forward chains
         for chain in &[&self.out_chain, &self.forward_chain] {
             // LAN -> LAN
-            for net in &*super::ALLOWED_LAN_NETS {
+            for net in &*ALLOWED_LAN_NETS {
                 let mut out_rule = Rule::new(chain);
                 check_net(&mut out_rule, End::Dst, *net);
                 add_verdict(&mut out_rule, &Verdict::Accept);
@@ -813,7 +869,7 @@ impl<'a> PolicyBatch<'a> {
             }
 
             // LAN -> Multicast
-            for net in &*super::ALLOWED_LAN_MULTICAST_NETS {
+            for net in &*ALLOWED_LAN_MULTICAST_NETS {
                 let mut rule = Rule::new(chain);
                 check_net(&mut rule, End::Dst, *net);
                 add_verdict(&mut rule, &Verdict::Accept);
@@ -823,7 +879,7 @@ impl<'a> PolicyBatch<'a> {
 
         // Input chain
         // LAN -> LAN
-        for net in &*super::ALLOWED_LAN_NETS {
+        for net in &*ALLOWED_LAN_NETS {
             let mut in_rule = Rule::new(&self.in_chain);
             check_net(&mut in_rule, End::Src, *net);
             add_verdict(&mut in_rule, &Verdict::Accept);
@@ -855,12 +911,6 @@ impl<'a> PolicyBatch<'a> {
             self.batch.add(&in_v4, nftnl::MsgType::Add);
         }
     }
-}
-
-fn is_local_dns_address(tunnel: &tunnel::TunnelMetadata, server: &IpAddr) -> bool {
-    super::is_local_address(server)
-        && server != &tunnel.ipv4_gateway
-        && Some(server) != tunnel.ipv6_gateway.map(IpAddr::from).as_ref()
 }
 
 fn allow_tunnel_dns_rule<'a>(
@@ -933,6 +983,7 @@ fn check_net(rule: &mut Rule<'_>, end: End, net: impl Into<IpNetwork>) {
         (IpNetwork::V6(_), End::Src) => nft_expr!(payload ipv6 saddr),
         (IpNetwork::V6(_), End::Dst) => nft_expr!(payload ipv6 daddr),
     });
+    // Check that packet subnet is the same as `net`
     match net {
         IpNetwork::V4(_) => rule.add_expr(&nft_expr!(bitwise mask net.mask(), xor 0u32)),
         IpNetwork::V6(_) => rule.add_expr(&nft_expr!(bitwise mask net.mask(), xor &[0u16; 8][..])),
@@ -1024,16 +1075,30 @@ fn set_src_valid_mark_sysctl() -> io::Result<()> {
     fs::write(PROC_SYS_NET_IPV4_CONF_SRC_VALID_MARK, b"1")
 }
 
+/// If the `net.ipv4.conf.all.arp_ignore` setting is below 2, sets it to 2.
+///
+/// 2 means: reply only if the target IP address is local address configured on the incoming
+/// interface and both with the sender's IP address are part from same subnet on this interface.
+fn lock_down_arp_ignore_sysctl() -> io::Result<()> {
+    // Should be safe to treat the content as a string, since it should always be a number.
+    let current_arp_ignore = fs::read_to_string(PROC_SYS_NET_IPV4_CONF_ARP_IGNORE)?;
+    match current_arp_ignore.trim() {
+        "0" | "1" => fs::write(PROC_SYS_NET_IPV4_CONF_ARP_IGNORE, b"2")?,
+        "2" => (),
+        _ => log::trace!("Not locking down arp_ignore since it is set to {current_arp_ignore}"),
+    }
+    Ok(())
+}
+
 /// Tables that are no longer used but need to be deleted due to upgrades.
 /// This can be removed when upgrades from 2023.3 are no longer supported.
 fn batch_deprecated_tables(batch: &mut Batch) {
-    lazy_static! {
-        static ref MANGLE_TABLE_NAME_V4: CString = CString::new("mullvadmangle4").unwrap();
-        static ref MANGLE_TABLE_NAME_V6: CString = CString::new("mullvadmangle6").unwrap();
-    }
+    const MANGLE_TABLE_NAME_V4: &CStr = c"mullvadmangle4";
+    const MANGLE_TABLE_NAME_V6: &CStr = c"mullvadmangle6";
+
     let tables = [
-        Table::new(&*MANGLE_TABLE_NAME_V4, ProtoFamily::Ipv4),
-        Table::new(&*MANGLE_TABLE_NAME_V6, ProtoFamily::Ipv6),
+        Table::new(&MANGLE_TABLE_NAME_V4, ProtoFamily::Ipv4),
+        Table::new(&MANGLE_TABLE_NAME_V6, ProtoFamily::Ipv6),
     ];
     for table in &tables {
         batch.add(table, nftnl::MsgType::Add);

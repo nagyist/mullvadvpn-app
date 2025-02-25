@@ -1,11 +1,12 @@
 use super::{Error, Result};
-use mullvad_types::{relay_constraints::Constraint, settings::SettingsVersion};
+use mullvad_types::{constraints::Constraint, settings::SettingsVersion};
+use serde::{Deserialize, Serialize};
 
 // ======================================================
 // Section for vendoring types and values that
 // this settings version depend on. See `mod.rs`.
 
-pub type AccountToken = String;
+pub type AccountNumber = String;
 
 /// Representation of a transport protocol, either UDP or TCP.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,7 +50,7 @@ pub enum SelectedObfuscation {
 // ======================================================
 
 pub struct MigrationData {
-    pub token: AccountToken,
+    pub token: AccountNumber,
     pub wg_data: Option<serde_json::Value>,
 }
 
@@ -119,7 +120,7 @@ pub fn migrate(settings: &mut serde_json::Value) -> Result<Option<MigrationData>
 
     let migration_data = if let Some(token) = settings.get("account_token").filter(|t| !t.is_null())
     {
-        let token: AccountToken =
+        let token: AccountNumber =
             serde_json::from_value(token.clone()).map_err(|_| Error::InvalidSettingsContent)?;
         let migration_data =
             if let Some(wg_data) = settings.get("wireguard").filter(|wg| !wg.is_null()) {
@@ -170,7 +171,7 @@ fn create_migrated_obfuscation_settings(port: Constraint<u16>) -> ObfuscationSet
     }
 }
 
-fn version_matches(settings: &mut serde_json::Value) -> bool {
+fn version_matches(settings: &serde_json::Value) -> bool {
     settings
         .get("settings_version")
         .map(|version| version == SettingsVersion::V5 as u64)
@@ -334,7 +335,7 @@ mod test {
     async fn test_v5_to_v6_migration() {
         let mut old_settings = serde_json::from_str(V5_SETTINGS).unwrap();
 
-        assert!(version_matches(&mut old_settings));
+        assert!(version_matches(&old_settings));
         migrate(&mut old_settings).unwrap();
         let new_settings: serde_json::Value = serde_json::from_str(V6_SETTINGS).unwrap();
 

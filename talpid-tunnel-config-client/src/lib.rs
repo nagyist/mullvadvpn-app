@@ -1,39 +1,34 @@
-use std::{
-    fmt,
-    net::{IpAddr, SocketAddr},
-};
+use proto::PostQuantumRequestV1;
+use std::fmt;
+#[cfg(not(target_os = "ios"))]
+use std::net::SocketAddr;
+#[cfg(not(target_os = "ios"))]
+use std::net::{IpAddr, Ipv4Addr};
 use talpid_types::net::wireguard::{PresharedKey, PublicKey};
-use tokio::net::TcpSocket;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
+#[cfg(not(target_os = "ios"))]
+use tonic::transport::Endpoint;
+#[cfg(not(target_os = "ios"))]
 use tower::service_fn;
 use zeroize::Zeroize;
 
-mod classic_mceliece;
-mod kyber;
+pub mod classic_mceliece;
+mod ml_kem;
+#[cfg(not(target_os = "ios"))]
+mod socket;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 mod proto {
-    tonic::include_proto!("tunnel_config");
+    tonic::include_proto!("ephemeralpeer");
 }
 
-use libc::setsockopt;
-
-#[cfg(not(target_os = "windows"))]
-mod sys {
-    pub use libc::{socklen_t, IPPROTO_TCP, TCP_MAXSEG};
-    pub use std::os::fd::{AsRawFd, RawFd};
-}
-#[cfg(target_os = "windows")]
-mod sys {
-    pub use std::os::windows::io::{AsRawSocket, RawSocket};
-    pub use windows_sys::Win32::Networking::WinSock::{IPPROTO_IP, IPPROTO_TCP, IP_USER_MTU};
-}
-use sys::*;
+const DAITA_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum Error {
     GrpcConnectError(tonic::transport::Error),
     GrpcError(tonic::Status),
+    MissingCiphertexts,
     InvalidCiphertextLength {
         algorithm: &'static str,
         actual: usize,
@@ -42,15 +37,20 @@ pub enum Error {
     InvalidCiphertextCount {
         actual: usize,
     },
-    FailedDecapsulateKyber(kyber::KyberError),
+    MissingDaitaResponse,
+    #[cfg(target_os = "ios")]
+    TcpConnectionOpen,
+    #[cfg(target_os = "ios")]
+    UnableToCreateRuntime,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Error::*;
         match self {
-            GrpcConnectError(_) => "Failed to connect to config service".fmt(f),
+            GrpcConnectError(err) => write!(f, "Failed to connect to config service: {err:?}"),
             GrpcError(status) => write!(f, "RPC failed: {status}"),
+            MissingCiphertexts => write!(f, "Found no ciphertexts in response"),
             InvalidCiphertextLength {
                 algorithm,
                 actual,
@@ -62,7 +62,11 @@ impl std::fmt::Display for Error {
             InvalidCiphertextCount { actual } => {
                 write!(f, "Expected 2 ciphertext in the response, got {actual}")
             }
-            FailedDecapsulateKyber(_) => "Failed to decapsulate Kyber1024 ciphertext".fmt(f),
+            MissingDaitaResponse => "Expected DAITA configuration in response".fmt(f),
+            #[cfg(target_os = "ios")]
+            TcpConnectionOpen => "Failed to open TCP connection".fmt(f),
+            #[cfg(target_os = "ios")]
+            UnableToCreateRuntime => "Unable to create iOS PQ PSK runtime".fmt(f),
         }
     }
 }
@@ -71,92 +75,180 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::GrpcConnectError(error) => Some(error),
-            Self::FailedDecapsulateKyber(error) => Some(error),
             _ => None,
         }
     }
 }
 
-type RelayConfigService = proto::post_quantum_secure_client::PostQuantumSecureClient<Channel>;
+pub type RelayConfigService = proto::ephemeral_peer_client::EphemeralPeerClient<Channel>;
 
 /// Port used by the tunnel config service.
 pub const CONFIG_SERVICE_PORT: u16 = 1337;
 
-/// Generates a new WireGuard key pair and negotiates a PSK with the relay in a PQ-safe
-/// manner. This creates a peer on the relay with the new WireGuard pubkey and PSK,
-/// which can then be used to establish a PQ-safe tunnel to the relay.
-// TODO: consider binding to the tunnel interface here, on non-windows platforms
-pub async fn push_pq_key(
-    service_address: IpAddr,
-    wg_pubkey: PublicKey,
-    wg_psk_pubkey: PublicKey,
-) -> Result<PresharedKey, Error> {
-    push_pq_key_with_opts(service_address, wg_pubkey, wg_psk_pubkey, None).await
+pub struct EphemeralPeer {
+    pub psk: Option<PresharedKey>,
+    pub daita: Option<DaitaSettings>,
 }
 
-pub async fn push_pq_key_with_opts(
-    service_address: IpAddr,
-    wg_pubkey: PublicKey,
-    wg_psk_pubkey: PublicKey,
-    mtu: Option<u16>,
-) -> Result<PresharedKey, Error> {
-    let (cme_kem_pubkey, cme_kem_secret) = classic_mceliece::generate_keys().await;
-    let kyber_keypair = kyber::keypair(&mut rand::thread_rng());
+pub struct DaitaSettings {
+    pub client_machines: Vec<String>,
+    pub max_padding_frac: f64,
+    pub max_blocking_frac: f64,
+}
 
-    let mut client = new_client(service_address, mtu).await?;
+/// Negotiate a short-lived peer with a PQ-safe PSK or with DAITA enabled.
+#[cfg(not(target_os = "ios"))]
+pub async fn request_ephemeral_peer(
+    service_address: Ipv4Addr,
+    parent_pubkey: PublicKey,
+    ephemeral_pubkey: PublicKey,
+    enable_post_quantum: bool,
+    enable_daita: bool,
+) -> Result<EphemeralPeer, Error> {
+    log::debug!("Connecting to relay config service at {service_address}");
+    let client = connect_relay_config_client(service_address).await?;
+    log::debug!("Connected to relay config service at {service_address}");
+
+    request_ephemeral_peer_with(
+        client,
+        parent_pubkey,
+        ephemeral_pubkey,
+        enable_post_quantum,
+        enable_daita,
+    )
+    .await
+}
+
+pub async fn request_ephemeral_peer_with(
+    mut client: RelayConfigService,
+    parent_pubkey: PublicKey,
+    ephemeral_pubkey: PublicKey,
+    enable_quantum_resistant: bool,
+    enable_daita: bool,
+) -> Result<EphemeralPeer, Error> {
+    let (pq_request, kem_secrets) = if enable_quantum_resistant {
+        let (pq_request, kem_secrets) = post_quantum_secrets().await;
+        log::debug!("Generated PQ secrets");
+        (Some(pq_request), Some(kem_secrets))
+    } else {
+        (None, None)
+    };
+
     let response = client
-        .psk_exchange_v1(proto::PskRequestV1 {
-            wg_pubkey: wg_pubkey.as_bytes().to_vec(),
-            wg_psk_pubkey: wg_psk_pubkey.as_bytes().to_vec(),
+        .register_peer_v1(proto::EphemeralPeerRequestV1 {
+            wg_parent_pubkey: parent_pubkey.as_bytes().to_vec(),
+            wg_ephemeral_peer_pubkey: ephemeral_pubkey.as_bytes().to_vec(),
+            post_quantum: pq_request,
+            daita: None,
+            daita_v2: enable_daita.then(|| {
+                let platform = get_platform();
+                log::trace!("DAITA v2 platform: {platform:?}");
+                proto::DaitaRequestV2 {
+                    level: i32::from(proto::DaitaLevel::LevelDefault),
+                    platform: i32::from(platform),
+                    version: DAITA_VERSION,
+                }
+            }),
+        })
+        .await
+        .map_err(Error::GrpcError)?;
+
+    let response = response.into_inner();
+
+    let psk = if let Some((cme_kem_secret, ml_kem_secret)) = kem_secrets {
+        let ciphertexts = response
+            .post_quantum
+            .ok_or(Error::MissingCiphertexts)?
+            .ciphertexts;
+
+        // Unpack the ciphertexts into one per KEM without needing to access them by index.
+        let [cme_ciphertext, ml_kem_ciphertext] = <&[Vec<u8>; 2]>::try_from(ciphertexts.as_slice())
+            .map_err(|_| Error::InvalidCiphertextCount {
+                actual: ciphertexts.len(),
+            })?;
+
+        // Store the PSK data on the heap. So it can be passed around and then zeroized on drop
+        // without being stored in a bunch of places on the stack.
+        let mut psk_data = Box::new([0u8; 32]);
+
+        // Decapsulate Classic McEliece and mix into PSK
+        {
+            let mut shared_secret = classic_mceliece::decapsulate(&cme_kem_secret, cme_ciphertext)?;
+            xor_assign(&mut psk_data, shared_secret.as_array());
+
+            // This should happen automatically due to `SharedSecret` implementing ZeroizeOnDrop.
+            // But doing it explicitly provides a stronger guarantee that it's not
+            // accidentally removed.
+            shared_secret.zeroize();
+        }
+        // Decapsulate ML-KEM and mix into PSK
+        {
+            let mut shared_secret = ml_kem_secret.decapsulate(ml_kem_ciphertext)?;
+            xor_assign(&mut psk_data, &shared_secret);
+
+            // The shared secret is sadly stored in an array on the stack. So we can't get any
+            // guarantees that it's not copied around on the stack. The best we can do here
+            // is to zero out the version we have and hope the compiler optimizes out copies.
+            // https://github.com/Argyle-Software/kyber/issues/59
+            shared_secret.zeroize();
+        }
+
+        Some(PresharedKey::from(psk_data))
+    } else {
+        None
+    };
+
+    let daita = response.daita.map(|daita| DaitaSettings {
+        client_machines: daita.client_machines,
+        max_padding_frac: daita.max_padding_frac,
+        max_blocking_frac: daita.max_blocking_frac,
+    });
+    if daita.is_none() && enable_daita {
+        return Err(Error::MissingDaitaResponse);
+    }
+    Ok(EphemeralPeer { psk, daita })
+}
+
+const fn get_platform() -> proto::DaitaPlatform {
+    use proto::DaitaPlatform;
+    const PLATFORM: DaitaPlatform = if cfg!(target_os = "windows") {
+        DaitaPlatform::WindowsWgGo
+    } else if cfg!(target_os = "linux") {
+        DaitaPlatform::LinuxWgGo
+    } else if cfg!(target_os = "macos") {
+        DaitaPlatform::MacosWgGo
+    } else if cfg!(target_os = "android") {
+        DaitaPlatform::AndroidWgGo
+    } else if cfg!(target_os = "ios") {
+        DaitaPlatform::IosWgGo
+    } else {
+        panic!("This platform does not support DAITA V2")
+    };
+    PLATFORM
+}
+
+async fn post_quantum_secrets() -> (
+    PostQuantumRequestV1,
+    (classic_mceliece_rust::SecretKey<'static>, ml_kem::Keypair),
+) {
+    let (cme_kem_pubkey, cme_kem_secret) = classic_mceliece::generate_keys().await;
+    let ml_kem_keypair = ml_kem::keypair();
+
+    (
+        proto::PostQuantumRequestV1 {
             kem_pubkeys: vec![
                 proto::KemPubkeyV1 {
                     algorithm_name: classic_mceliece::ALGORITHM_NAME.to_owned(),
                     key_data: cme_kem_pubkey.as_array().to_vec(),
                 },
                 proto::KemPubkeyV1 {
-                    algorithm_name: kyber::ALGORITHM_NAME.to_owned(),
-                    key_data: kyber_keypair.public.to_vec(),
+                    algorithm_name: ml_kem::ALGORITHM_NAME.to_owned(),
+                    key_data: ml_kem_keypair.encapsulation_key(),
                 },
             ],
-        })
-        .await
-        .map_err(Error::GrpcError)?;
-
-    let ciphertexts = response.into_inner().ciphertexts;
-
-    // Unpack the ciphertexts into one per KEM without needing to access them by index.
-    let [cme_ciphertext, kyber_ciphertext] = <&[Vec<u8>; 2]>::try_from(ciphertexts.as_slice())
-        .map_err(|_| Error::InvalidCiphertextCount {
-            actual: ciphertexts.len(),
-        })?;
-
-    // Store the PSK data on the heap. So it can be passed around and then zeroized on drop without
-    // being stored in a bunch of places on the stack.
-    let mut psk_data = Box::new([0u8; 32]);
-
-    // Decapsulate Classic McEliece and mix into PSK
-    {
-        let mut shared_secret = classic_mceliece::decapsulate(&cme_kem_secret, cme_ciphertext)?;
-        xor_assign(&mut psk_data, shared_secret.as_array());
-
-        // This should happen automatically due to `SharedSecret` implementing ZeroizeOnDrop. But
-        // doing it explicitly provides a stronger guarantee that it's not accidentally
-        // removed.
-        shared_secret.zeroize();
-    }
-    // Decapsulate Kyber and mix into PSK
-    {
-        let mut shared_secret = kyber::decapsulate(kyber_keypair.secret, kyber_ciphertext)?;
-        xor_assign(&mut psk_data, &shared_secret);
-
-        // The shared secret is sadly stored in an array on the stack. So we can't get any
-        // guarantees that it's not copied around on the stack. The best we can do here
-        // is to zero out the version we have and hope the compiler optimizes out copies.
-        // https://github.com/Argyle-Software/kyber/issues/59
-        shared_secret.zeroize();
-    }
-
-    Ok(PresharedKey::from(psk_data))
+        },
+        (cme_kem_secret, ml_kem_keypair),
+    )
 }
 
 /// Performs `dst = dst ^ src`.
@@ -166,83 +258,97 @@ fn xor_assign(dst: &mut [u8; 32], src: &[u8; 32]) {
     }
 }
 
-async fn new_client(addr: IpAddr, mtu: Option<u16>) -> Result<RelayConfigService, Error> {
+/// Create a new `RelayConfigService` connected to the given IP.
+/// On non-Windows platforms the connection is made with a socket where the MSS
+/// value has been speficically lowered, to avoid MTU issues. See the `socket` module.
+#[cfg(not(target_os = "ios"))]
+async fn connect_relay_config_client(ip: Ipv4Addr) -> Result<RelayConfigService, Error> {
+    use hyper_util::rt::tokio::TokioIo;
+
     let endpoint = Endpoint::from_static("tcp://0.0.0.0:0");
+    let addr = SocketAddr::new(IpAddr::V4(ip), CONFIG_SERVICE_PORT);
 
-    let conn = endpoint
+    let connection = endpoint
         .connect_with_connector(service_fn(move |_| async move {
-            let sock = TcpSocket::new_v4()?;
-
-            if let Some(mtu) = mtu {
-                #[cfg(target_os = "windows")]
-                try_set_tcp_sock_mtu(sock.as_raw_socket(), mtu);
-
-                #[cfg(not(target_os = "windows"))]
-                try_set_tcp_sock_mtu(&addr, sock.as_raw_fd(), mtu);
-            }
-
-            sock.connect(SocketAddr::new(addr, CONFIG_SERVICE_PORT))
-                .await
+            let sock = socket::TcpSocket::new()?;
+            let stream = sock.connect(addr).await?;
+            let sniffer = socket_sniffer::SocketSniffer {
+                s: stream,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                start_time: std::time::Instant::now(),
+            };
+            Ok::<_, std::io::Error>(TokioIo::new(sniffer))
         }))
         .await
         .map_err(Error::GrpcConnectError)?;
 
-    Ok(RelayConfigService::new(conn))
+    Ok(RelayConfigService::new(connection))
 }
 
-#[cfg(windows)]
-fn try_set_tcp_sock_mtu(sock: RawSocket, mtu: u16) {
-    let mtu = u32::from(mtu);
-    log::debug!("Config client socket MTU: {mtu}");
-
-    let raw_sock = usize::try_from(sock).unwrap();
-
-    let result = unsafe {
-        setsockopt(
-            raw_sock,
-            IPPROTO_IP as i32,
-            IP_USER_MTU as i32,
-            &mtu as *const _ as _,
-            std::ffi::c_int::try_from(std::mem::size_of_val(&mtu)).unwrap(),
-        )
-    };
-    if result != 0 {
-        log::error!(
-            "Failed to set user MTU on config client socket: {}",
-            std::io::Error::last_os_error()
-        );
+mod socket_sniffer {
+    pub struct SocketSniffer<S> {
+        pub s: S,
+        pub rx_bytes: usize,
+        pub tx_bytes: usize,
+        pub start_time: std::time::Instant,
     }
-}
+    use std::{
+        io,
+        pin::Pin,
+        task::{Context, Poll},
+    };
 
-#[cfg(not(windows))]
-fn try_set_tcp_sock_mtu(dest: &IpAddr, sock: RawFd, mut mtu: u16) {
-    const IPV4_HEADER_SIZE: u16 = 20;
-    const IPV6_HEADER_SIZE: u16 = 40;
-    const MAX_TCP_HEADER_SIZE: u16 = 60;
+    use tokio::io::AsyncWrite;
 
-    if dest.is_ipv4() {
-        mtu = mtu.saturating_sub(IPV4_HEADER_SIZE);
-    } else {
-        mtu = mtu.saturating_sub(IPV6_HEADER_SIZE);
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    impl<S> Drop for SocketSniffer<S> {
+        fn drop(&mut self) {
+            let duration = self.start_time.elapsed();
+            log::debug!(
+                "Tunnel config client connection ended. RX: {} bytes, TX: {} bytes, duration: {} s",
+                self.rx_bytes,
+                self.tx_bytes,
+                duration.as_secs()
+            );
+        }
     }
 
-    let mss = u32::from(mtu.saturating_sub(MAX_TCP_HEADER_SIZE));
+    impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for SocketSniffer<S> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let initial_data = buf.filled().len();
+            let bytes = std::task::ready!(Pin::new(&mut self.s).poll_read(cx, buf));
+            if bytes.is_ok() {
+                self.rx_bytes += buf.filled().len().saturating_sub(initial_data);
+            }
+            Poll::Ready(bytes)
+        }
+    }
 
-    log::debug!("Config client socket MSS: {mss}");
+    impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for SocketSniffer<S> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let bytes = std::task::ready!(Pin::new(&mut self.s).poll_write(cx, buf));
+            if let Ok(bytes) = bytes {
+                self.tx_bytes += bytes;
+            }
+            Poll::Ready(bytes)
+        }
 
-    let result = unsafe {
-        setsockopt(
-            sock,
-            IPPROTO_TCP,
-            TCP_MAXSEG,
-            &mss as *const _ as _,
-            socklen_t::try_from(std::mem::size_of_val(&mss)).unwrap(),
-        )
-    };
-    if result != 0 {
-        log::error!(
-            "Failed to set MSS on config client socket: {}",
-            std::io::Error::last_os_error()
-        );
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.s).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.s).poll_shutdown(cx)
+        }
     }
 }

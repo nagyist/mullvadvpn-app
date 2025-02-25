@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use http::{Method, StatusCode};
+use http::StatusCode;
 use mullvad_types::{
-    account::AccountToken,
-    device::{Device, DeviceId, DeviceName, DevicePort},
+    account::AccountNumber,
+    device::{Device, DeviceId, DeviceName},
 };
 use std::future::Future;
 use talpid_types::net::wireguard;
@@ -23,7 +23,6 @@ struct DeviceResponse {
     pubkey: wireguard::PublicKey,
     ipv4_address: ipnetwork::Ipv4Network,
     ipv6_address: ipnetwork::Ipv6Network,
-    ports: Vec<DevicePort>,
     hijack_dns: bool,
     created: DateTime<Utc>,
 }
@@ -35,10 +34,11 @@ impl DevicesProxy {
 
     pub fn create(
         &self,
-        account: AccountToken,
+        account: AccountNumber,
         pubkey: wireguard::PublicKey,
-    ) -> impl Future<Output = Result<(Device, mullvad_types::wireguard::AssociatedAddresses), rest::Error>>
-    {
+    ) -> impl Future<
+        Output = Result<(Device, mullvad_types::wireguard::AssociatedAddresses), rest::Error>,
+    > + use<> {
         #[derive(serde::Serialize)]
         struct DeviceSubmission {
             pubkey: wireguard::PublicKey,
@@ -52,39 +52,29 @@ impl DevicesProxy {
 
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
 
         async move {
-            let response = rest::send_json_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/devices"),
-                Method::POST,
-                &submission,
-                Some((access_proxy, account)),
-                &[StatusCode::CREATED],
-            )
-            .await;
-
-            let response: DeviceResponse = rest::deserialize_body(response?).await?;
+            let request = factory
+                .post_json(&format!("{ACCOUNTS_URL_PREFIX}/devices"), &submission)?
+                .account(account)?
+                .expected_status(&[StatusCode::CREATED]);
+            let response = service.request(request).await?;
             let DeviceResponse {
                 id,
                 name,
                 pubkey,
                 ipv4_address,
                 ipv6_address,
-                ports,
                 hijack_dns,
                 created,
                 ..
-            } = response;
+            } = response.deserialize().await?;
 
             Ok((
                 Device {
                     id,
                     name,
                     pubkey,
-                    ports,
                     hijack_dns,
                     created,
                 },
@@ -98,77 +88,58 @@ impl DevicesProxy {
 
     pub fn get(
         &self,
-        account: AccountToken,
+        account: AccountNumber,
         id: DeviceId,
-    ) -> impl Future<Output = Result<Device, rest::Error>> {
+    ) -> impl Future<Output = Result<Device, rest::Error>> + use<> {
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
         async move {
-            let response = rest::send_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/devices/{id}"),
-                Method::GET,
-                Some((access_proxy, account)),
-                &[StatusCode::OK],
-            )
-            .await;
-            rest::deserialize_body(response?).await
+            let request = factory
+                .get(&format!("{ACCOUNTS_URL_PREFIX}/devices/{id}"))?
+                .expected_status(&[StatusCode::OK])
+                .account(account)?;
+            service.request(request).await?.deserialize().await
         }
     }
 
     pub fn list(
         &self,
-        account: AccountToken,
-    ) -> impl Future<Output = Result<Vec<Device>, rest::Error>> {
+        account: AccountNumber,
+    ) -> impl Future<Output = Result<Vec<Device>, rest::Error>> + use<> {
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
         async move {
-            let response = rest::send_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/devices"),
-                Method::GET,
-                Some((access_proxy, account)),
-                &[StatusCode::OK],
-            )
-            .await;
-            rest::deserialize_body(response?).await
+            let request = factory
+                .get(&format!("{ACCOUNTS_URL_PREFIX}/devices"))?
+                .expected_status(&[StatusCode::OK])
+                .account(account)?;
+            service.request(request).await?.deserialize().await
         }
     }
 
     pub fn remove(
         &self,
-        account: AccountToken,
+        account: AccountNumber,
         id: DeviceId,
-    ) -> impl Future<Output = Result<(), rest::Error>> {
+    ) -> impl Future<Output = Result<(), rest::Error>> + use<> {
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
         async move {
-            let response = rest::send_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/devices/{id}"),
-                Method::DELETE,
-                Some((access_proxy, account)),
-                &[StatusCode::NO_CONTENT],
-            )
-            .await;
-
-            response?;
+            let request = factory
+                .delete(&format!("{ACCOUNTS_URL_PREFIX}/devices/{id}"))?
+                .expected_status(&[StatusCode::NO_CONTENT])
+                .account(account)?;
+            service.request(request).await?;
             Ok(())
         }
     }
 
     pub fn replace_wg_key(
         &self,
-        account: AccountToken,
+        account: AccountNumber,
         id: DeviceId,
         pubkey: wireguard::PublicKey,
-    ) -> impl Future<Output = Result<mullvad_types::wireguard::AssociatedAddresses, rest::Error>>
+    ) -> impl Future<Output = Result<mullvad_types::wireguard::AssociatedAddresses, rest::Error>> + use<>
     {
         #[derive(serde::Serialize)]
         struct RotateDevicePubkey {
@@ -178,26 +149,21 @@ impl DevicesProxy {
 
         let service = self.handle.service.clone();
         let factory = self.handle.factory.clone();
-        let access_proxy = self.handle.token_store.clone();
 
         async move {
-            let response = rest::send_json_request(
-                &factory,
-                service,
-                &format!("{ACCOUNTS_URL_PREFIX}/devices/{id}/pubkey"),
-                Method::PUT,
-                &req_body,
-                Some((access_proxy, account)),
-                &[StatusCode::OK],
-            )
-            .await;
-
-            let updated_device: DeviceResponse = rest::deserialize_body(response?).await?;
+            let request = factory
+                .put_json(
+                    &format!("{ACCOUNTS_URL_PREFIX}/devices/{id}/pubkey"),
+                    &req_body,
+                )?
+                .expected_status(&[StatusCode::OK])
+                .account(account)?;
+            let response = service.request(request).await?;
             let DeviceResponse {
                 ipv4_address,
                 ipv6_address,
                 ..
-            } = updated_device;
+            } = response.deserialize().await?;
             Ok(mullvad_types::wireguard::AssociatedAddresses {
                 ipv4_address,
                 ipv6_address,

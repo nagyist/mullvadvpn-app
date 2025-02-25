@@ -5,14 +5,16 @@ use futures::{
 };
 
 use mullvad_api::rest;
+#[cfg(target_os = "android")]
+use mullvad_types::account::{PlayPurchase, PlayPurchasePaymentToken};
 use mullvad_types::{
-    account::{AccountToken, VoucherSubmission},
+    account::{AccountNumber, VoucherSubmission},
     device::{
-        AccountAndDevice, Device, DeviceEvent, DeviceEventCause, DeviceId, DeviceName, DevicePort,
-        DeviceState,
+        AccountAndDevice, Device, DeviceEvent, DeviceEventCause, DeviceId, DeviceName, DeviceState,
     },
     wireguard::{self, RotationInterval, WireguardData},
 };
+
 use std::{
     future::Future,
     path::Path,
@@ -23,7 +25,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 use talpid_core::mpsc::Sender;
-use talpid_types::{net::TunnelType, tunnel::TunnelStateTransition, ErrorExt};
+use talpid_types::{
+    net::{TunnelEndpoint, TunnelType},
+    tunnel::TunnelStateTransition,
+    ErrorExt,
+};
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -42,43 +48,53 @@ const VALIDITY_CACHE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait on logout (device removal) before letting it continue as a background task.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Validate the current device once for every `WG_DEVICE_CHECK_THRESHOLD` failed attempts
-/// to set up a WireGuard tunnel.
-const WG_DEVICE_CHECK_THRESHOLD: usize = 2;
+/// Validate the current device once for every `WG_DEVICE_CHECK_THRESHOLD` attempt to set up
+/// a WireGuard tunnel.
+const WG_DEVICE_CHECK_THRESHOLD: usize = 3;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
-    #[error(display = "The account already has a maximum number of devices")]
+    #[error("The account already has a maximum number of devices")]
     MaxDevicesReached,
-    #[error(display = "No device is set")]
+    #[error("No device is set")]
     NoDevice,
-    #[error(display = "Device not found")]
+    #[error("Device not found")]
     InvalidDevice,
-    #[error(display = "Invalid account")]
+    #[error("Invalid account")]
     InvalidAccount,
-    #[error(display = "Invalid voucher code")]
+    #[error("Invalid voucher code")]
     InvalidVoucher,
-    #[error(display = "The voucher has already been used")]
+    #[error("The voucher has already been used")]
     UsedVoucher,
-    #[error(display = "Failed to read or write device cache")]
-    DeviceIoError(#[error(source)] io::Error),
-    #[error(display = "Failed parse device cache")]
-    ParseDeviceCache(#[error(source)] serde_json::Error),
-    #[error(display = "Unexpected HTTP request error")]
-    OtherRestError(#[error(source)] rest::Error),
-    #[error(display = "The device update task is not running")]
+    #[error("Failed to read or write device cache")]
+    DeviceIoError(#[from] Arc<io::Error>),
+    #[error("Failed parse device cache")]
+    ParseDeviceCache(#[from] Arc<serde_json::Error>),
+    #[error("Unexpected HTTP request error")]
+    OtherRestError(#[from] rest::Error),
+    #[error("The device update task is not running")]
     Cancelled,
-    /// Intended to be broadcast to requesters
-    #[error(display = "Broadcast error")]
-    ResponseFailure(#[error(source)] Arc<Error>),
-    #[error(display = "Account changed during operation")]
+    #[error("Account changed during operation")]
     AccountChange,
-    #[error(display = "The account manager is down")]
+    #[error("The account manager is down")]
     AccountManagerDown,
 }
 
+macro_rules! impl_into_arc_err {
+    ($ty:ty) => {
+        impl From<$ty> for Error {
+            fn from(error: $ty) -> Self {
+                Error::from(Arc::from(error))
+            }
+        }
+    };
+}
+
+impl_into_arc_err!(io::Error);
+impl_into_arc_err!(serde_json::Error);
+
 /// Contains the current device state.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivateDeviceState {
     LoggedIn(PrivateAccountAndDevice),
@@ -138,29 +154,29 @@ impl From<PrivateDeviceState> for DeviceState {
     }
 }
 
-/// Same as [PrivateDevice] but also contains the associated account token.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// Same as [PrivateDevice] but also contains the associated account number.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct PrivateAccountAndDevice {
-    pub account_token: AccountToken,
+    #[serde(alias = "account_token")]
+    pub account_number: AccountNumber,
     pub device: PrivateDevice,
 }
 
 impl From<PrivateAccountAndDevice> for AccountAndDevice {
     fn from(config: PrivateAccountAndDevice) -> Self {
         AccountAndDevice {
-            account_token: config.account_token,
+            account_number: config.account_number,
             device: Device::from(config.device),
         }
     }
 }
 
 /// Device type that contains private data.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct PrivateDevice {
     pub id: DeviceId,
     pub name: DeviceName,
     pub wg_data: wireguard::WireguardData,
-    pub ports: Vec<DevicePort>,
     // FIXME: Reasonable default to avoid migration code for the field,
     // as it was previously missing.
     // This attribute may be removed once upgrades from `2022.2-beta1`
@@ -190,7 +206,6 @@ impl PrivateDevice {
             id: device.id,
             name: device.name,
             wg_data,
-            ports: device.ports,
             hijack_dns: device.hijack_dns,
             created: device.created,
         })
@@ -203,7 +218,6 @@ impl PrivateDevice {
             return Err(Error::InvalidDevice);
         }
         self.id = device.id;
-        self.ports = device.ports;
         self.name = device.name;
         self.hijack_dns = device.hijack_dns;
         self.created = device.created;
@@ -215,7 +229,6 @@ impl From<PrivateDevice> for Device {
     fn from(device: PrivateDevice) -> Self {
         Device {
             id: device.id,
-            ports: device.ports,
             pubkey: device.wg_data.private_key.public_key(),
             name: device.name,
             hijack_dns: device.hijack_dns,
@@ -274,34 +287,18 @@ impl PrivateDeviceEvent {
 
 impl Error {
     pub fn is_network_error(&self) -> bool {
-        if let Error::OtherRestError(error) = self.unpack() {
-            error.is_network_error()
-        } else {
-            false
-        }
+        matches!(self, Error::OtherRestError(error) if error.is_network_error())
     }
 
     pub fn is_aborted(&self) -> bool {
-        if let Error::OtherRestError(error) = self.unpack() {
-            error.is_aborted()
-        } else {
-            false
-        }
-    }
-
-    pub fn unpack(&self) -> &Error {
-        if let Error::ResponseFailure(ref inner) = self {
-            inner
-        } else {
-            self
-        }
+        matches!(self, Error::OtherRestError(error) if error.is_aborted())
     }
 }
 
 type ResponseTx<T> = oneshot::Sender<Result<T, Error>>;
 
 enum AccountManagerCommand {
-    Login(AccountToken, ResponseTx<()>),
+    Login(AccountNumber, ResponseTx<()>),
     Logout(ResponseTx<()>),
     SetData(PrivateAccountAndDevice, ResponseTx<()>),
     GetData(ResponseTx<PrivateDeviceState>),
@@ -310,6 +307,10 @@ enum AccountManagerCommand {
     SetRotationInterval(RotationInterval, ResponseTx<()>),
     ValidateDevice(ResponseTx<()>),
     SubmitVoucher(String, ResponseTx<VoucherSubmission>),
+    #[cfg(target_os = "android")]
+    InitPlayPurchase(ResponseTx<PlayPurchasePaymentToken>),
+    #[cfg(target_os = "android")]
+    VerifyPlayPurchase(ResponseTx<()>, PlayPurchase),
     CheckExpiry(ResponseTx<DateTime<Utc>>),
     Shutdown(oneshot::Sender<()>),
 }
@@ -322,8 +323,8 @@ pub(crate) struct AccountManagerHandle {
 }
 
 impl AccountManagerHandle {
-    pub async fn login(&self, token: AccountToken) -> Result<(), Error> {
-        self.send_command(|tx| AccountManagerCommand::Login(token, tx))
+    pub async fn login(&self, number: AccountNumber) -> Result<(), Error> {
+        self.send_command(|tx| AccountManagerCommand::Login(number, tx))
             .await
     }
 
@@ -366,6 +367,18 @@ impl AccountManagerHandle {
 
     pub async fn check_expiry(&self) -> Result<DateTime<Utc>, Error> {
         self.send_command(AccountManagerCommand::CheckExpiry).await
+    }
+
+    #[cfg(target_os = "android")]
+    pub async fn init_play_purchase(&self) -> Result<PlayPurchasePaymentToken, Error> {
+        self.send_command(AccountManagerCommand::InitPlayPurchase)
+            .await
+    }
+
+    #[cfg(target_os = "android")]
+    pub async fn verify_play_purchase(&self, play_purchase: PlayPurchase) -> Result<(), Error> {
+        self.send_command(move |tx| AccountManagerCommand::VerifyPlayPurchase(tx, play_purchase))
+            .await
     }
 
     pub async fn shutdown(self) {
@@ -412,10 +425,10 @@ impl AccountManager {
         listener_tx: impl Sender<AccountEvent> + Send + 'static,
     ) -> Result<(AccountManagerHandle, PrivateDeviceState), Error> {
         let (cacher, data) = DeviceCacher::new(settings_dir).await?;
-        let token = data.device().map(|state| state.account_token.clone());
+        let number = data.device().map(|state| state.account_number.clone());
         let api_availability = rest_handle.availability.clone();
         let account_service =
-            service::spawn_account_service(rest_handle.clone(), token, api_availability.clone());
+            service::spawn_account_service(rest_handle.clone(), number, api_availability.clone());
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded();
 
@@ -465,9 +478,9 @@ impl AccountManager {
                             shutdown_tx = Some(tx);
                             break;
                         }
-                        Some(AccountManagerCommand::Login(token, tx)) => {
+                        Some(AccountManagerCommand::Login(number, tx)) => {
                             let job = self.device_service
-                                .generate_for_account(token);
+                                .generate_for_account(number);
                             current_api_call.set_login(Box::pin(job), tx);
                         }
                         Some(AccountManagerCommand::Logout(tx)) => {
@@ -521,6 +534,14 @@ impl AccountManager {
                         },
                         Some(AccountManagerCommand::CheckExpiry(tx)) => {
                             self.handle_expiry_request(tx, &mut current_api_call);
+                        },
+                        #[cfg(target_os = "android")]
+                        Some(AccountManagerCommand::InitPlayPurchase(tx)) => {
+                            self.handle_init_play_purchase(tx, &mut current_api_call);
+                        },
+                        #[cfg(target_os = "android")]
+                        Some(AccountManagerCommand::VerifyPlayPurchase(tx, play_purchase)) => {
+                            self.handle_verify_play_purchase(tx, play_purchase, &mut current_api_call);
                         },
 
                         None => {
@@ -579,14 +600,46 @@ impl AccountManager {
 
         let create_submission = move || {
             let old_config = self.data.device().ok_or(Error::NoDevice)?;
-            let account_token = old_config.account_token.clone();
+            let account_number = old_config.account_number.clone();
             let account_service = self.account_service.clone();
-            Ok(async move { account_service.submit_voucher(account_token, voucher).await })
+            Ok(async move {
+                account_service
+                    .submit_voucher(account_number, voucher)
+                    .await
+            })
         };
 
         match create_submission() {
             Ok(call) => {
                 current_api_call.set_voucher_submission(Box::pin(call), tx);
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn handle_init_play_purchase(
+        &mut self,
+        tx: ResponseTx<PlayPurchasePaymentToken>,
+        current_api_call: &mut api::CurrentApiCall,
+    ) {
+        if current_api_call.is_logging_in() {
+            let _ = tx.send(Err(Error::AccountChange));
+            return;
+        }
+
+        let init_play_purchase_api_call = move || {
+            let old_config = self.data.device().ok_or(Error::NoDevice)?;
+            let account_number = old_config.account_number.clone();
+            let account_service = self.account_service.clone();
+            Ok(async move { account_service.init_play_purchase(account_number).await })
+        };
+
+        match init_play_purchase_api_call() {
+            Ok(call) => {
+                current_api_call.set_init_play_purchase(Box::pin(call), tx);
             }
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -619,6 +672,39 @@ impl AccountManager {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn handle_verify_play_purchase(
+        &mut self,
+        tx: ResponseTx<()>,
+        play_purchase: PlayPurchase,
+        current_api_call: &mut api::CurrentApiCall,
+    ) {
+        if current_api_call.is_logging_in() {
+            let _ = tx.send(Err(Error::AccountChange));
+            return;
+        }
+
+        let play_purchase_verify_api_call = move || {
+            let old_config = self.data.device().ok_or(Error::NoDevice)?;
+            let account_number = old_config.account_number.clone();
+            let account_service = self.account_service.clone();
+            Ok(async move {
+                account_service
+                    .verify_play_purchase(account_number, play_purchase)
+                    .await
+            })
+        };
+
+        match play_purchase_verify_api_call() {
+            Ok(call) => {
+                current_api_call.set_verify_play_purchase(Box::pin(call), tx);
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+            }
+        }
+    }
+
     async fn consume_api_result(
         &mut self,
         result: api::ApiResult,
@@ -633,6 +719,16 @@ impl AccountManager {
                 self.consume_voucher_result(data_response, tx).await
             }
             ExpiryCheck(data_response) => self.consume_expiry_result(data_response).await,
+            #[cfg(target_os = "android")]
+            InitPlayPurchase(data_response, tx) => {
+                self.consume_init_play_purchase_result(data_response, tx)
+                    .await
+            }
+            #[cfg(target_os = "android")]
+            VerifyPlayPurchase(data_response, tx) => {
+                self.consume_verify_play_purchase_result(data_response, tx)
+                    .await
+            }
         }
     }
 
@@ -694,10 +790,7 @@ impl AccountManager {
             }
             Err(err) => {
                 log::error!("Failed to check account expiry: {}", err);
-                let cloneable_err = Arc::new(err);
-                Self::drain_requests(&mut self.expiry_requests, || {
-                    Err(Error::ResponseFailure(cloneable_err.clone()))
-                });
+                Self::drain_requests(&mut self.expiry_requests, || Err(err.clone()));
             }
         }
     }
@@ -734,10 +827,10 @@ impl AccountManager {
                         }
                         Err(err) => {
                             log::error!("Failed to save device data to disk");
-                            let cloneable_err = Arc::new(err);
-                            Self::drain_requests(&mut self.validation_requests, || {
-                                Err(Error::ResponseFailure(cloneable_err.clone()))
-                            });
+                            Self::drain_requests(
+                                &mut self.validation_requests,
+                                || Err(err.clone()),
+                            );
                         }
                     }
                 } else {
@@ -752,20 +845,17 @@ impl AccountManager {
             }
             Err(err) => {
                 log::error!("Failed to validate device: {}", err);
-                let cloneable_err = Arc::new(err);
-                Self::drain_requests(&mut self.validation_requests, || {
-                    Err(Error::ResponseFailure(cloneable_err.clone()))
-                });
+                Self::drain_requests(&mut self.validation_requests, || Err(err.clone()));
             }
         }
 
         if !self.rotation_requests.is_empty() || !self.validation_requests.is_empty() {
             if let Some(updated_config) = self.data.device() {
                 let device_service = self.device_service.clone();
-                let token = updated_config.account_token.clone();
+                let number = updated_config.account_number.clone();
                 let device_id = updated_config.device.id.clone();
                 api_call.set_oneshot_rotation(Box::pin(async move {
-                    device_service.rotate_key(token, device_id).await
+                    device_service.rotate_key(number, device_id).await
                 }));
             }
         }
@@ -804,14 +894,47 @@ impl AccountManager {
         }
     }
 
+    #[cfg(target_os = "android")]
+    async fn consume_init_play_purchase_result(
+        &mut self,
+        response: Result<PlayPurchasePaymentToken, Error>,
+        tx: ResponseTx<PlayPurchasePaymentToken>,
+    ) {
+        match &response {
+            Ok(_) => (),
+            Err(Error::InvalidAccount) => {
+                self.revoke_device(|| Error::InvalidAccount).await;
+            }
+            Err(Error::InvalidDevice) => {
+                self.revoke_device(|| Error::InvalidDevice).await;
+            }
+            Err(err) => log::error!("Failed to initialize play purchase: {}", err),
+        }
+        let _ = tx.send(response);
+    }
+
+    #[cfg(target_os = "android")]
+    async fn consume_verify_play_purchase_result(
+        &mut self,
+        response: Result<(), Error>,
+        tx: ResponseTx<()>,
+    ) {
+        match &response {
+            Ok(_) => (),
+            Err(Error::InvalidAccount) => {
+                self.revoke_device(|| Error::InvalidAccount).await;
+            }
+            Err(Error::InvalidDevice) => {
+                self.revoke_device(|| Error::InvalidDevice).await;
+            }
+            Err(err) => log::error!("Failed to verify play purchase: {}", err),
+        }
+        let _ = tx.send(response);
+    }
+
     fn drain_device_requests_with_err(&mut self, err: Error) {
-        let cloneable_err = Arc::new(err);
-        Self::drain_requests(&mut self.rotation_requests, || {
-            Err(Error::ResponseFailure(cloneable_err.clone()))
-        });
-        Self::drain_requests(&mut self.validation_requests, || {
-            Err(Error::ResponseFailure(cloneable_err.clone()))
-        });
+        Self::drain_requests(&mut self.rotation_requests, || Err(err.clone()));
+        Self::drain_requests(&mut self.validation_requests, || Err(err.clone()));
     }
 
     fn drain_requests<T>(requests: &mut Vec<ResponseTx<T>>, result: impl Fn() -> Result<T, Error>) {
@@ -822,18 +945,18 @@ impl AccountManager {
 
     fn spawn_timed_key_rotation(
         &self,
-    ) -> Option<impl Future<Output = Result<WireguardData, Error>> + Send + 'static> {
+    ) -> Option<impl Future<Output = Result<WireguardData, Error>> + Send + 'static + use<>> {
         let config = self.data.device()?;
         let key_rotation_timer = self.key_rotation_timer(config.device.wg_data.created);
 
         let device_service = self.device_service.clone();
-        let account_token = config.account_token.clone();
+        let account_number = config.account_number.clone();
         let device_id = config.device.id.clone();
 
         Some(async move {
             key_rotation_timer.await;
             device_service
-                .rotate_key_with_backoff(account_token, device_id)
+                .rotate_key_with_backoff(account_number, device_id)
                 .await
         })
     }
@@ -879,25 +1002,31 @@ impl AccountManager {
                 .is_ok()
         });
 
-        if let Some(old_config) = old_config {
-            let logout_call = tokio::spawn(Box::pin(self.logout_api_call(old_config)));
+        match old_config {
+            Some(old_config) => {
+                let logout_call = tokio::spawn(Box::pin(self.logout_api_call(old_config)));
 
-            tokio::spawn(async move {
-                let _response = tokio::time::timeout(LOGOUT_TIMEOUT, logout_call).await;
+                tokio::spawn(async move {
+                    let _response = tokio::time::timeout(LOGOUT_TIMEOUT, logout_call).await;
+                    let _ = tx.send(Ok(()));
+                });
+            }
+            _ => {
+                // The state was `revoked`.
                 let _ = tx.send(Ok(()));
-            });
-        } else {
-            // The state was `revoked`.
-            let _ = tx.send(Ok(()));
+            }
         }
     }
 
-    fn logout_api_call(&self, data: PrivateAccountAndDevice) -> impl Future<Output = ()> + 'static {
+    fn logout_api_call(
+        &self,
+        data: PrivateAccountAndDevice,
+    ) -> impl Future<Output = ()> + 'static + use<> {
         let service = self.device_service.clone();
 
         async move {
             if let Err(error) = service
-                .remove_device_with_backoff(data.account_token, data.device.id)
+                .remove_device_with_backoff(data.account_number, data.device.id)
                 .await
             {
                 log::error!(
@@ -934,17 +1063,20 @@ impl AccountManager {
 
     fn initiate_key_rotation(
         &self,
-    ) -> Result<impl Future<Output = Result<WireguardData, Error>>, Error> {
+    ) -> Result<impl Future<Output = Result<WireguardData, Error>> + use<>, Error> {
         let data = self.data.device().cloned().ok_or(Error::NoDevice)?;
         let device_service = self.device_service.clone();
         Ok(async move {
             device_service
-                .rotate_key(data.account_token, data.device.id)
+                .rotate_key(data.account_number, data.device.id)
                 .await
         })
     }
 
-    fn key_rotation_timer(&self, key_created: DateTime<Utc>) -> impl Future<Output = ()> + 'static {
+    fn key_rotation_timer(
+        &self,
+        key_created: DateTime<Utc>,
+    ) -> impl Future<Output = ()> + 'static + use<> {
         let rotation_interval = self.rotation_interval;
 
         async move {
@@ -974,23 +1106,32 @@ impl AccountManager {
     fn fetch_device_config(
         &self,
         old_config: &PrivateAccountAndDevice,
-    ) -> impl Future<Output = Result<Device, Error>> {
+    ) -> impl Future<Output = Result<Device, Error>> + use<> {
         let device_service = self.device_service.clone();
-        let account_token = old_config.account_token.clone();
+        let account_number = old_config.account_number.clone();
         let device_id = old_config.device.id.clone();
-        async move { device_service.get(account_token, device_id).await }
+        async move { device_service.get(account_number, device_id).await }
     }
 
-    fn validation_call(&self) -> Result<impl Future<Output = Result<Device, Error>>, Error> {
+    fn validation_call(
+        &self,
+    ) -> Result<impl Future<Output = Result<Device, Error>> + use<>, Error> {
         let old_config = self.data.device().ok_or(Error::NoDevice)?;
         Ok(self.fetch_device_config(old_config))
     }
 
-    fn expiry_call(&self) -> Result<impl Future<Output = Result<DateTime<Utc>, Error>>, Error> {
+    fn expiry_call(
+        &self,
+    ) -> Result<impl Future<Output = Result<chrono::DateTime<Utc>, Error>> + use<>, Error> {
         let old_config = self.data.device().ok_or(Error::NoDevice)?;
-        let account_token = old_config.account_token.clone();
+        let account_number = old_config.account_number.clone();
         let account_service = self.account_service.clone();
-        Ok(async move { account_service.check_expiry_2(account_token).await })
+        Ok(async move {
+            account_service
+                .get_data_2(account_number)
+                .await
+                .map(|data| data.expiry)
+        })
     }
 
     fn needs_validation(&mut self) -> bool {
@@ -1118,7 +1259,7 @@ impl DeviceCacher {
 /// after multiple attempts.
 pub(crate) struct TunnelStateChangeHandler {
     manager: AccountManagerHandle,
-    check_validity: Arc<AtomicBool>,
+    can_retry: Arc<AtomicBool>,
     wg_retry_attempt: usize,
 }
 
@@ -1126,51 +1267,212 @@ impl TunnelStateChangeHandler {
     pub fn new(manager: AccountManagerHandle) -> Self {
         Self {
             manager,
-            check_validity: Arc::new(AtomicBool::new(true)),
+            can_retry: Arc::new(AtomicBool::new(true)),
             wg_retry_attempt: 0,
         }
     }
 
+    /// Handle state transitions and optionally check the device/account validity. This should be
+    /// called during every tunnel state transition.
     pub fn handle_state_transition(&mut self, new_state: &TunnelStateTransition) {
-        match new_state {
-            TunnelStateTransition::Connecting(endpoint) => {
-                if endpoint.tunnel_type != TunnelType::Wireguard {
-                    return;
-                }
-                self.wg_retry_attempt = self.wg_retry_attempt.wrapping_add(1);
-                if self.wg_retry_attempt % WG_DEVICE_CHECK_THRESHOLD == 0 {
-                    let handle = self.manager.clone();
-                    let check_validity = self.check_validity.clone();
-                    tokio::spawn(async move {
-                        if !check_validity.swap(false, Ordering::SeqCst) {
-                            return;
-                        }
-                        if let Err(error) = Self::check_validity(handle).await {
-                            log::error!(
-                                "{}",
-                                error.display_chain_with_msg(
-                                    "Failed to check device or account validity"
-                                )
-                            );
-                            if error.is_network_error() || error.is_aborted() {
-                                check_validity.store(true, Ordering::SeqCst);
-                            }
-                        }
-                    });
-                }
+        self.wg_retry_attempt = Self::update_retry_counter(new_state, self.wg_retry_attempt);
+        Self::update_retry_bool(new_state, self.can_retry.clone());
+        // Check if a device-check should be triggered
+        if Self::should_check_device_validity(self.wg_retry_attempt, self.can_retry.clone()) {
+            let handle = self.manager.clone();
+            tokio::spawn(Self::check_device_validity(
+                self.can_retry.clone(),
+                move || Self::check_device_validity_inner(handle),
+            ));
+        }
+    }
+
+    /// Run `validate` when connecting to a WireGuard server.
+    ///
+    /// # Note
+    /// `can_retry` is reset on network errors. Otherwise, it is set to `true` as to not
+    /// immediately trigger new device checks.
+    async fn check_device_validity<Validate, ValidateResult>(
+        can_retry: Arc<AtomicBool>,
+        validate: Validate,
+    ) where
+        Validate: FnOnce() -> ValidateResult + Send,
+        ValidateResult: Future<Output = Result<(), Error>> + Send,
+    {
+        // Log any error
+        let result = validate().await.inspect_err(|error| {
+            log::error!(
+                "{}",
+                error.display_chain_with_msg("Failed to check device or account validity")
+            )
+        });
+        // Update `can_retry` based on the result of `validate`
+        match result {
+            // If the request failed due to a network error, we should continue
+            // retrying.
+            Err(ref error) if Self::should_continue_retries(error) => {
+                can_retry.store(true, Ordering::SeqCst);
             }
-            TunnelStateTransition::Error(_)
-            | TunnelStateTransition::Connected(_)
-            | TunnelStateTransition::Disconnected => {
-                self.check_validity.store(true, Ordering::SeqCst);
-                self.wg_retry_attempt = 0;
-            }
+            // Otherwise we give up, because it means we have a known result or
+            // the API returned some error.
             _ => (),
         }
     }
 
-    pub async fn check_validity(handle: AccountManagerHandle) -> Result<(), Error> {
+    /// Return an incremented count for `retry_attempt` if this is another WireGuard connection
+    /// attempt, otherwise `retry_attempt` is returned.
+    ///
+    /// Reset to the counter to `0` when we manage to successfully connect to a Wireguard relay.
+    fn update_retry_counter(new_state: &TunnelStateTransition, retry_attempt: usize) -> usize {
+        let wireguard =
+            |endpoint: &TunnelEndpoint| matches!(endpoint.tunnel_type, TunnelType::Wireguard);
+
+        match new_state {
+            // Increment the counter if this is another Wireguard attempt
+            TunnelStateTransition::Connecting(endpoint) if wireguard(endpoint) => {
+                retry_attempt.wrapping_add(1)
+            }
+            // Only reset the counter if we managed to connect to a Wireguard relay
+            TunnelStateTransition::Connected(endpoint) if wireguard(endpoint) => 0,
+            // Any other state transition doesn't affect the counter
+            _ => retry_attempt,
+        }
+    }
+
+    /// Check if `new_state` breaks a connecting-loop. If so, the retry state `can_retry` is reset
+    /// (i.e. set to `true`).
+    ///
+    /// # Note
+    /// The following state transition counts as breaking a connecting-loop: `Connected`,
+    /// `Disconnected` and `Error`.
+    fn update_retry_bool(new_state: &TunnelStateTransition, can_retry: Arc<AtomicBool>) {
+        match new_state {
+            TunnelStateTransition::Disconnected { .. }
+            | TunnelStateTransition::Connected(_)
+            | TunnelStateTransition::Error(_) => {
+                can_retry.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        };
+    }
+
+    async fn check_device_validity_inner(handle: AccountManagerHandle) -> Result<(), Error> {
         handle.validate_device().await?;
         handle.check_expiry().await.map(|_expiry| ())
+    }
+
+    /// Check if a device check is due
+    fn should_check_device_validity(
+        wireguard_retry_attempt: usize,
+        can_retry: Arc<AtomicBool>,
+    ) -> bool {
+        Self::should_check_device_validity_on_attempt(wireguard_retry_attempt)
+            && can_retry.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check if a device check should be triggered based on the current `wireguard_retry_attempt`
+    const fn should_check_device_validity_on_attempt(wireguard_retry_attempt: usize) -> bool {
+        // Incorporate a debounce effect where every `WG_DEVICE_CHECK_THRESHOLD` attempt should be
+        // able to trigger a device check.
+        wireguard_retry_attempt > 0 && (wireguard_retry_attempt % WG_DEVICE_CHECK_THRESHOLD == 0)
+    }
+
+    fn should_continue_retries(err: &Error) -> bool {
+        err.is_network_error() || err.is_aborted()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use talpid_types::tunnel::TunnelStateTransition;
+
+    use super::{Error, TunnelStateChangeHandler, WG_DEVICE_CHECK_THRESHOLD};
+
+    const TIMEOUT_ERROR: Error = Error::OtherRestError(mullvad_api::rest::Error::TimeoutError);
+
+    /// Verify that a device check is triggered 'when expected', i.e. when the current attempt
+    /// has reached the threshold as specified by [`WG_DEVICE_CHECK_THRESHOLD`]
+    #[test]
+    fn test_device_check_by_retry_attempt() {
+        assert!(
+            TunnelStateChangeHandler::should_check_device_validity_on_attempt(
+                WG_DEVICE_CHECK_THRESHOLD
+            )
+        );
+    }
+
+    /// Starting a new connection loop should resume device validity checks
+    #[test]
+    fn test_device_check_reset() {
+        let can_retry = Arc::new(AtomicBool::new(false));
+        // Transitioning to the 'Disconnected' state counts as breaking the 'connection loop'
+        let new_tunnel_state = TunnelStateTransition::Disconnected { locked_down: false };
+        TunnelStateChangeHandler::update_retry_bool(&new_tunnel_state, can_retry.clone());
+
+        assert!(
+            can_retry.load(Ordering::SeqCst),
+            "expected retry state to be reset on first connection attempt"
+        );
+    }
+
+    /// Retries should stop when a device check succeeds
+    #[tokio::test]
+    async fn test_device_check_on_success() {
+        let can_retry = Arc::new(AtomicBool::new(true));
+
+        let did_run = TunnelStateChangeHandler::should_check_device_validity(
+            WG_DEVICE_CHECK_THRESHOLD,
+            can_retry.clone(),
+        );
+        assert!(did_run, "expected device check to run");
+        // Manually trigger the device check and verify that we still can try to perform a device
+        // check
+        TunnelStateChangeHandler::check_device_validity(can_retry.clone(), || async { Ok(()) })
+            .await;
+
+        let did_run = TunnelStateChangeHandler::should_check_device_validity(
+            WG_DEVICE_CHECK_THRESHOLD,
+            can_retry.clone(),
+        );
+        assert!(
+            !did_run,
+            "expected device check to give up after successful check"
+        );
+    }
+
+    /// Retries should continue when a network error occurs
+    #[tokio::test]
+    async fn test_device_check_on_network_error() {
+        let can_retry = Arc::new(AtomicBool::new(true));
+
+        // Run the check with a (simulated) network error - verify that `can_retry` is still true
+        // afterwards, indicating that a device check may still be performed
+        TunnelStateChangeHandler::check_device_validity(can_retry.clone(), || async {
+            Err(TIMEOUT_ERROR)
+        })
+        .await;
+
+        assert!(
+            can_retry.load(Ordering::SeqCst),
+            "expected device check to continue after a network error"
+        );
+
+        // Re-run the check without a network error - verify that `can_retry` is no longer true
+        TunnelStateChangeHandler::should_check_device_validity(
+            WG_DEVICE_CHECK_THRESHOLD,
+            can_retry.clone(),
+        );
+
+        TunnelStateChangeHandler::check_device_validity(can_retry.clone(), || async { Ok(()) })
+            .await;
+
+        assert!(
+            !can_retry.load(Ordering::SeqCst),
+            "device check should no longer happen after successful check"
+        );
     }
 }

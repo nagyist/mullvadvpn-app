@@ -3,51 +3,49 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 26/10/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
-import StoreKit
+@preconcurrency import StoreKit
 
-/// Interval used for periodic polling account updates.
-private let accountUpdateTimerInterval: TimeInterval = 60
-
-final class OutOfTimeInteractor {
-    private let storePaymentManager: StorePaymentManager
+final class OutOfTimeInteractor: Sendable {
     private let tunnelManager: TunnelManager
 
-    private var tunnelObserver: TunnelObserver?
-    private var paymentObserver: StorePaymentObserver?
+    nonisolated(unsafe) private var tunnelObserver: TunnelObserver?
 
-    private let logger = Logger(label: "OutOfTimeInteractor")
-    private var accountUpdateTimer: DispatchSourceTimer?
+    nonisolated(unsafe) private let logger = Logger(label: "OutOfTimeInteractor")
 
-    var didReceivePaymentEvent: ((StorePaymentEvent) -> Void)?
-    var didReceiveTunnelStatus: ((TunnelStatus) -> Void)?
+    private let accountUpdateTimerInterval: Duration = .minutes(1)
+    nonisolated(unsafe) private var accountUpdateTimer: DispatchSourceTimer?
 
-    init(storePaymentManager: StorePaymentManager, tunnelManager: TunnelManager) {
-        self.storePaymentManager = storePaymentManager
+    nonisolated(unsafe) var didReceiveTunnelStatus: (@Sendable (TunnelStatus) -> Void)?
+    nonisolated(unsafe) var didAddMoreCredit: (@Sendable () -> Void)?
+
+    init(tunnelManager: TunnelManager) {
         self.tunnelManager = tunnelManager
 
         let tunnelObserver = TunnelBlockObserver(
-            didUpdateTunnelStatus: { [weak self] manager, tunnelStatus in
+            didUpdateTunnelStatus: { [weak self] _, tunnelStatus in
                 self?.didReceiveTunnelStatus?(tunnelStatus)
+            },
+            didUpdateDeviceState: { [weak self] _, deviceState, previousDeviceState in
+                let isInactive = previousDeviceState.accountData?.isExpired == true
+                let isActive = deviceState.accountData?.isExpired == false
+                if isInactive && isActive {
+                    self?.didAddMoreCredit?()
+                }
             }
         )
 
-        let paymentObserver = StorePaymentBlockObserver { [weak self] manager, event in
-            self?.didReceivePaymentEvent?(event)
-        }
-
         tunnelManager.addObserver(tunnelObserver)
-        storePaymentManager.addPaymentObserver(paymentObserver)
 
         self.tunnelObserver = tunnelObserver
-        self.paymentObserver = paymentObserver
     }
 
     var tunnelStatus: TunnelStatus {
@@ -62,38 +60,10 @@ final class OutOfTimeInteractor {
         tunnelManager.stopTunnel()
     }
 
-    func addPayment(_ payment: SKPayment, for accountNumber: String) {
-        storePaymentManager.addPayment(payment, for: accountNumber)
-    }
-
-    func restorePurchases(
-        for accountNumber: String,
-        completionHandler: @escaping (Result<
-            REST.CreateApplePaymentResponse,
-            Error
-        >) -> Void
-    ) -> Cancellable {
-        storePaymentManager.restorePurchases(
-            for: accountNumber,
-            completionHandler: completionHandler
-        )
-    }
-
-    func requestProducts(
-        with productIdentifiers: Set<StoreSubscription>,
-        completionHandler: @escaping (Result<SKProductsResponse, Error>) -> Void
-    ) -> Cancellable {
-        storePaymentManager.requestProducts(
-            with: productIdentifiers,
-            completionHandler: completionHandler
-        )
-    }
-
     func startAccountUpdateTimer() {
         logger.debug(
             "Start polling account updates every \(accountUpdateTimerInterval) second(s)."
         )
-
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.setEventHandler { [weak self] in
             self?.tunnelManager.updateAccountData()
@@ -102,7 +72,19 @@ final class OutOfTimeInteractor {
         accountUpdateTimer?.cancel()
         accountUpdateTimer = timer
 
-        timer.schedule(wallDeadline: .now() + accountUpdateTimerInterval, repeating: accountUpdateTimerInterval)
+        timer.schedule(
+            wallDeadline: .now() + accountUpdateTimerInterval,
+            repeating: accountUpdateTimerInterval.timeInterval
+        )
         timer.activate()
+    }
+
+    func stopAccountUpdateTimer() {
+        logger.debug(
+            "Stop polling account updates."
+        )
+
+        accountUpdateTimer?.cancel()
+        accountUpdateTimer = nil
     }
 }

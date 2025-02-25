@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 30/10/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -18,10 +18,11 @@ extension NSRegularExpression {
           (25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.
           (25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b
         """#
-
+        // swiftlint:disable:next force_try
         return try! NSRegularExpression(pattern: pattern, options: [.allowCommentsAndWhitespace])
     }
 
+    // swiftlint:disable line_length
     static var ipv6RegularExpression: NSRegularExpression {
         // Regular expression obtained from:
         // https://stackoverflow.com/a/17871737
@@ -46,7 +47,8 @@ extension NSRegularExpression {
             (25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])           # 2001:db8:3:4::192.0.2.33  64:ff9b::192.0.2.33 (IPv4-Embedded IPv6 Address)
             )
         """#
-
+        // swiftlint:disable:next force_try
         return try! NSRegularExpression(pattern: pattern, options: [.allowCommentsAndWhitespace])
     }
+    // swiftlint:enable line_length
 }

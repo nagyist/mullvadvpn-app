@@ -1,5 +1,3 @@
-#[cfg(windows)]
-use crate::types::conversions::option_from_proto_string;
 use crate::types::{proto, FromProtobufTypeError};
 
 impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
@@ -21,8 +19,8 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
                 #[cfg(windows)]
                 talpid_tunnel::FirewallPolicyError::Locked(blocking_app) => {
                     let (lock_pid, lock_name) = match blocking_app {
-                        Some(app) => (app.pid, app.name.clone()),
-                        None => (0, "".to_string()),
+                        Some(app) => (app.pid, Some(app.name.clone())),
+                        None => (0, None),
                     };
 
                     FirewallPolicyError {
@@ -34,25 +32,39 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
             };
 
         let state = match state {
-            MullvadTunnelState::Disconnected => {
-                proto::tunnel_state::State::Disconnected(proto::tunnel_state::Disconnected {})
-            }
-            MullvadTunnelState::Connecting { endpoint, location } => {
-                proto::tunnel_state::State::Connecting(proto::tunnel_state::Connecting {
-                    relay_info: Some(proto::TunnelStateRelayInfo {
-                        tunnel_endpoint: Some(proto::TunnelEndpoint::from(endpoint)),
-                        location: location.map(proto::GeoIpLocation::from),
-                    }),
-                })
-            }
-            MullvadTunnelState::Connected { endpoint, location } => {
-                proto::tunnel_state::State::Connected(proto::tunnel_state::Connected {
-                    relay_info: Some(proto::TunnelStateRelayInfo {
-                        tunnel_endpoint: Some(proto::TunnelEndpoint::from(endpoint)),
-                        location: location.map(proto::GeoIpLocation::from),
-                    }),
-                })
-            }
+            MullvadTunnelState::Disconnected {
+                location: disconnected_location,
+                #[cfg(not(target_os = "android"))]
+                locked_down,
+            } => proto::tunnel_state::State::Disconnected(proto::tunnel_state::Disconnected {
+                disconnected_location: disconnected_location.map(proto::GeoIpLocation::from),
+                #[cfg(not(target_os = "android"))]
+                locked_down,
+                #[cfg(target_os = "android")]
+                locked_down: false,
+            }),
+            MullvadTunnelState::Connecting {
+                endpoint,
+                location,
+                feature_indicators,
+            } => proto::tunnel_state::State::Connecting(proto::tunnel_state::Connecting {
+                relay_info: Some(proto::TunnelStateRelayInfo {
+                    tunnel_endpoint: Some(proto::TunnelEndpoint::from(endpoint)),
+                    location: location.map(proto::GeoIpLocation::from),
+                }),
+                feature_indicators: Some(proto::FeatureIndicators::from(feature_indicators)),
+            }),
+            MullvadTunnelState::Connected {
+                endpoint,
+                location,
+                feature_indicators,
+            } => proto::tunnel_state::State::Connected(proto::tunnel_state::Connected {
+                relay_info: Some(proto::TunnelStateRelayInfo {
+                    tunnel_endpoint: Some(proto::TunnelEndpoint::from(endpoint)),
+                    location: location.map(proto::GeoIpLocation::from),
+                }),
+                feature_indicators: Some(proto::FeatureIndicators::from(feature_indicators)),
+            }),
             MullvadTunnelState::Disconnecting(after_disconnect) => {
                 proto::tunnel_state::State::Disconnecting(proto::tunnel_state::Disconnecting {
                     after_disconnect: match after_disconnect {
@@ -87,6 +99,10 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
                             talpid_tunnel::ErrorStateCause::StartTunnelError => {
                                 i32::from(Cause::StartTunnelError)
                             }
+                            #[cfg(target_os = "windows")]
+                            talpid_tunnel::ErrorStateCause::CreateTunnelDevice { os_error: _ } => {
+                                i32::from(Cause::CreateTunnelDevice)
+                            }
                             talpid_tunnel::ErrorStateCause::TunnelParameterError(_) => {
                                 i32::from(Cause::TunnelParameterError)
                             }
@@ -94,15 +110,61 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
                                 i32::from(Cause::IsOffline)
                             }
                             #[cfg(target_os = "android")]
-                            talpid_tunnel::ErrorStateCause::VpnPermissionDenied => {
-                                i32::from(Cause::VpnPermissionDenied)
+                            talpid_tunnel::ErrorStateCause::NotPrepared => {
+                                i32::from(Cause::NotPrepared)
                             }
-                            #[cfg(target_os = "windows")]
+                            #[cfg(target_os = "android")]
+                            talpid_tunnel::ErrorStateCause::OtherAlwaysOnApp { .. } => {
+                                i32::from(Cause::OtherAlwaysOnApp)
+                            }
+                            #[cfg(target_os = "android")]
+                            talpid_tunnel::ErrorStateCause::OtherLegacyAlwaysOnVpn => {
+                                i32::from(Cause::OtherLegacyAlwaysOnVpn)
+                            }
+                            #[cfg(target_os = "android")]
+                            talpid_tunnel::ErrorStateCause::InvalidDnsServers(_) => {
+                                i32::from(Cause::InvalidDnsServers)
+                            }
+                            #[cfg(any(
+                                target_os = "windows",
+                                target_os = "macos",
+                                target_os = "android"
+                            ))]
                             talpid_tunnel::ErrorStateCause::SplitTunnelError => {
                                 i32::from(Cause::SplitTunnelError)
                             }
+                            #[cfg(target_os = "macos")]
+                            talpid_tunnel::ErrorStateCause::NeedFullDiskPermissions => {
+                                i32::from(Cause::NeedFullDiskPermissions)
+                            }
                         },
                         blocking_error: error_state.block_failure().map(map_firewall_error),
+                        #[cfg(not(target_os = "android"))]
+                        other_always_on_app_error: None,
+                        #[cfg(target_os = "android")]
+                        other_always_on_app_error:
+                            if let talpid_tunnel::ErrorStateCause::OtherAlwaysOnApp { app_name } =
+                                error_state.cause()
+                            {
+                                Some(proto::error_state::OtherAlwaysOnAppError {
+                                    app_name: app_name.to_string(),
+                                })
+                            } else {
+                                None
+                            },
+                        #[cfg(not(target_os = "android"))]
+                        invalid_dns_servers_error: None,
+                        #[cfg(target_os = "android")]
+                        invalid_dns_servers_error:
+                            if let talpid_tunnel::ErrorStateCause::InvalidDnsServers(ip_addrs) =
+                                error_state.cause()
+                            {
+                                Some(proto::error_state::InvalidDnsServersError {
+                                    ip_addrs: ip_addrs.iter().map(|ip| ip.to_string()).collect(),
+                                })
+                            } else {
+                                None
+                            },
                         auth_failed_error: mullvad_types::auth_failed::AuthFailed::try_from(
                             error_state.cause(),
                         )
@@ -116,19 +178,19 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
                                 error_state.cause()
                             {
                                 match reason {
-                            talpid_tunnel::ParameterGenerationError::NoMatchingRelay => {
-                                i32::from(GenerationError::NoMatchingRelay)
+                                talpid_tunnel::ParameterGenerationError::NoMatchingRelay => {
+                                    i32::from(GenerationError::NoMatchingRelay)
+                                }
+                                talpid_tunnel::ParameterGenerationError::NoMatchingBridgeRelay => {
+                                    i32::from(GenerationError::NoMatchingBridgeRelay)
+                                }
+                                talpid_tunnel::ParameterGenerationError::NoWireguardKey => {
+                                    i32::from(GenerationError::NoWireguardKey)
+                                }
+                                talpid_tunnel::ParameterGenerationError::CustomTunnelHostResultionError => {
+                                    i32::from(GenerationError::CustomTunnelHostResolutionError)
+                                }
                             }
-                            talpid_tunnel::ParameterGenerationError::NoMatchingBridgeRelay => {
-                                i32::from(GenerationError::NoMatchingBridgeRelay)
-                            }
-                            talpid_tunnel::ParameterGenerationError::NoWireguardKey => {
-                                i32::from(GenerationError::NoWireguardKey)
-                            }
-                            talpid_tunnel::ParameterGenerationError::CustomTunnelHostResultionError => {
-                                i32::from(GenerationError::CustomTunnelHostResolutionError)
-                            }
-                        }
                             } else {
                                 0
                             },
@@ -140,6 +202,15 @@ impl From<mullvad_types::states::TunnelState> for proto::TunnelState {
                             } else {
                                 None
                             },
+                        #[cfg(not(target_os = "windows"))]
+                        create_tunnel_error: None,
+                        #[cfg(target_os = "windows")]
+                        create_tunnel_error: match error_state.cause() {
+                            talpid_tunnel::ErrorStateCause::CreateTunnelDevice { os_error } => {
+                                *os_error
+                            }
+                            _ => None,
+                        },
                     }),
                 })
             }
@@ -165,11 +236,9 @@ impl From<mullvad_types::auth_failed::AuthFailed> for proto::error_state::AuthFa
 fn try_auth_failed_from_i32(
     auth_failed_error: i32,
 ) -> Result<mullvad_types::auth_failed::AuthFailed, FromProtobufTypeError> {
-    proto::error_state::AuthFailedError::from_i32(auth_failed_error)
+    proto::error_state::AuthFailedError::try_from(auth_failed_error)
         .map(mullvad_types::auth_failed::AuthFailed::from)
-        .ok_or(FromProtobufTypeError::InvalidArgument(
-            "invalid auth failed error",
-        ))
+        .map_err(|_| FromProtobufTypeError::InvalidArgument("invalid auth failed error"))
 }
 
 impl From<proto::error_state::AuthFailedError> for mullvad_types::auth_failed::AuthFailed {
@@ -193,18 +262,34 @@ impl TryFrom<proto::TunnelState> for mullvad_types::states::TunnelState {
         use talpid_types::{net as talpid_net, tunnel as talpid_tunnel};
 
         let state = match state.state {
-            Some(proto::tunnel_state::State::Disconnected(_)) => MullvadState::Disconnected,
+            #[cfg_attr(target_os = "android", allow(unused_variables))]
+            Some(proto::tunnel_state::State::Disconnected(proto::tunnel_state::Disconnected {
+                disconnected_location,
+                locked_down,
+            })) => MullvadState::Disconnected {
+                location: disconnected_location
+                    .map(mullvad_types::location::GeoIpLocation::try_from)
+                    .transpose()?,
+                #[cfg(not(target_os = "android"))]
+                locked_down,
+            },
             Some(proto::tunnel_state::State::Connecting(proto::tunnel_state::Connecting {
                 relay_info:
                     Some(proto::TunnelStateRelayInfo {
                         tunnel_endpoint: Some(tunnel_endpoint),
                         location,
                     }),
+                feature_indicators,
             })) => MullvadState::Connecting {
                 endpoint: talpid_net::TunnelEndpoint::try_from(tunnel_endpoint)?,
                 location: location
                     .map(mullvad_types::location::GeoIpLocation::try_from)
                     .transpose()?,
+                feature_indicators: feature_indicators
+                    .map(mullvad_types::features::FeatureIndicators::from)
+                    .ok_or(FromProtobufTypeError::InvalidArgument(
+                        "Missing feature indicators",
+                    ))?,
             },
             Some(proto::tunnel_state::State::Connected(proto::tunnel_state::Connected {
                 relay_info:
@@ -212,23 +297,29 @@ impl TryFrom<proto::TunnelState> for mullvad_types::states::TunnelState {
                         tunnel_endpoint: Some(tunnel_endpoint),
                         location,
                     }),
+                feature_indicators,
             })) => MullvadState::Connected {
                 endpoint: talpid_net::TunnelEndpoint::try_from(tunnel_endpoint)?,
                 location: location
                     .map(mullvad_types::location::GeoIpLocation::try_from)
                     .transpose()?,
+                feature_indicators: feature_indicators
+                    .map(mullvad_types::features::FeatureIndicators::from)
+                    .ok_or(FromProtobufTypeError::InvalidArgument(
+                        "Missing feature indicators",
+                    ))?,
             },
             Some(proto::tunnel_state::State::Disconnecting(
                 proto::tunnel_state::Disconnecting { after_disconnect },
             )) => MullvadState::Disconnecting(
-                match proto::AfterDisconnect::from_i32(after_disconnect) {
-                    Some(proto::AfterDisconnect::Nothing) => {
+                match proto::AfterDisconnect::try_from(after_disconnect) {
+                    Ok(proto::AfterDisconnect::Nothing) => {
                         talpid_tunnel::ActionAfterDisconnect::Nothing
                     }
-                    Some(proto::AfterDisconnect::Block) => {
+                    Ok(proto::AfterDisconnect::Block) => {
                         talpid_tunnel::ActionAfterDisconnect::Block
                     }
-                    Some(proto::AfterDisconnect::Reconnect) => {
+                    Ok(proto::AfterDisconnect::Reconnect) => {
                         talpid_tunnel::ActionAfterDisconnect::Reconnect
                     }
                     _ => {
@@ -246,25 +337,30 @@ impl TryFrom<proto::TunnelState> for mullvad_types::states::TunnelState {
                         auth_failed_error,
                         parameter_error,
                         policy_error,
+                        create_tunnel_error,
+                        ..
                     }),
             })) => {
-                let cause = match proto::error_state::Cause::from_i32(cause) {
-                    Some(proto::error_state::Cause::AuthFailed) => {
+                #[cfg(not(target_os = "windows"))]
+                let _ = create_tunnel_error;
+
+                let cause = match proto::error_state::Cause::try_from(cause) {
+                    Ok(proto::error_state::Cause::AuthFailed) => {
                         let auth_failed = try_auth_failed_from_i32(auth_failed_error)?;
                         talpid_tunnel::ErrorStateCause::AuthFailed(Some(
                             auth_failed.as_str().to_string(),
                         ))
                     }
-                    Some(proto::error_state::Cause::Ipv6Unavailable) => {
+                    Ok(proto::error_state::Cause::Ipv6Unavailable) => {
                         talpid_tunnel::ErrorStateCause::Ipv6Unavailable
                     }
-                    Some(proto::error_state::Cause::IsOffline) => {
+                    Ok(proto::error_state::Cause::IsOffline) => {
                         talpid_tunnel::ErrorStateCause::IsOffline
                     }
-                    Some(proto::error_state::Cause::SetDnsError) => {
+                    Ok(proto::error_state::Cause::SetDnsError) => {
                         talpid_tunnel::ErrorStateCause::SetDnsError
                     }
-                    Some(proto::error_state::Cause::SetFirewallPolicyError) => {
+                    Ok(proto::error_state::Cause::SetFirewallPolicyError) => {
                         let policy_error = policy_error.ok_or(
                             FromProtobufTypeError::InvalidArgument("missing firewall policy error"),
                         )?;
@@ -275,28 +371,34 @@ impl TryFrom<proto::TunnelState> for mullvad_types::states::TunnelState {
                         )?;
                         talpid_tunnel::ErrorStateCause::SetFirewallPolicyError(policy_error)
                     }
-                    Some(proto::error_state::Cause::StartTunnelError) => {
+                    Ok(proto::error_state::Cause::StartTunnelError) => {
                         talpid_tunnel::ErrorStateCause::StartTunnelError
                     }
-                    Some(proto::error_state::Cause::TunnelParameterError) => {
-                        let parameter_error = match proto::error_state::GenerationError::from_i32(parameter_error) {
-                            Some(proto::error_state::GenerationError::CustomTunnelHostResolutionError) => talpid_tunnel::ParameterGenerationError::CustomTunnelHostResultionError,
-                            Some(proto::error_state::GenerationError::NoMatchingBridgeRelay) => talpid_tunnel::ParameterGenerationError::NoMatchingBridgeRelay,
-                            Some(proto::error_state::GenerationError::NoMatchingRelay) => talpid_tunnel::ParameterGenerationError::NoMatchingRelay,
-                            Some(proto::error_state::GenerationError::NoWireguardKey) => talpid_tunnel::ParameterGenerationError::NoWireguardKey,
+                    #[cfg(target_os = "windows")]
+                    Ok(proto::error_state::Cause::CreateTunnelDevice) => {
+                        talpid_tunnel::ErrorStateCause::CreateTunnelDevice {
+                            os_error: create_tunnel_error,
+                        }
+                    }
+                    Ok(proto::error_state::Cause::TunnelParameterError) => {
+                        let parameter_error = match proto::error_state::GenerationError::try_from(parameter_error) {
+                            Ok(proto::error_state::GenerationError::CustomTunnelHostResolutionError) => talpid_tunnel::ParameterGenerationError::CustomTunnelHostResultionError,
+                            Ok(proto::error_state::GenerationError::NoMatchingBridgeRelay) => talpid_tunnel::ParameterGenerationError::NoMatchingBridgeRelay,
+                            Ok(proto::error_state::GenerationError::NoMatchingRelay) => talpid_tunnel::ParameterGenerationError::NoMatchingRelay,
+                            Ok(proto::error_state::GenerationError::NoWireguardKey) => talpid_tunnel::ParameterGenerationError::NoWireguardKey,
                             _ => return Err(FromProtobufTypeError::InvalidArgument(
                                 "invalid parameter error",
                             )),
                         };
                         talpid_tunnel::ErrorStateCause::TunnelParameterError(parameter_error)
                     }
-                    #[cfg(target_os = "android")]
-                    Some(proto::error_state::Cause::VpnPermissionDenied) => {
-                        talpid_tunnel::ErrorStateCause::VpnPermissionDenied
-                    }
-                    #[cfg(target_os = "windows")]
-                    Some(proto::error_state::Cause::SplitTunnelError) => {
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    Ok(proto::error_state::Cause::SplitTunnelError) => {
                         talpid_tunnel::ErrorStateCause::SplitTunnelError
+                    }
+                    #[cfg(target_os = "macos")]
+                    Ok(proto::error_state::Cause::NeedFullDiskPermissions) => {
+                        talpid_tunnel::ErrorStateCause::NeedFullDiskPermissions
                     }
                     _ => {
                         return Err(FromProtobufTypeError::InvalidArgument(
@@ -332,19 +434,17 @@ impl TryFrom<proto::TunnelState> for mullvad_types::states::TunnelState {
 fn try_firewall_policy_error_from_i32(
     policy_error: i32,
     lock_pid: u32,
-    lock_name: String,
+    lock_name: Option<String>,
 ) -> Result<talpid_types::tunnel::FirewallPolicyError, FromProtobufTypeError> {
-    match proto::error_state::firewall_policy_error::ErrorType::from_i32(policy_error) {
-        Some(proto::error_state::firewall_policy_error::ErrorType::Generic) => {
+    match proto::error_state::firewall_policy_error::ErrorType::try_from(policy_error) {
+        Ok(proto::error_state::firewall_policy_error::ErrorType::Generic) => {
             Ok(talpid_types::tunnel::FirewallPolicyError::Generic)
         }
         #[cfg(windows)]
-        Some(proto::error_state::firewall_policy_error::ErrorType::Locked) => {
-            let blocking_app = option_from_proto_string(lock_name).map(|name| {
-                talpid_types::tunnel::BlockingApplication {
-                    pid: lock_pid,
-                    name,
-                }
+        Ok(proto::error_state::firewall_policy_error::ErrorType::Locked) => {
+            let blocking_app = lock_name.map(|name| talpid_types::tunnel::BlockingApplication {
+                pid: lock_pid,
+                name,
             });
             Ok(talpid_types::tunnel::FirewallPolicyError::Locked(
                 blocking_app,

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by Andreas Lif on 2022-08-05.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadREST
@@ -14,14 +14,42 @@ enum RedeemVoucherState {
     case success
     case verifying
     case failure(Error)
+    case logout
 }
 
 final class RedeemVoucherContentView: UIView {
     // MARK: - private
 
-    private let titleLabel: UILabel = {
+    private let scrollView: UIScrollView = {
+        let scrollView = UIScrollView()
+        return scrollView
+    }()
+
+    private let contentHolderView: UIView = {
+        let contentHolderView = UIView()
+        return contentHolderView
+    }()
+
+    private let voucherTextFieldHeight: CGFloat = 54
+
+    private let title: UILabel = {
         let label = UILabel()
-        label.font = UIFont.systemFont(ofSize: 17)
+        label.font = .preferredFont(forTextStyle: .title1, weight: .bold).withSize(32)
+        label.text = NSLocalizedString(
+            "REDEEM_VOUCHER_TITLE",
+            tableName: "RedeemVoucher",
+            value: "Redeem voucher",
+            comment: ""
+        )
+        label.textColor = .white
+        label.numberOfLines = 0
+        return label
+    }()
+
+    private let enterVoucherLabel: UILabel = {
+        let label = UILabel()
+        label.font = .preferredFont(forTextStyle: .body, weight: .semibold).withSize(15)
+
         label.text = NSLocalizedString(
             "REDEEM_VOUCHER_INSTRUCTION",
             tableName: "RedeemVoucher",
@@ -29,7 +57,6 @@ final class RedeemVoucherContentView: UIView {
             comment: ""
         )
         label.textColor = .white
-        label.translatesAutoresizingMaskIntoConstraints = false
         label.numberOfLines = 0
         return label
     }()
@@ -40,7 +67,7 @@ final class RedeemVoucherContentView: UIView {
         textField.placeholder = Array(repeating: "XXXX", count: 4).joined(separator: "-")
         textField.placeholderTextColor = .lightGray
         textField.backgroundColor = .white
-        textField.cornerRadius = UIMetrics.RedeemVoucher.cornerRadius
+        textField.cornerRadius = UIMetrics.SettingsRedeemVoucher.cornerRadius
         textField.keyboardType = .asciiCapable
         textField.autocapitalizationType = .allCharacters
         textField.returnKeyType = .done
@@ -51,20 +78,28 @@ final class RedeemVoucherContentView: UIView {
     private let activityIndicator: SpinnerActivityIndicatorView = {
         let activityIndicator = SpinnerActivityIndicatorView(style: .medium)
         activityIndicator.tintColor = .white
+        activityIndicator.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        activityIndicator.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         return activityIndicator
     }()
 
     private let statusLabel: UILabel = {
         let label = UILabel()
-        label.font = UIFont.systemFont(ofSize: 17)
-        label.textColor = .white
-        label.numberOfLines = .zero
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.numberOfLines = 2
         label.lineBreakMode = .byWordWrapping
-        if #available(iOS 14.0, *) {
-            // See: https://stackoverflow.com/q/46200027/351305
-            label.lineBreakStrategy = []
-        }
+        label.textColor = .red
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.lineBreakStrategy = []
         return label
+    }()
+
+    private lazy var logoutViewForAccountNumberIsEntered: LogoutDialogueView = {
+        LogoutDialogueView { verifiedAccountView in
+            verifiedAccountView.isLoading = true
+            self.logoutAction?()
+        }
     }()
 
     private let redeemButton: AppButton = {
@@ -91,29 +126,39 @@ final class RedeemVoucherContentView: UIView {
 
     private lazy var statusStack: UIStackView = {
         let stackView = UIStackView(arrangedSubviews: [activityIndicator, statusLabel])
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        stackView.axis = .horizontal
-        stackView.spacing = UIMetrics.interButtonSpacing
+        stackView.spacing = UIMetrics.padding8
         return stackView
     }()
 
     private lazy var voucherCodeStackView: UIStackView = {
-        let stackView = UIStackView(arrangedSubviews: [
-            titleLabel,
+        var arrangedSubviews = [
+            enterVoucherLabel,
             textField,
             statusStack,
-        ])
-        stackView.translatesAutoresizingMaskIntoConstraints = false
+            logoutViewForAccountNumberIsEntered,
+        ]
+
+        if configuration.shouldUseCompactStyle == false {
+            arrangedSubviews.insert(title, at: 0)
+        }
+
+        let stackView = UIStackView(arrangedSubviews: arrangedSubviews)
         stackView.axis = .vertical
-        stackView.spacing = UIMetrics.interButtonSpacing
+        stackView.setCustomSpacing(UIMetrics.padding8, after: title)
+        stackView.setCustomSpacing(UIMetrics.padding16, after: enterVoucherLabel)
+        stackView.setCustomSpacing(UIMetrics.padding8, after: textField)
+        stackView.setCustomSpacing(UIMetrics.padding16, after: statusLabel)
+        stackView.setCustomSpacing(UIMetrics.padding10, after: statusStack)
+        stackView.setContentHuggingPriority(.defaultLow, for: .vertical)
+
         return stackView
     }()
 
-    private lazy var actionsStackView: UIStackView = {
+    private lazy var buttonsStackView: UIStackView = {
         let stackView = UIStackView(arrangedSubviews: [redeemButton, cancelButton])
-        stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.axis = .vertical
-        stackView.spacing = UIMetrics.interButtonSpacing
+        stackView.spacing = UIMetrics.padding16
+        stackView.setContentCompressionResistancePriority(.required, for: .vertical)
         return stackView
     }()
 
@@ -131,6 +176,13 @@ final class RedeemVoucherContentView: UIView {
                 value: "Verifying voucher...",
                 comment: ""
             )
+        case .logout:
+            return NSLocalizedString(
+                "REDEEM_VOUCHER_STATUS_WAITING",
+                tableName: "RedeemVoucher",
+                value: "Logging out...",
+                comment: ""
+            )
         default: return ""
         }
     }
@@ -139,7 +191,7 @@ final class RedeemVoucherContentView: UIView {
         switch state {
         case .initial, .failure:
             return true
-        case .success, .verifying:
+        case .success, .verifying, .logout:
             return false
         }
     }
@@ -155,17 +207,22 @@ final class RedeemVoucherContentView: UIView {
 
     private var isLoading: Bool {
         switch state {
-        case .verifying:
+        case .verifying, .logout:
             return true
         default:
             return false
         }
     }
 
+    private var keyboardResponder: AutomaticKeyboardResponder?
+    private var bottomsOfButtonsConstraint: NSLayoutConstraint?
+    private let configuration: RedeemVoucherViewConfiguration
+
     // MARK: - public
 
     var redeemAction: ((String) -> Void)?
     var cancelAction: (() -> Void)?
+    var logoutAction: (() -> Void)?
 
     var state: RedeemVoucherState = .initial {
         didSet {
@@ -173,9 +230,13 @@ final class RedeemVoucherContentView: UIView {
         }
     }
 
-    var isEditing = false {
-        didSet {
-            if isEditing {
+    var isEditing: Bool {
+        get {
+            textField.isEditing
+        }
+        set {
+            guard textField.isFirstResponder != newValue else { return }
+            if newValue {
                 textField.becomeFirstResponder()
             } else {
                 textField.resignFirstResponder()
@@ -183,27 +244,29 @@ final class RedeemVoucherContentView: UIView {
         }
     }
 
-    init() {
+    var isLogoutDialogHidden = true {
+        didSet {
+            logoutViewForAccountNumberIsEntered.isHidden = isLogoutDialogHidden
+        }
+    }
+
+    init(configuration: RedeemVoucherViewConfiguration) {
+        self.configuration = configuration
         super.init(frame: .zero)
-        setup()
+        commonInit()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private func setup() {
+    private func commonInit() {
         setupAppearance()
         configureUI()
         addButtonHandlers()
-        addTextFieldObserver()
         updateUI()
-    }
-
-    private func configureUI() {
-        addSubview(voucherCodeStackView)
-        addSubview(actionsStackView)
-        addConstraints()
+        addKeyboardResponderIfNeeded()
+        addObservers()
     }
 
     private func setupAppearance() {
@@ -212,25 +275,26 @@ final class RedeemVoucherContentView: UIView {
         directionalLayoutMargins = UIMetrics.contentLayoutMargins
     }
 
-    private func addConstraints() {
-        addConstrainedSubviews([voucherCodeStackView, actionsStackView]) {
-            voucherCodeStackView.pinEdgesToSuperviewMargins(.all().excluding(.bottom))
-            actionsStackView.pinEdgesToSuperviewMargins(.all().excluding(.top))
+    private func configureUI() {
+        addConstrainedSubviews([scrollView]) {
+            scrollView.pinEdgesToSuperview(.all(configuration.layoutMargins))
+        }
 
-            actionsStackView.topAnchor.constraint(
-                greaterThanOrEqualTo: voucherCodeStackView.bottomAnchor,
-                constant: UIMetrics.interButtonSpacing
+        scrollView.addConstrainedSubviews([contentHolderView]) {
+            contentHolderView.pinEdgesToSuperview()
+            contentHolderView.widthAnchor.constraint(equalTo: scrollView.widthAnchor)
+            contentHolderView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.heightAnchor)
+        }
+        contentHolderView.addConstrainedSubviews([voucherCodeStackView, buttonsStackView]) {
+            voucherCodeStackView.pinEdgesToSuperview(.all().excluding(.bottom))
+            buttonsStackView.pinEdgesToSuperview(PinnableEdges([.leading(.zero), .trailing(.zero)]))
+            voucherCodeStackView.bottomAnchor.constraint(
+                lessThanOrEqualTo: buttonsStackView.topAnchor,
+                constant: -UIMetrics.padding16
             )
         }
-    }
-
-    private func addTextFieldObserver() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(textDidChange),
-            name: UITextField.textDidChangeNotification,
-            object: textField
-        )
+        bottomsOfButtonsConstraint = buttonsStackView.pinEdgesToSuperview(PinnableEdges([.bottom(.zero)])).first
+        bottomsOfButtonsConstraint?.isActive = true
     }
 
     private func addButtonHandlers() {
@@ -248,10 +312,24 @@ final class RedeemVoucherContentView: UIView {
     }
 
     private func updateUI() {
-        isLoading ? activityIndicator.startAnimating() : activityIndicator.stopAnimating()
+        if isLoading {
+            activityIndicator.startAnimating()
+        } else {
+            activityIndicator.stopAnimating()
+        }
         redeemButton.isEnabled = isRedeemButtonEnabled && textField.isVoucherLengthSatisfied
         statusLabel.text = text
         statusLabel.textColor = textColor
+        logoutViewForAccountNumberIsEntered.isLoading = isLoading
+    }
+
+    private func addObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(textDidChange),
+            name: UITextField.textDidChangeNotification,
+            object: textField
+        )
     }
 
     @objc private func cancelButtonTapped(_ sender: AppButton) {
@@ -259,14 +337,30 @@ final class RedeemVoucherContentView: UIView {
     }
 
     @objc private func redeemButtonTapped(_ sender: AppButton) {
-        guard let code = textField.text, !code.isEmpty else {
+        let code = textField.parsedToken
+        guard !code.isEmpty else {
             return
         }
         redeemAction?(code)
     }
 
     @objc private func textDidChange() {
+        if textField.parsedToken.isEmpty {
+            isLogoutDialogHidden = true
+        }
         updateUI()
+    }
+
+    private func addKeyboardResponderIfNeeded() {
+        guard configuration.adjustViewWhenKeyboardAppears else { return }
+        keyboardResponder = AutomaticKeyboardResponder(
+            targetView: self,
+            handler: { [weak self] _, offset in
+                guard let self else { return }
+                self.bottomsOfButtonsConstraint?.constant = isEditing ? -offset : 0
+                self.layoutIfNeeded()
+            }
+        )
     }
 }
 

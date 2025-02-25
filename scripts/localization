@@ -5,6 +5,7 @@ set -eu
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+# shellcheck disable=SC1091
 source utils/log
 
 function main {
@@ -27,7 +28,7 @@ function main {
 function sync_localizations {
     # Update desktop strings in messages.pot
     log_header "Extracting localization strings from desktop app source code"
-    pushd ../gui
+    pushd ../desktop/packages/mullvad-vpn
     npm run update-translations
     popd
 
@@ -40,27 +41,11 @@ function sync_localizations {
 
 function update_relay_locations_pot {
     log_header "Retrieving relay locations from server list and translating by using map data"
-    pushd ../gui/scripts
-    # Download geo data
-    curl -L -O https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_0_countries.zip
-    curl -L -O https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_1_states_provinces_lines.zip
-    curl -L -O https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/10m/cultural/ne_10m_populated_places.zip
-
-    unzip ne_50m_admin_0_countries.zip -d ne_50m_admin_0_countries/
-    unzip ne_50m_admin_1_states_provinces_lines.zip -d ne_50m_admin_1_states_provinces_lines/
-    unzip ne_10m_populated_places.zip -d ne_10m_populated_places/
+    pushd ../desktop/packages/mullvad-vpn/scripts
 
     # Add translations from geo data
-    python3 extract-geo-data.py
-    python3 integrate-into-app.py
-
-    # Remove geo data
-    rm ne_10m_populated_places.zip \
-        ne_50m_admin_0_countries.zip \
-        ne_50m_admin_1_states_provinces_lines.zip
-    rm -r ne_10m_populated_places ne_50m_admin_0_countries ne_50m_admin_1_states_provinces_lines
-
-    git restore ../assets
+    python3 fetch-relay-locations.py
+    python3 integrate-relay-locations.py
 
     popd
 }
@@ -87,15 +72,20 @@ function upload_to_crowdin {
     ensure_crowdin_api_key
 
     log_header "Uploading translations to crowdin"
-    ../gui/scripts/crowdin.sh upload
+
+    pushd ../desktop/packages/mullvad-vpn
+    crowdin upload sources
+    crowdin upload translations
+    popd
 }
 
 function download_from_crowdin {
     ensure_crowdin_api_key
 
     log_header "Downloading translations from crowdin"
-    ../gui/scripts/crowdin.sh export
-    ../gui/scripts/crowdin.sh download
+    pushd ../desktop/packages/mullvad-vpn
+    crowdin download
+    popd
 
     # Add new translations to Android xml-files
     log_header "Updating Android xml-files with new translations"
@@ -106,11 +96,13 @@ function download_from_crowdin {
 function verify {
     sync_localizations
     git diff
+
+    # shellcheck disable=SC2251
     ! git status -s | grep .
     local out_of_sync=$?
 
-    pushd ../gui/scripts
-    npm exec ts-node verify-translations-format.ts
+    pushd ../desktop/packages/mullvad-vpn
+    npm exec ts-node scripts/verify-translations-format.ts
     local incorrect_format=$?
     popd
 

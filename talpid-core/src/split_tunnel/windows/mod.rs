@@ -1,3 +1,5 @@
+#![allow(clippy::undocumented_unsafe_blocks)] // Remove me if you dare.
+
 mod driver;
 mod path_monitor;
 mod service;
@@ -8,7 +10,6 @@ use crate::{tunnel::TunnelMetadata, tunnel_state_machine::TunnelCommand};
 use futures::channel::{mpsc, oneshot};
 use std::{
     collections::HashMap,
-    convert::TryFrom,
     ffi::{OsStr, OsString},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -21,82 +22,85 @@ use std::{
 };
 use talpid_routing::{get_best_default_route, CallbackHandle, EventType, RouteManagerHandle};
 use talpid_types::{split_tunnel::ExcludedProcess, tunnel::ErrorStateCause, ErrorExt};
-use talpid_windows_net::{get_ip_address_for_interface, AddressFamily};
+use talpid_windows::{
+    io::Overlapped,
+    net::{get_ip_address_for_interface, AddressFamily},
+    sync::Event,
+};
 use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
 const DRIVER_EVENT_BUFFER_SIZE: usize = 2048;
 const RESERVED_IP_V4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 123);
 
 /// Errors that may occur in [`SplitTunnel`].
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to install or start driver service
-    #[error(display = "Failed to start driver service")]
-    ServiceError(#[error(source)] service::Error),
+    #[error("Failed to start driver service")]
+    ServiceError(#[source] service::Error),
 
     /// Failed to initialize the driver
-    #[error(display = "Failed to initialize driver")]
-    InitializationError(#[error(source)] driver::DeviceHandleError),
+    #[error("Failed to initialize driver")]
+    InitializationError(#[source] driver::DeviceHandleError),
 
     /// Failed to reset the driver
-    #[error(display = "Failed to reset driver")]
-    ResetError(#[error(source)] io::Error),
+    #[error("Failed to reset driver")]
+    ResetError(#[source] io::Error),
 
     /// Failed to set paths to excluded applications
-    #[error(display = "Failed to set list of excluded applications")]
-    SetConfiguration(#[error(source)] io::Error),
+    #[error("Failed to set list of excluded applications")]
+    SetConfiguration(#[source] io::Error),
 
     /// Failed to obtain the current driver state
-    #[error(display = "Failed to obtain the driver state")]
-    GetState(#[error(source)] io::Error),
+    #[error("Failed to obtain the driver state")]
+    GetState(#[source] io::Error),
 
     /// Failed to register interface IP addresses
-    #[error(display = "Failed to register IP addresses for exclusions")]
-    RegisterIps(#[error(source)] io::Error),
+    #[error("Failed to register IP addresses for exclusions")]
+    RegisterIps(#[source] io::Error),
 
     /// Failed to clear interface IP addresses
-    #[error(display = "Failed to clear registered IP addresses")]
-    ClearIps(#[error(source)] io::Error),
+    #[error("Failed to clear registered IP addresses")]
+    ClearIps(#[source] io::Error),
 
     /// Failed to set up the driver event loop
-    #[error(display = "Failed to set up the driver event loop")]
-    EventThreadError(#[error(source)] io::Error),
+    #[error("Failed to set up the driver event loop")]
+    EventThreadError(#[source] io::Error),
 
     /// Failed to obtain default route
-    #[error(display = "Failed to obtain the default route")]
-    ObtainDefaultRoute(#[error(source)] talpid_routing::Error),
+    #[error("Failed to obtain the default route")]
+    ObtainDefaultRoute(#[source] talpid_routing::Error),
 
     /// Failed to obtain an IP address given a network interface LUID
-    #[error(display = "Failed to obtain IP address for interface LUID")]
-    LuidToIp(#[error(source)] talpid_windows_net::Error),
+    #[error("Failed to obtain IP address for interface LUID")]
+    LuidToIp(#[source] talpid_windows::net::Error),
 
     /// Failed to set up callback for monitoring default route changes
-    #[error(display = "Failed to register default route change callback")]
+    #[error("Failed to register default route change callback")]
     RegisterRouteChangeCallback,
 
     /// Unexpected IP parsing error
-    #[error(display = "Failed to parse IP address")]
+    #[error("Failed to parse IP address")]
     IpParseError,
 
     /// The request handling thread is stuck
-    #[error(display = "The ST request thread is stuck")]
+    #[error("The ST request thread is stuck")]
     RequestThreadStuck,
 
     /// The request handling thread is down
-    #[error(display = "The split tunnel monitor is down")]
+    #[error("The split tunnel monitor is down")]
     SplitTunnelDown,
 
     /// Failed to start the NTFS reparse point monitor
-    #[error(display = "Failed to start path monitor")]
-    StartPathMonitor(#[error(source)] io::Error),
+    #[error("Failed to start path monitor")]
+    StartPathMonitor(#[source] io::Error),
 
     /// A previous path update has not yet completed
-    #[error(display = "A previous update is not yet complete")]
+    #[error("A previous update is not yet complete")]
     AlreadySettingPaths,
 
     /// Resetting in the engaged state risks leaking into the tunnel
-    #[error(display = "Failed to reset driver because it is engaged")]
+    #[error("Failed to reset driver because it is engaged")]
     CannotResetEngaged,
 }
 
@@ -105,7 +109,7 @@ pub struct SplitTunnel {
     runtime: tokio::runtime::Handle,
     request_tx: RequestTx,
     event_thread: Option<std::thread::JoinHandle<()>>,
-    quit_event: Arc<windows::Event>,
+    quit_event: Arc<Event>,
     excluded_processes: Arc<RwLock<HashMap<usize, ExcludedProcess>>>,
     _route_change_callback: Option<CallbackHandle>,
     daemon_tx: Weak<mpsc::UnboundedSender<TunnelCommand>>,
@@ -191,14 +195,13 @@ impl SplitTunnel {
     fn spawn_event_listener(
         handle: Arc<driver::DeviceHandle>,
         excluded_processes: Arc<RwLock<HashMap<usize, ExcludedProcess>>>,
-    ) -> Result<(std::thread::JoinHandle<()>, Arc<windows::Event>), Error> {
-        let mut event_overlapped = windows::Overlapped::new(Some(
-            windows::Event::new(true, false).map_err(Error::EventThreadError)?,
+    ) -> Result<(std::thread::JoinHandle<()>, Arc<Event>), Error> {
+        let mut event_overlapped = Overlapped::new(Some(
+            Event::new(true, false).map_err(Error::EventThreadError)?,
         ))
         .map_err(Error::EventThreadError)?;
 
-        let quit_event =
-            Arc::new(windows::Event::new(true, false).map_err(Error::EventThreadError)?);
+        let quit_event = Arc::new(Event::new(true, false).map_err(Error::EventThreadError)?);
         let quit_event_copy = quit_event.clone();
 
         let event_thread = std::thread::spawn(move || {
@@ -237,11 +240,11 @@ impl SplitTunnel {
 
     fn fetch_next_event(
         device: &Arc<driver::DeviceHandle>,
-        quit_event: &windows::Event,
-        overlapped: &mut windows::Overlapped,
+        quit_event: &Event,
+        overlapped: &mut Overlapped,
         data_buffer: &mut Vec<u8>,
     ) -> io::Result<EventResult> {
-        if unsafe { driver::wait_for_single_object(quit_event.as_handle(), Some(Duration::ZERO)) }
+        if unsafe { driver::wait_for_single_object(quit_event.as_raw(), Some(Duration::ZERO)) }
             .is_ok()
         {
             return Ok(EventResult::Quit);
@@ -259,37 +262,35 @@ impl SplitTunnel {
                 overlapped.as_mut_ptr(),
             )
         }
-        .map_err(|error| {
+        .inspect_err(|error| {
             log::error!(
                 "{}",
                 error.display_chain_with_msg("DeviceIoControl failed to deque event")
             );
-            error
         })?;
 
         let event_objects = [
-            overlapped.get_event().unwrap().as_handle(),
-            quit_event.as_handle(),
+            overlapped.get_event().unwrap().as_raw(),
+            quit_event.as_raw(),
         ];
 
         let signaled_object =
-            unsafe { driver::wait_for_multiple_objects(&event_objects[..], false) }.map_err(
+            unsafe { driver::wait_for_multiple_objects(&event_objects[..], false) }.inspect_err(
                 |error| {
                     log::error!(
                         "{}",
                         error.display_chain_with_msg("wait_for_multiple_objects failed")
                     );
-                    error
                 },
             )?;
 
-        if signaled_object == quit_event.as_handle() {
+        if signaled_object == quit_event.as_raw() {
             // Quit event was signaled
             return Ok(EventResult::Quit);
         }
 
         let returned_bytes =
-            driver::get_overlapped_result(device, overlapped).map_err(|error| {
+            driver::get_overlapped_result(device, overlapped).inspect_err(|error| {
                 if error.raw_os_error() != Some(ERROR_OPERATION_ABORTED as i32) {
                     log::error!(
                         "{}",
@@ -298,7 +299,6 @@ impl SplitTunnel {
                         ),
                     );
                 }
-                error
             })?;
 
         data_buffer

@@ -2,18 +2,16 @@ use super::{
     get_best_default_route, get_best_default_route::route_has_gateway, Error, InterfaceAndGateway,
     Result,
 };
+use crate::debounce::BurstGuard;
 
 use std::{
     ffi::c_void,
-    io,
-    sync::{
-        mpsc::{channel, RecvTimeoutError, Sender},
-        Arc, Mutex,
-    },
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
+use talpid_types::win32_err;
 use windows_sys::Win32::{
-    Foundation::{BOOLEAN, HANDLE, NO_ERROR},
+    Foundation::{BOOLEAN, HANDLE},
     NetworkManagement::{
         IpHelper::{
             CancelMibChangeNotify2, ConvertInterfaceLuidToIndex, NotifyIpInterfaceChange,
@@ -24,7 +22,7 @@ use windows_sys::Win32::{
     },
 };
 
-use talpid_windows_net::AddressFamily;
+use talpid_windows::net::AddressFamily;
 
 const WIN_FALSE: BOOLEAN = 0;
 
@@ -65,12 +63,11 @@ impl DefaultRouteMonitorContext {
             let mut default_interface_index = 0;
             let route_luid = best_route.iface;
             // SAFETY: No clear safety specifications
-            if NO_ERROR as i32
-                == unsafe { ConvertInterfaceLuidToIndex(&route_luid, &mut default_interface_index) }
-            {
-                self.refresh_current_route = index == default_interface_index;
-            } else {
-                self.refresh_current_route = true;
+            match win32_err!(unsafe {
+                ConvertInterfaceLuidToIndex(&route_luid, &mut default_interface_index)
+            }) {
+                Ok(()) => self.refresh_current_route = index == default_interface_index,
+                Err(_) => self.refresh_current_route = true,
             }
         }
     }
@@ -115,7 +112,7 @@ pub struct DefaultRouteMonitor {
 }
 
 /// SAFETY: DefaultRouteMonitor is `Send` since `NotifyChangeHandle` is `Send` and
-/// `ContextAndBurstGuard` is `Sync` as it holds Mutex<T> and Arc<Mutex<T>> fields.
+/// `ContextAndBurstGuard` is `Sync` as it holds `Mutex<T>` and `Arc<Mutex<T>>` fields.
 unsafe impl Send for DefaultRouteMonitor {}
 
 impl Drop for DefaultRouteMonitor {
@@ -126,10 +123,8 @@ impl Drop for DefaultRouteMonitor {
         let context = unsafe { Box::from_raw(self.context as *mut ContextAndBurstGuard) };
 
         // Stop the burst guard
-        context.burst_guard.lock().unwrap().stop();
-
-        // Drop the context now that we are guaranteed nothing might try to access the context
-        drop(context);
+        let context = context.burst_guard.into_inner().unwrap();
+        context.stop();
     }
 }
 
@@ -143,12 +138,10 @@ impl Drop for NotifyChangeHandle {
         // SAFETY: There is no clear safety specification on this function. However self.0 should
         // point to a handle that has been allocated by windows and should be non-null. Even
         // if it would be null that would cause a panic rather than UB.
-        unsafe {
-            if NO_ERROR as i32 != CancelMibChangeNotify2(self.0) {
-                // If this callback is called after we free the context that could result in UB, in
-                // order to avoid that we panic.
-                panic!("Could not cancel change notification callback")
-            }
+        if let Err(e) = win32_err!(unsafe { CancelMibChangeNotify2(self.0) }) {
+            // If this callback is called after we free the context that could result in UB, in
+            // order to avoid that we panic.
+            panic!("Could not cancel change notification callback: {}", e)
         }
     }
 }
@@ -181,10 +174,17 @@ impl DefaultRouteMonitor {
             family,
         )));
 
+        const BURST_BUFFER_PERIOD: Duration = Duration::from_millis(200);
+        const BURST_LONGEST_BUFFER_PERIOD: Duration = Duration::from_secs(2);
+
         let moved_context = context.clone();
-        let burst_guard = Mutex::new(BurstGuard::new(move || {
-            moved_context.lock().unwrap().evaluate_routes();
-        }));
+        let burst_guard = Mutex::new(BurstGuard::new(
+            BURST_BUFFER_PERIOD,
+            BURST_LONGEST_BUFFER_PERIOD,
+            move || {
+                moved_context.lock().unwrap().evaluate_routes();
+            },
+        ));
 
         // SAFETY: We need to send the ContextAndBurstGuard to the windows notification functions as
         // a raw pointer. This imposes the requirement it is not mutated or dropped until
@@ -243,7 +243,7 @@ impl DefaultRouteMonitor {
         let mut handle_ptr = 0;
         // SAFETY: No clear safety specifications, context_ptr must be valid for as long as handle
         // has not been dropped.
-        let status = unsafe {
+        win32_err!(unsafe {
             NotifyRouteChange2(
                 family,
                 Some(route_change_callback),
@@ -251,19 +251,14 @@ impl DefaultRouteMonitor {
                 WIN_FALSE,
                 &mut handle_ptr,
             )
-        };
-
-        if NO_ERROR as i32 != status {
-            return Err(Error::RegisterNotifyRouteCallback(
-                io::Error::from_raw_os_error(status),
-            ));
-        }
+        })
+        .map_err(Error::RegisterNotifyRouteCallback)?;
         let notify_route_change_handle = NotifyChangeHandle(handle_ptr);
 
         let mut handle_ptr = 0;
         // SAFETY: No clear safety specifications, context_ptr must be valid for as long as handle
         // has not been dropped.
-        let status = unsafe {
+        win32_err!(unsafe {
             NotifyIpInterfaceChange(
                 family,
                 Some(interface_change_callback),
@@ -271,18 +266,14 @@ impl DefaultRouteMonitor {
                 WIN_FALSE,
                 &mut handle_ptr,
             )
-        };
-        if NO_ERROR as i32 != status {
-            return Err(Error::RegisterNotifyIpInterfaceCallback(
-                io::Error::from_raw_os_error(status),
-            ));
-        }
+        })
+        .map_err(Error::RegisterNotifyIpInterfaceCallback)?;
         let notify_interface_change_handle = NotifyChangeHandle(handle_ptr);
 
         let mut handle_ptr = 0;
         // SAFETY: No clear safety specifications, context_ptr must be valid for as long as handle
         // has not been dropped.
-        let status = unsafe {
+        win32_err!(unsafe {
             NotifyUnicastIpAddressChange(
                 family,
                 Some(ip_address_change_callback),
@@ -290,12 +281,8 @@ impl DefaultRouteMonitor {
                 WIN_FALSE,
                 &mut handle_ptr,
             )
-        };
-        if NO_ERROR as i32 != status {
-            return Err(Error::RegisterNotifyUnicastIpAddressCallback(
-                io::Error::from_raw_os_error(status),
-            ));
-        }
+        })
+        .map_err(Error::RegisterNotifyUnicastIpAddressCallback)?;
         let notify_address_change_handle = NotifyChangeHandle(handle_ptr);
 
         Ok((
@@ -315,14 +302,15 @@ unsafe extern "system" fn route_change_callback(
     _notification_type: MIB_NOTIFICATION_TYPE,
 ) {
     // SAFETY: We assume Windows provides this pointer correctly
-    let row = &*row;
+    let row = unsafe { &*row };
 
     if row.DestinationPrefix.PrefixLength != 0 || !route_has_gateway(row) {
         return;
     }
 
     // SAFETY: context must not be dropped or modified until this callback has been cancelled.
-    let context_and_burst: &ContextAndBurstGuard = &*(context as *const ContextAndBurstGuard);
+    let context_and_burst: &ContextAndBurstGuard =
+        unsafe { &*(context as *const ContextAndBurstGuard) };
     let mut context = context_and_burst.context.lock().unwrap();
 
     context.update_refresh_flag(&row.InterfaceLuid, row.InterfaceIndex);
@@ -338,10 +326,11 @@ unsafe extern "system" fn interface_change_callback(
     _notification_type: MIB_NOTIFICATION_TYPE,
 ) {
     // SAFETY: We assume Windows provides this pointer correctly
-    let row = &*row;
+    let row = unsafe { &*row };
 
     // SAFETY: context must not be dropped or modified until this callback has been cancelled.
-    let context_and_burst: &ContextAndBurstGuard = &*(context as *const ContextAndBurstGuard);
+    let context_and_burst: &ContextAndBurstGuard =
+        unsafe { &*(context as *const ContextAndBurstGuard) };
     let mut context = context_and_burst.context.lock().unwrap();
 
     context.update_refresh_flag(&row.InterfaceLuid, row.InterfaceIndex);
@@ -357,95 +346,13 @@ unsafe extern "system" fn ip_address_change_callback(
     _notification_type: MIB_NOTIFICATION_TYPE,
 ) {
     // SAFETY: We assume Windows provides this pointer correctly
-    let row = &*row;
+    let row = unsafe { &*row };
 
     // SAFETY: context must not be dropped or modified until this callback has been cancelled.
-    let context_and_burst: &ContextAndBurstGuard = &*(context as *const ContextAndBurstGuard);
+    let context_and_burst: &ContextAndBurstGuard =
+        unsafe { &*(context as *const ContextAndBurstGuard) };
     let mut context = context_and_burst.context.lock().unwrap();
 
     context.update_refresh_flag(&row.InterfaceLuid, row.InterfaceIndex);
     context_and_burst.burst_guard.lock().unwrap().trigger();
-}
-
-/// BurstGuard is a wrapper for a function that protects that function from being called too many
-/// times in a short amount of time. To call the function use `burst_guard.trigger()`, at that point
-/// `BurstGuard` will wait for `buffer_period` and if no more calls to `trigger` are made then it
-/// will call the wrapped function. If another call to `trigger` is made during this wait then it
-/// will wait another `buffer_period`, this happens over and over until either
-/// `longest_buffer_period` time has elapsed or until no call to `trigger` has been made in
-/// `buffer_period`. At which point the wrapped function will be called.
-struct BurstGuard {
-    sender: Sender<BurstGuardEvent>,
-}
-
-enum BurstGuardEvent {
-    Trigger,
-    Shutdown(Sender<()>),
-}
-
-impl BurstGuard {
-    fn new<F: Fn() + Send + 'static>(callback: F) -> Self {
-        /// This is the period of time the `BurstGuard` will wait for a new trigger to be sent
-        /// before it calls the callback.
-        const BURST_BUFFER_PERIOD: Duration = Duration::from_millis(200);
-        /// This is the longest period that the `BurstGuard` will wait from the first trigger till
-        /// it calls the callback.
-        const BURST_LONGEST_BUFFER_PERIOD: Duration = Duration::from_secs(2);
-
-        let (sender, listener) = channel();
-        std::thread::spawn(move || {
-            // The `stop` implementation assumes that this thread will not call `callback` again
-            // if the listener has been dropped.
-            while let Ok(message) = listener.recv() {
-                match message {
-                    BurstGuardEvent::Trigger => {
-                        let start = Instant::now();
-                        loop {
-                            match listener.recv_timeout(BURST_BUFFER_PERIOD) {
-                                Ok(BurstGuardEvent::Trigger) => {
-                                    if start.elapsed() >= BURST_LONGEST_BUFFER_PERIOD {
-                                        callback();
-                                        break;
-                                    }
-                                }
-                                Ok(BurstGuardEvent::Shutdown(tx)) => {
-                                    let _ = tx.send(());
-                                    return;
-                                }
-                                Err(RecvTimeoutError::Timeout) => {
-                                    callback();
-                                    break;
-                                }
-                                Err(RecvTimeoutError::Disconnected) => {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    BurstGuardEvent::Shutdown(tx) => {
-                        let _ = tx.send(());
-                        return;
-                    }
-                }
-            }
-        });
-        Self { sender }
-    }
-
-    /// When `stop` returns an then the `BurstGuard` thread is guaranteed to not make any further
-    /// calls to `callback`.
-    fn stop(&self) {
-        let (sender, listener) = channel();
-        // If we could not send then it means the thread has already shut down and we can return
-        if self.sender.send(BurstGuardEvent::Shutdown(sender)).is_ok() {
-            // We do not care what the result is, if it is OK it means the thread shut down, if
-            // it is Err it also means it shut down.
-            let _ = listener.recv();
-        }
-    }
-
-    /// Non-blocking
-    fn trigger(&self) {
-        self.sender.send(BurstGuardEvent::Trigger).unwrap();
-    }
 }

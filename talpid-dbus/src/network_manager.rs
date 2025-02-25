@@ -61,51 +61,50 @@ const NM_DEVICE_STATE_CHANGED: &str = "StateChanged";
 pub type Result<T> = std::result::Result<T, Error>;
 type NetworkSettings<'a> = HashMap<String, HashMap<String, Variant<Box<dyn RefArg + 'a>>>>;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Error while communicating over Dbus")]
-    Dbus(#[error(source)] dbus::Error),
+    #[error("Error while communicating over Dbus")]
+    Dbus(#[from] dbus::Error),
 
-    #[error(display = "Failed to match the returned D-Bus object with expected type")]
-    MatchDBusTypeError(#[error(source)] dbus::arg::TypeMismatchError),
+    #[error("Failed to match the returned D-Bus object with expected type")]
+    MatchDBusTypeError(#[from] dbus::arg::TypeMismatchError),
 
     #[error(
-        display = "NM is configured to manage DNS via systemd-resolved but systemd-resolved is not managing /etc/resolv.conf: {}",
-        _0
+        "NM is configured to manage DNS via systemd-resolved but systemd-resolved is not managing /etc/resolv.conf: {0}",
     )]
     SystemdResolvedNotManagingResolvconf(systemd_resolved::Error),
 
-    #[error(display = "Configuration has no device associated to it")]
+    #[error("Configuration has no device associated to it")]
     NoDevice,
 
-    #[error(display = "NetworkManager is too old: {}.{}", _0, _1)]
+    #[error("NetworkManager is too old: {0}.{1}")]
     NMTooOld(u32, u32),
 
-    #[error(display = "NetworkManager is too new to manage DNS: {}.{}", _0, _1)]
+    #[error("NetworkManager is too new to manage DNS: {0}.{1}")]
     NMTooNewFroDns(u32, u32),
 
-    #[error(display = "Failed to parse NetworkManager version string: {}", _0)]
+    #[error("Failed to parse NetworkManager version string: {0}")]
     ParseNmVersionError(String),
 
-    #[error(display = "Device inactive: {}", _0)]
+    #[error("Device inactive: {0}")]
     DeviceNotReady(u32),
 
-    #[error(display = "Device not found")]
+    #[error("Device not found")]
     DeviceNotFound,
 
-    #[error(display = "NetworkManager not detected")]
+    #[error("NetworkManager not detected")]
     NetworkManagerNotDetected,
 
-    #[error(display = "NetworkManager is using dnsmasq to manage DNS")]
+    #[error("NetworkManager is using dnsmasq to manage DNS")]
     UsingDnsmasq,
 
-    #[error(display = "NetworkManager is too old: {}", 0)]
+    #[error("NetworkManager is too old: {0}")]
     TooOldNetworkManager(String),
 
-    #[error(display = "NetworkManager is not managing DNS")]
+    #[error("NetworkManager is not managing DNS")]
     NetworkManagerNotManagingDns,
 
-    #[error(display = "Failed to get devices from NetworkManager object")]
+    #[error("Failed to get devices from NetworkManager object")]
     ObtainDevices,
 }
 
@@ -444,7 +443,7 @@ impl NetworkManager {
         Proxy::new(NM_BUS, NM_DNS_MANAGER_PATH, RPC_TIMEOUT, &*self.connection)
     }
 
-    fn as_path<'a>(&'a self, device: &'a dbus::Path<'a>) -> Proxy<'a, &SyncConnection> {
+    fn as_path<'a>(&'a self, device: &'a dbus::Path<'a>) -> Proxy<'a, &'a SyncConnection> {
         Proxy::new(NM_BUS, device, RPC_TIMEOUT, &*self.connection)
     }
 
@@ -454,7 +453,7 @@ impl NetworkManager {
 
         let device = self.as_path(&device_path);
         // Get the last applied connection
-        let (mut settings, version_id): (NetworkSettings, u64) =
+        let (mut settings, version_id): (NetworkSettings<'_>, u64) =
             device.method_call(NM_DEVICE, "GetAppliedConnection", (0u32,))?;
 
         // Keep changed routes.
@@ -575,8 +574,11 @@ impl NetworkManager {
         settings: Settings,
         version_id: u64,
     ) -> Result<()> {
-        self.as_path(device)
-            .method_call(NM_DEVICE, "Reapply", (settings, version_id, 0u32))?;
+        self.as_path(device).method_call::<(), _, _, _>(
+            NM_DEVICE,
+            "Reapply",
+            (settings, version_id, 0u32),
+        )?;
         Ok(())
     }
 
@@ -684,11 +686,11 @@ pub struct WireguardTunnel {
 }
 
 impl WireguardTunnel {
-    fn device_proxy<'a>(&'a self, connection: &'a SyncConnection) -> Proxy<'a, &SyncConnection> {
+    fn device_proxy<'a>(&'a self, connection: &'a SyncConnection) -> Proxy<'a, &'a SyncConnection> {
         Proxy::new(NM_BUS, &self.device_path, RPC_TIMEOUT, connection)
     }
 
-    fn config_proxy<'a>(&'a self, connection: &'a SyncConnection) -> Proxy<'a, &SyncConnection> {
+    fn config_proxy<'a>(&'a self, connection: &'a SyncConnection) -> Proxy<'a, &'a SyncConnection> {
         Proxy::new(NM_BUS, &self.config_path, RPC_TIMEOUT, connection)
     }
 }

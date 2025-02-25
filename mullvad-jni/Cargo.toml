@@ -1,36 +1,37 @@
 [package]
 name = "mullvad-jni"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
 description = "JNI interface for the Mullvad daemon"
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 # Allow the API server to use to be configured
 api-override = ["mullvad-api/api-override"]
 
 [lib]
-crate_type = ["cdylib"]
+crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-err-derive = "0.3.1"
-futures = "0.3"
-ipnetwork = "0.16"
-jnix = { version = "0.5", features = ["derive"] }
-lazy_static = "1"
-log = "0.4"
+tokio = { workspace = true, features = ["rt"] }
+
+thiserror = { workspace = true }
+futures = { workspace = true }
+ipnetwork = { workspace = true }
+jnix = { version = "0.5.1", features = ["derive"] }
+log = { workspace = true }
 log-panics = "2"
 nix = "0.23"
 rand = "0.8.5"
-tokio = "1.8"
 
+mullvad-api = { path = "../mullvad-api" }
 mullvad-daemon = { path = "../mullvad-daemon" }
-mullvad-paths = { path = "../mullvad-paths" }
 mullvad-problem-report = { path = "../mullvad-problem-report" }
 mullvad-types = { path = "../mullvad-types" }
-mullvad-api = { path = "../mullvad-api" }
-talpid-core = { path = "../talpid-core" }
 talpid-tunnel = { path = "../talpid-tunnel" }
 talpid-types = { path = "../talpid-types" }

@@ -1,4 +1,6 @@
-use crate::dns::DnsMonitorT;
+#![allow(clippy::undocumented_unsafe_blocks)] // Remove me if you dare.
+
+use crate::dns::{DnsMonitorT, ResolvedDnsConfig};
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -9,51 +11,50 @@ use std::{
     time::Duration,
 };
 use talpid_types::{net::IpVersion, ErrorExt};
-use talpid_windows_net::{index_from_luid, luid_from_alias};
+use talpid_windows::net::{index_from_luid, luid_from_alias};
 use windows_sys::Win32::{
     Foundation::{MAX_PATH, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::{
-        SystemInformation::GetSystemDirectoryW, Threading::WaitForSingleObject,
-        WindowsProgramming::INFINITE,
+        SystemInformation::GetSystemDirectoryW,
+        Threading::{WaitForSingleObject, INFINITE},
     },
 };
 
 const NETSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Errors that can happen when configuring DNS on Windows.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failure to obtain an interface LUID given an alias.
-    #[error(display = "Failed to obtain LUID for the interface alias")]
-    ObtainInterfaceLuid(#[error(source)] io::Error),
+    #[error("Failed to obtain LUID for the interface alias")]
+    ObtainInterfaceLuid(#[source] io::Error),
 
     /// Failure to obtain an interface index.
-    #[error(display = "Failed to obtain index of the interface")]
-    ObtainInterfaceIndex(#[error(source)] io::Error),
+    #[error("Failed to obtain index of the interface")]
+    ObtainInterfaceIndex(#[source] io::Error),
 
     /// Failure to spawn netsh subprocess.
-    #[error(display = "Failed to spawn 'netsh'")]
-    SpawnNetsh(#[error(source)] io::Error),
+    #[error("Failed to spawn 'netsh'")]
+    SpawnNetsh(#[source] io::Error),
 
     /// Failure to spawn netsh subprocess.
-    #[error(display = "Failed to obtain system directory")]
-    GetSystemDir(#[error(source)] io::Error),
+    #[error("Failed to obtain system directory")]
+    GetSystemDir(#[source] io::Error),
 
     /// Failure to write to stdin.
-    #[error(display = "Failed to write to stdin for 'netsh'")]
-    NetshInput(#[error(source)] io::Error),
+    #[error("Failed to write to stdin for 'netsh'")]
+    NetshInput(#[source] io::Error),
 
     /// Failure to wait for netsh result.
-    #[error(display = "Failed to wait for 'netsh'")]
-    WaitNetsh(#[error(source)] io::Error),
+    #[error("Failed to wait for 'netsh'")]
+    WaitNetsh(#[source] io::Error),
 
     /// netsh returned a non-zero status.
-    #[error(display = "'netsh' returned an error: {:?}", _0)]
+    #[error("'netsh' returned an error: {0:?}")]
     Netsh(Option<i32>),
 
     /// netsh did not return in a timely manner.
-    #[error(display = "'netsh' took too long to complete")]
+    #[error("'netsh' took too long to complete")]
     NetshTimeout,
 }
 
@@ -70,7 +71,8 @@ impl DnsMonitorT for DnsMonitor {
         })
     }
 
-    fn set(&mut self, interface: &str, servers: &[IpAddr]) -> Result<(), Error> {
+    fn set(&mut self, interface: &str, config: ResolvedDnsConfig) -> Result<(), Error> {
+        let servers = config.tunnel_config();
         let interface_luid = luid_from_alias(interface).map_err(Error::ObtainInterfaceLuid)?;
         let interface_index =
             index_from_luid(&interface_luid).map_err(Error::ObtainInterfaceIndex)?;

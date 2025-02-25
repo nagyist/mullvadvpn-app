@@ -3,14 +3,14 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 04/06/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadREST
 import MullvadTypes
 
-extension REST.Error: DisplayError {
+extension REST.Error: MullvadTypes.DisplayError {
     public var displayErrorDescription: String? {
         switch self {
         case let .network(urlError):

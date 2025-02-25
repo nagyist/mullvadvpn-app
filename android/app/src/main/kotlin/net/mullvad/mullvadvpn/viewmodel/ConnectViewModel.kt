@@ -1,98 +1,230 @@
 package net.mullvad.mullvadvpn.viewmodel
 
+import android.content.res.Resources
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import net.mullvad.mullvadvpn.R
 import net.mullvad.mullvadvpn.compose.state.ConnectUiState
-import net.mullvad.mullvadvpn.model.TunnelState
-import net.mullvad.mullvadvpn.ui.serviceconnection.ConnectionProxy
-import net.mullvad.mullvadvpn.ui.serviceconnection.LocationInfoCache
-import net.mullvad.mullvadvpn.ui.serviceconnection.RelayListListener
-import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionContainer
-import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionManager
-import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionState
-import net.mullvad.mullvadvpn.util.appVersionCallbackFlow
-import net.mullvad.mullvadvpn.util.callbackFlowFromNotifier
+import net.mullvad.mullvadvpn.lib.model.ActionAfterDisconnect
+import net.mullvad.mullvadvpn.lib.model.ConnectError
+import net.mullvad.mullvadvpn.lib.model.DeviceState
+import net.mullvad.mullvadvpn.lib.model.PrepareError
+import net.mullvad.mullvadvpn.lib.model.TunnelState
+import net.mullvad.mullvadvpn.lib.model.WebsiteAuthToken
+import net.mullvad.mullvadvpn.lib.shared.AccountRepository
+import net.mullvad.mullvadvpn.lib.shared.ConnectionProxy
+import net.mullvad.mullvadvpn.lib.shared.DeviceRepository
+import net.mullvad.mullvadvpn.repository.ChangelogRepository
+import net.mullvad.mullvadvpn.repository.InAppNotificationController
+import net.mullvad.mullvadvpn.repository.NewDeviceRepository
+import net.mullvad.mullvadvpn.usecase.LastKnownLocationUseCase
+import net.mullvad.mullvadvpn.usecase.OutOfTimeUseCase
+import net.mullvad.mullvadvpn.usecase.PaymentUseCase
+import net.mullvad.mullvadvpn.usecase.SelectedLocationTitleUseCase
 import net.mullvad.mullvadvpn.util.combine
+import net.mullvad.mullvadvpn.util.daysFromNow
+import net.mullvad.mullvadvpn.util.isSuccess
+import net.mullvad.mullvadvpn.util.withPrev
 
-class ConnectViewModel(serviceConnectionManager: ServiceConnectionManager) : ViewModel() {
-    private val _shared: SharedFlow<ServiceConnectionContainer> =
-        serviceConnectionManager.connectionState
-            .flatMapLatest { state ->
-                if (state is ServiceConnectionState.ConnectedReady) {
-                    flowOf(state.container)
-                } else {
-                    emptyFlow()
-                }
-            }
-            .shareIn(viewModelScope, SharingStarted.WhileSubscribed())
+@Suppress("LongParameterList")
+class ConnectViewModel(
+    private val accountRepository: AccountRepository,
+    private val deviceRepository: DeviceRepository,
+    private val changelogRepository: ChangelogRepository,
+    inAppNotificationController: InAppNotificationController,
+    private val newDeviceRepository: NewDeviceRepository,
+    selectedLocationTitleUseCase: SelectedLocationTitleUseCase,
+    private val outOfTimeUseCase: OutOfTimeUseCase,
+    private val paymentUseCase: PaymentUseCase,
+    private val connectionProxy: ConnectionProxy,
+    lastKnownLocationUseCase: LastKnownLocationUseCase,
+    private val resources: Resources,
+    private val isPlayBuild: Boolean,
+    private val isFdroidBuild: Boolean,
+    private val packageName: String,
+) : ViewModel() {
+    private val _uiSideEffect = Channel<UiSideEffect>()
 
-    private val _isTunnelInfoExpanded = MutableStateFlow(false)
+    val uiSideEffect =
+        merge(_uiSideEffect.receiveAsFlow(), outOfTimeEffect(), revokedDeviceEffect())
 
+    @OptIn(FlowPreview::class)
     val uiState: StateFlow<ConnectUiState> =
-        _shared
-            .flatMapLatest { serviceConnection ->
-                combine(
-                    serviceConnection.locationInfoCache.locationCallbackFlow(),
-                    serviceConnection.relayListListener.relayListCallbackFlow(),
-                    serviceConnection.appVersionInfoCache.appVersionCallbackFlow(),
-                    serviceConnection.connectionProxy.tunnelUiStateFlow(),
-                    serviceConnection.connectionProxy.tunnelRealStateFlow(),
-                    _isTunnelInfoExpanded
-                ) {
-                    location,
-                    relayLocation,
-                    versionInfo,
-                    tunnelUiState,
-                    tunnelRealState,
-                    isTunnelInfoExpanded ->
-                    ConnectUiState(
-                        location = location,
-                        relayLocation = relayLocation,
-                        versionInfo = versionInfo,
-                        tunnelUiState = tunnelUiState,
-                        tunnelRealState = tunnelRealState,
-                        isTunnelInfoExpanded = isTunnelInfoExpanded
-                    )
-                }
+        combine(
+                selectedLocationTitleUseCase(),
+                inAppNotificationController.notifications,
+                connectionProxy.tunnelState.withPrev(),
+                lastKnownLocationUseCase.lastKnownDisconnectedLocation,
+                accountRepository.accountData,
+                deviceRepository.deviceState.map { it?.displayName() },
+            ) {
+                selectedRelayItemTitle,
+                notifications,
+                (tunnelState, prevTunnelState),
+                lastKnownDisconnectedLocation,
+                accountData,
+                deviceName ->
+                ConnectUiState(
+                    location =
+                        when (tunnelState) {
+                            is TunnelState.Disconnected ->
+                                tunnelState.location ?: lastKnownDisconnectedLocation
+                            is TunnelState.Connecting -> tunnelState.location
+                            is TunnelState.Connected -> tunnelState.location
+                            is TunnelState.Disconnecting ->
+                                when (tunnelState.actionAfterDisconnect) {
+                                    ActionAfterDisconnect.Nothing -> lastKnownDisconnectedLocation
+                                    ActionAfterDisconnect.Block -> lastKnownDisconnectedLocation
+                                    // Keep the previous connected location when reconnecting, after
+                                    // this state we will reach Connecting with the new relay
+                                    // location
+                                    ActionAfterDisconnect.Reconnect -> prevTunnelState?.location()
+                                }
+                            is TunnelState.Error -> lastKnownDisconnectedLocation
+                        },
+                    selectedRelayItemTitle = selectedRelayItemTitle,
+                    tunnelState = tunnelState,
+                    showLocation =
+                        when (tunnelState) {
+                            is TunnelState.Disconnected -> tunnelState.location != null
+                            is TunnelState.Disconnecting -> {
+                                when (tunnelState.actionAfterDisconnect) {
+                                    ActionAfterDisconnect.Nothing -> false
+                                    ActionAfterDisconnect.Block -> true
+                                    ActionAfterDisconnect.Reconnect -> false
+                                }
+                            }
+                            is TunnelState.Connecting -> false
+                            is TunnelState.Connected -> false
+                            is TunnelState.Error -> true
+                        },
+                    inAppNotification = notifications.firstOrNull(),
+                    deviceName = deviceName,
+                    daysLeftUntilExpiry = accountData?.expiryDate?.daysFromNow(),
+                    isPlayBuild = isPlayBuild,
+                )
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), ConnectUiState.INITIAL)
 
-    private fun LocationInfoCache.locationCallbackFlow() = callbackFlow {
-        onNewLocation = { this.trySend(it) }
-        awaitClose { onNewLocation = null }
+    init {
+        viewModelScope.launch {
+            if (paymentUseCase.verifyPurchases().isSuccess()) {
+                accountRepository.getAccountData()
+            }
+        }
+        viewModelScope.launch { deviceRepository.updateDevice() }
     }
 
-    private fun RelayListListener.relayListCallbackFlow() = callbackFlow {
-        onRelayListChange = { _, item -> this.trySend(item) }
-        awaitClose { onRelayListChange = null }
+    fun onDisconnectClick() {
+        viewModelScope.launch {
+            connectionProxy.disconnect().onLeft {
+                _uiSideEffect.send(UiSideEffect.ConnectError.Generic)
+            }
+        }
     }
 
-    private fun ConnectionProxy.tunnelUiStateFlow(): Flow<TunnelState> =
-        callbackFlowFromNotifier(this.onUiStateChange)
-            .debounce(TUNNEL_STATE_UPDATE_DEBOUNCE_DURATION_MILLIS)
+    fun onReconnectClick() {
+        viewModelScope.launch {
+            connectionProxy.reconnect().onLeft {
+                _uiSideEffect.send(UiSideEffect.ConnectError.Generic)
+            }
+        }
+    }
 
-    private fun ConnectionProxy.tunnelRealStateFlow(): Flow<TunnelState> =
-        callbackFlowFromNotifier(this.onStateChange)
-            .debounce(TUNNEL_STATE_UPDATE_DEBOUNCE_DURATION_MILLIS)
+    fun onConnectClick() {
+        viewModelScope.launch {
+            connectionProxy.connect().onLeft { connectError ->
+                when (connectError) {
+                    is ConnectError.Unknown -> _uiSideEffect.send(UiSideEffect.ConnectError.Generic)
+                    is ConnectError.NotPrepared ->
+                        _uiSideEffect.send(UiSideEffect.NotPrepared(connectError.error))
+                }
+            }
+        }
+    }
 
-    fun toggleTunnelInfoExpansion() {
-        _isTunnelInfoExpanded.value = _isTunnelInfoExpanded.value.not()
+    fun createVpnProfileResult(hasVpnPermission: Boolean) {
+        viewModelScope.launch {
+            if (hasVpnPermission) {
+                connectionProxy.connect()
+            } else {
+                _uiSideEffect.send(UiSideEffect.ConnectError.PermissionDenied)
+            }
+        }
+    }
+
+    fun onCancelClick() {
+        viewModelScope.launch {
+            connectionProxy.disconnect().onLeft {
+                _uiSideEffect.send(UiSideEffect.ConnectError.Generic)
+            }
+        }
+    }
+
+    fun onManageAccountClick() {
+        viewModelScope.launch {
+            val wwwAuthToken = accountRepository.getWebsiteAuthToken()
+            _uiSideEffect.send(UiSideEffect.OpenAccountManagementPageInBrowser(wwwAuthToken))
+        }
+    }
+
+    fun openAppListing() =
+        viewModelScope.launch {
+            val uri =
+                if (isPlayBuild || isFdroidBuild) {
+                    resources.getString(R.string.market_uri, packageName)
+                } else {
+                    resources.getString(R.string.download_url)
+                }
+            _uiSideEffect.send(UiSideEffect.OpenUri(Uri.parse(uri)))
+        }
+
+    fun dismissNewDeviceNotification() {
+        newDeviceRepository.clearNewDeviceCreatedNotification()
+    }
+
+    fun dismissNewChangelogNotification() =
+        viewModelScope.launch { changelogRepository.setDismissNewChangelogNotification() }
+
+    private fun outOfTimeEffect() =
+        outOfTimeUseCase.isOutOfTime.filter { it == true }.map { UiSideEffect.OutOfTime }
+
+    private fun revokedDeviceEffect() =
+        deviceRepository.deviceState.filterIsInstance<DeviceState.Revoked>().map {
+            UiSideEffect.RevokedDevice
+        }
+
+    sealed interface UiSideEffect {
+        data class OpenAccountManagementPageInBrowser(val token: WebsiteAuthToken?) : UiSideEffect
+
+        data object OutOfTime : UiSideEffect
+
+        data class OpenUri(val uri: Uri) : UiSideEffect
+
+        data object RevokedDevice : UiSideEffect
+
+        data class NotPrepared(val prepareError: PrepareError) : UiSideEffect
+
+        sealed interface ConnectError : UiSideEffect {
+            data object Generic : ConnectError
+
+            data object PermissionDenied : ConnectError
+        }
     }
 
     companion object {
-        const val TUNNEL_STATE_UPDATE_DEBOUNCE_DURATION_MILLIS: Long = 200
+        const val UI_STATE_DEBOUNCE_DURATION_MILLIS: Long = 200
     }
 }

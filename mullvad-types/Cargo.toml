@@ -1,25 +1,28 @@
 [package]
 name = "mullvad-types"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
 description = "Common base data structures for Mullvad VPN client"
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-chrono = { version = "0.4.26", features = ["serde"] }
-err-derive = "0.3.1"
-ipnetwork = "0.16"
-lazy_static = "1.1.0"
-log = "0.4"
+either = "1.11"
+chrono = { workspace = true, features = ["clock", "serde"] }
+thiserror = { workspace = true }
+ipnetwork = { workspace = true }
+log = { workspace = true }
 regex = "1"
-serde = { version = "1.0", features = ["derive"] }
-rand = "0.8"
+serde = { workspace = true, features = ["derive"] }
+uuid = { version = "1.4.1", features = ["v4", "serde" ] }
 
 talpid-types = { path = "../talpid-types" }
+intersection-derive = { path = "intersection-derive" }
 
-clap = { version = "4.2.7", features = ["derive"], optional = true }
 
-[target.'cfg(target_os = "android")'.dependencies]
-jnix = { version = "0.5", features = ["derive"] }
+clap = { workspace = true , optional = true }
+

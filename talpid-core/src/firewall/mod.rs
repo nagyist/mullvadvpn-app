@@ -1,12 +1,12 @@
+#[cfg(not(target_os = "android"))]
+use crate::dns::ResolvedDnsConfig;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
-use lazy_static::lazy_static;
-#[cfg(windows)]
-use std::path::PathBuf;
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::LazyLock,
 };
-use talpid_types::net::{AllowedEndpoint, AllowedTunnelTraffic, Endpoint};
+use talpid_types::net::{AllowedEndpoint, AllowedTunnelTraffic, ALLOWED_LAN_NETS};
 
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
@@ -17,7 +17,7 @@ mod imp;
 mod imp;
 
 #[cfg(windows)]
-#[path = "windows.rs"]
+#[path = "windows/mod.rs"]
 mod imp;
 
 #[cfg(target_os = "android")]
@@ -26,48 +26,31 @@ mod imp;
 
 pub use self::imp::Error;
 
-lazy_static! {
-    /// When "allow local network" is enabled the app will allow traffic to and from these networks.
-    pub(crate) static ref ALLOWED_LAN_NETS: [IpNetwork; 6] = [
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 0, 0, 0), 8).unwrap()),
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(172, 16, 0, 0), 12).unwrap()),
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(192, 168, 0, 0), 16).unwrap()),
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(169, 254, 0, 0), 16).unwrap()),
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10).unwrap()),
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7).unwrap()),
-    ];
-    /// When "allow local network" is enabled the app will allow traffic to these networks.
-    pub(crate) static ref ALLOWED_LAN_MULTICAST_NETS: [IpNetwork; 8] = [
-        // Local network broadcast. Not routable
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(255, 255, 255, 255), 32).unwrap()),
-        // Local subnetwork multicast. Not routable
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(224, 0, 0, 0), 24).unwrap()),
-        // Admin-local IPv4 multicast.
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(239, 0, 0, 0), 8).unwrap()),
-        // Interface-local IPv6 multicast.
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xff01, 0, 0, 0, 0, 0, 0, 0), 16).unwrap()),
-        // Link-local IPv6 multicast. IPv6 equivalent of 224.0.0.0/24
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0), 16).unwrap()),
-        // Realm-local IPv6 multicast.
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xff03, 0, 0, 0, 0, 0, 0, 0), 16).unwrap()),
-        // Admin-local IPv6 multicast.
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xff04, 0, 0, 0, 0, 0, 0, 0), 16).unwrap()),
-        // Site-local IPv6 multicast.
-        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0, 0), 16).unwrap()),
-    ];
-    static ref IPV6_LINK_LOCAL: Ipv6Network = Ipv6Network::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10).unwrap();
-    /// The allowed target addresses of outbound DHCPv6 requests
-    static ref DHCPV6_SERVER_ADDRS: [Ipv6Addr; 2] = [
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static IPV6_LINK_LOCAL: LazyLock<Ipv6Network> =
+    LazyLock::new(|| Ipv6Network::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10).unwrap());
+/// The allowed target addresses of outbound DHCPv6 requests
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static DHCPV6_SERVER_ADDRS: LazyLock<[Ipv6Addr; 2]> = LazyLock::new(|| {
+    [
         Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2),
         Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 1, 3),
-    ];
-    static ref ROUTER_SOLICITATION_OUT_DST_ADDR: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
-    static ref SOLICITED_NODE_MULTICAST: Ipv6Network = Ipv6Network::new(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xFF00, 0), 104).unwrap();
-    static ref LOOPBACK_NETS: [IpNetwork; 2] = [
-        IpNetwork::V4(ipnetwork::Ipv4Network::new(Ipv4Addr::new(127, 0, 0, 0), 8).unwrap()),
-        IpNetwork::V6(ipnetwork::Ipv6Network::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 128).unwrap()),
-    ];
-}
+    ]
+});
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static ROUTER_SOLICITATION_OUT_DST_ADDR: LazyLock<Ipv6Addr> =
+    LazyLock::new(|| Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2));
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static SOLICITED_NODE_MULTICAST: LazyLock<Ipv6Network> = LazyLock::new(|| {
+    Ipv6Network::new(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xFF00, 0), 104).unwrap()
+});
+static LOOPBACK_NETS: LazyLock<[IpNetwork; 2]> = LazyLock::new(|| {
+    [
+        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(127, 0, 0, 0), 8).unwrap()),
+        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 128).unwrap()),
+    ]
+});
+
 #[cfg(all(unix, not(target_os = "android")))]
 const DHCPV4_SERVER_PORT: u16 = 67;
 #[cfg(all(unix, not(target_os = "android")))]
@@ -99,7 +82,7 @@ pub enum FirewallPolicy {
     /// Allow traffic only to server
     Connecting {
         /// The peer endpoint that should be allowed.
-        peer_endpoint: Endpoint,
+        peer_endpoint: AllowedEndpoint,
         /// Metadata about the tunnel and tunnel interface.
         tunnel: Option<crate::tunnel::TunnelMetadata>,
         /// Flag setting if communication with LAN networks should be possible.
@@ -108,25 +91,33 @@ pub enum FirewallPolicy {
         allowed_endpoint: AllowedEndpoint,
         /// Networks for which to permit in-tunnel traffic.
         allowed_tunnel_traffic: AllowedTunnelTraffic,
-        /// A process that is allowed to send packets to the relay.
-        #[cfg(windows)]
-        relay_client: PathBuf,
+        /// Interface to redirect (VPN tunnel) traffic to
+        #[cfg(target_os = "macos")]
+        redirect_interface: Option<String>,
+        /// Destination port for DNS traffic redirection. Traffic destined to `127.0.0.1:53` will
+        /// be redirected to `127.0.0.1:$dns_redirect_port`.
+        #[cfg(target_os = "macos")]
+        dns_redirect_port: u16,
     },
 
     /// Allow traffic only to server and over tunnel interface
     Connected {
         /// The peer endpoint that should be allowed.
-        peer_endpoint: Endpoint,
+        peer_endpoint: AllowedEndpoint,
         /// Metadata about the tunnel and tunnel interface.
         tunnel: crate::tunnel::TunnelMetadata,
         /// Flag setting if communication with LAN networks should be possible.
         allow_lan: bool,
         /// Servers that are allowed to respond to DNS requests.
         #[cfg(not(target_os = "android"))]
-        dns_servers: Vec<IpAddr>,
-        /// A process that is allowed to send packets to the relay.
-        #[cfg(windows)]
-        relay_client: PathBuf,
+        dns_config: ResolvedDnsConfig,
+        /// Interface to redirect (VPN tunnel) traffic to
+        #[cfg(target_os = "macos")]
+        redirect_interface: Option<String>,
+        /// Destination port for DNS traffic redirection. Traffic destined to `127.0.0.1:53` will
+        /// be redirected to `127.0.0.1:$dns_redirect_port`.
+        #[cfg(target_os = "macos")]
+        dns_redirect_port: u16,
     },
 
     /// Block all network traffic in and out from the computer.
@@ -140,6 +131,64 @@ pub enum FirewallPolicy {
         #[cfg(target_os = "macos")]
         dns_redirect_port: u16,
     },
+}
+
+impl FirewallPolicy {
+    /// Return the tunnel peer endpoint, if available
+    pub fn peer_endpoint(&self) -> Option<&AllowedEndpoint> {
+        match self {
+            FirewallPolicy::Connecting { peer_endpoint, .. }
+            | FirewallPolicy::Connected { peer_endpoint, .. } => Some(peer_endpoint),
+            _ => None,
+        }
+    }
+
+    /// Return the allowed endpoint, if available
+    pub fn allowed_endpoint(&self) -> Option<&AllowedEndpoint> {
+        match self {
+            FirewallPolicy::Connecting {
+                allowed_endpoint, ..
+            }
+            | FirewallPolicy::Blocked {
+                allowed_endpoint: Some(allowed_endpoint),
+                ..
+            } => Some(allowed_endpoint),
+            _ => None,
+        }
+    }
+
+    /// Return tunnel metadata, if available
+    pub fn tunnel(&self) -> Option<&crate::tunnel::TunnelMetadata> {
+        match self {
+            FirewallPolicy::Connecting {
+                tunnel: Some(tunnel),
+                ..
+            }
+            | FirewallPolicy::Connected { tunnel, .. } => Some(tunnel),
+            _ => None,
+        }
+    }
+
+    /// Return allowed in-tunnel traffic
+    pub fn allowed_tunnel_traffic(&self) -> &AllowedTunnelTraffic {
+        match self {
+            FirewallPolicy::Connecting {
+                allowed_tunnel_traffic,
+                ..
+            } => allowed_tunnel_traffic,
+            FirewallPolicy::Connected { .. } => &AllowedTunnelTraffic::All,
+            _ => &AllowedTunnelTraffic::None,
+        }
+    }
+
+    /// Return whether LAN traffic is allowed
+    pub fn allow_lan(&self) -> bool {
+        match self {
+            FirewallPolicy::Connecting { allow_lan, .. }
+            | FirewallPolicy::Connected { allow_lan, .. }
+            | FirewallPolicy::Blocked { allow_lan, .. } => *allow_lan,
+        }
+    }
 }
 
 impl fmt::Display for FirewallPolicy {

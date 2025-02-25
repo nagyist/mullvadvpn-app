@@ -1,27 +1,21 @@
 use crate::settings::TunnelOptions;
-#[cfg(target_os = "android")]
-use jnix::IntoJava;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, io,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
 };
-use talpid_types::net::{openvpn, wireguard, Endpoint, TunnelParameters};
+use talpid_types::net::{openvpn, proxy::CustomProxy, wireguard, Endpoint, TunnelParameters};
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Invalid host/domain: {}", _0)]
-    InvalidHost(String, #[error(source)] io::Error),
+    #[error("Invalid host/domain: {0}")]
+    InvalidHost(String, #[source] io::Error),
 
-    #[error(display = "Host has no IPv4 address: {}", _0)]
+    #[error("Host has no IPv4 address: {0}")]
     HostHasNoIpv4(String),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-// TODO: Remove this Java conversion once `jnix` supports skipping fields in enum tuple variants.
-#[cfg_attr(target_os = "android", derive(IntoJava))]
-#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
-#[cfg_attr(target_os = "android", jnix(skip_all))]
 pub struct CustomTunnelEndpoint {
     pub host: String,
     pub config: ConnectionConfig,
@@ -42,7 +36,7 @@ impl CustomTunnelEndpoint {
     pub fn to_tunnel_parameters(
         &self,
         tunnel_options: TunnelOptions,
-        proxy: Option<openvpn::ProxySettings>,
+        proxy: Option<CustomProxy>,
     ) -> Result<TunnelParameters, Error> {
         let ip = resolve_to_ip(&self.host)?;
         let mut config = self.config.clone();
@@ -58,13 +52,20 @@ impl CustomTunnelEndpoint {
                 fwmark: crate::TUNNEL_FWMARK,
             }
             .into(),
-            ConnectionConfig::Wireguard(connection) => wireguard::TunnelParameters {
-                connection,
-                options: tunnel_options.wireguard.into_talpid_tunnel_options(),
-                generic_options: tunnel_options.generic,
-                obfuscation: None,
+            ConnectionConfig::Wireguard(connection) => {
+                let mut options = tunnel_options.wireguard.into_talpid_tunnel_options();
+                if options.quantum_resistant {
+                    options.quantum_resistant = false;
+                    log::info!("Ignoring quantum resistant option for custom tunnel");
+                }
+                wireguard::TunnelParameters {
+                    connection,
+                    options,
+                    generic_options: tunnel_options.generic,
+                    obfuscation: None,
+                }
+                .into()
             }
-            .into(),
         };
         Ok(parameters)
     }
@@ -82,8 +83,10 @@ impl fmt::Display for CustomTunnelEndpoint {
             ),
             ConnectionConfig::Wireguard(connection) => write!(
                 f,
-                "WireGuard relay - {} with public key {}",
-                connection.peer.endpoint, connection.peer.public_key
+                "WireGuard relay - {}:{} with public key {}",
+                self.host,
+                connection.peer.endpoint.port(),
+                connection.peer.public_key
             ),
         }
     }

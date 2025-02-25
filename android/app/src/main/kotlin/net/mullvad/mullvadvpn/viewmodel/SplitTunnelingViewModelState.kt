@@ -2,28 +2,38 @@ package net.mullvad.mullvadvpn.viewmodel
 
 import net.mullvad.mullvadvpn.applist.AppData
 import net.mullvad.mullvadvpn.compose.state.SplitTunnelingUiState
+import net.mullvad.mullvadvpn.lib.model.AppId
 
 data class SplitTunnelingViewModelState(
-    val excludedApps: Set<String> = emptySet(),
+    val enabled: Boolean = false,
+    val excludedApps: Set<AppId> = emptySet(),
     val allApps: List<AppData>? = null,
-    val showSystemApps: Boolean = false
+    val showSystemApps: Boolean = false,
 ) {
     fun toUiState(): SplitTunnelingUiState {
         return allApps
-            ?.partition { appData -> excludedApps.contains(appData.packageName) }
+            ?.partition { appData ->
+                if (enabled) {
+                    excludedApps.contains(AppId(appData.packageName))
+                } else {
+                    false
+                }
+            }
             ?.let { (excluded, included) ->
                 SplitTunnelingUiState.ShowAppList(
-                    excludedApps = excluded.sortedBy { it.name },
+                    enabled = enabled,
+                    excludedApps = excluded.sort(),
                     includedApps =
                         if (showSystemApps) {
                                 included
                             } else {
                                 included.filter { appData -> !appData.isSystemApp }
                             }
-                            .sortedBy { it.name },
-                    showSystemApps = showSystemApps
+                            .sort(),
+                    showSystemApps = showSystemApps,
                 )
-            }
-            ?: SplitTunnelingUiState.Loading
+            } ?: SplitTunnelingUiState.Loading(enabled = enabled)
     }
 }
+
+private fun List<AppData>.sort() = sortedBy { it.name.lowercase() }

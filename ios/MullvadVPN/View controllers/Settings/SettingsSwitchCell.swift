@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 19/05/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -31,7 +31,7 @@ class SettingsSwitchCell: SettingsCell {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func setEnabled(_ isEnabled: Bool) {
+    func setSwitchEnabled(_ isEnabled: Bool) {
         switchContainer.isEnabled = isEnabled
     }
 
@@ -42,7 +42,7 @@ class SettingsSwitchCell: SettingsCell {
     override func prepareForReuse() {
         super.prepareForReuse()
 
-        setEnabled(true)
+        setSwitchEnabled(true)
     }
 
     // MARK: - Actions
@@ -51,51 +51,51 @@ class SettingsSwitchCell: SettingsCell {
         action?(switchContainer.control.isOn)
     }
 
-    // MARK: -  Accessibility
+    // MARK: - Accessibility
 
     override var accessibilityTraits: UIAccessibilityTraits {
-        set {
-            super.accessibilityTraits = newValue
-        }
         get {
             // Use UISwitch traits to make the entire cell behave as "Switch button"
             switchContainer.control.accessibilityTraits
         }
+        set {
+            super.accessibilityTraits = newValue
+        }
     }
 
     override var accessibilityLabel: String? {
-        set {
-            super.accessibilityLabel = newValue
-        }
         get {
             titleLabel.text
+        }
+        set {
+            super.accessibilityLabel = newValue
         }
     }
 
     override var accessibilityValue: String? {
-        set {
-            super.accessibilityValue = newValue
-        }
         get {
             self.switchContainer.control.accessibilityValue
+        }
+        set {
+            super.accessibilityValue = newValue
         }
     }
 
     override var accessibilityFrame: CGRect {
-        set {
-            super.accessibilityFrame = newValue
-        }
         get {
             UIAccessibility.convertToScreenCoordinates(self.bounds, in: self)
+        }
+        set {
+            super.accessibilityFrame = newValue
         }
     }
 
     override var accessibilityPath: UIBezierPath? {
-        set {
-            super.accessibilityPath = newValue
-        }
         get {
             UIBezierPath(roundedRect: accessibilityFrame, cornerRadius: 4)
+        }
+        set {
+            super.accessibilityPath = newValue
         }
     }
 

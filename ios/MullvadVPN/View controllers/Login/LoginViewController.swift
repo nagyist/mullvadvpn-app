@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 19/03/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadLogging
@@ -59,7 +59,7 @@ class LoginViewController: UIViewController, RootContainment {
             target: self,
             action: #selector(doLogin)
         )
-        barButtonItem.accessibilityIdentifier = "LoginBarButtonItem"
+        barButtonItem.setAccessibilityIdentifier(.loginBarButton)
 
         return barButtonItem
     }()
@@ -85,6 +85,10 @@ class LoginViewController: UIViewController, RootContainment {
 
     private var canBeginLogin: Bool {
         contentView.accountInputGroup.satisfiesMinimumTokenLengthRequirement
+    }
+
+    var prefersDeviceInfoBarHidden: Bool {
+        true
     }
 
     private let interactor: LoginInteractor
@@ -132,6 +136,12 @@ class LoginViewController: UIViewController, RootContainment {
             self?.attemptLogin()
         }
 
+        interactor.suggestPreferredAccountNumber = { [weak self] value in
+            Task { @MainActor in
+                self?.contentView.accountInputGroup.setAccount(value)
+            }
+        }
+
         contentView.accountInputGroup.setOnReturnKey { [weak self] _ in
             guard let self else { return true }
 
@@ -166,35 +176,23 @@ class LoginViewController: UIViewController, RootContainment {
         )
     }
 
-    override var disablesAutomaticKeyboardDismissal: Bool {
-        // Allow dismissing the keyboard in .formSheet presentation style
-        false
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        if traitCollection.userInterfaceIdiom != previousTraitCollection?.userInterfaceIdiom {
-            updateCreateButtonEnabled()
-        }
-    }
-
     // MARK: - Public
 
     func start(action: LoginAction) {
         beginLogin(action)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                switch action {
+                case .createAccount:
+                    self.contentView.accountInputGroup.setAccount(try await interactor.createAccount())
 
-        switch action {
-        case .createAccount:
-            interactor.createAccount { [weak self] result in
-                if let newAccountNumber = result.value {
-                    self?.contentView.accountInputGroup.setAccount(newAccountNumber)
+                case let .useExistingAccount(accountNumber):
+                    try await interactor.setAccount(accountNumber: accountNumber)
                 }
-
-                self?.endLogin(action: action, error: result.error)
-            }
-
-        case let .useExistingAccount(accountNumber):
-            interactor.setAccount(accountNumber: accountNumber) { [weak self] error in
-                self?.endLogin(action: action, error: error)
+                self.endLogin(action: action, error: nil)
+            } catch {
+                self.endLogin(action: action, error: error)
             }
         }
     }
@@ -298,14 +296,7 @@ class LoginViewController: UIViewController, RootContainment {
 
         switch loginState {
         case .failure, .default:
-            // Disable "Create account" button on iPad as user types in the account token,
-            // however leave it enabled on iPhone to avoid confusion to why it's being disabled
-            // since it's likely overlaid by keyboard.
-            if case .pad = traitCollection.userInterfaceIdiom {
-                isEnabled = contentView.accountInputGroup.textField.text?.isEmpty ?? true
-            } else {
-                isEnabled = true
-            }
+            isEnabled = true
 
         case .success, .authenticating:
             isEnabled = false
@@ -425,4 +416,6 @@ private extension LoginState {
             return .hidden
         }
     }
+
+    // swiftlint:disable:next file_length
 }

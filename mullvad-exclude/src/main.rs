@@ -20,55 +20,56 @@ use talpid_types::cgroup::{find_net_cls_mount, SPLIT_TUNNEL_CGROUP_NAME};
 const PROGRAM_NAME: &str = "mullvad-exclude";
 
 #[cfg(target_os = "linux")]
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error(display = "Invalid arguments")]
+    #[error("Invalid arguments")]
     InvalidArguments,
 
-    #[error(display = "Cannot set the cgroup")]
-    AddProcToCGroup(#[error(source)] io::Error),
+    #[error("Cannot set the cgroup")]
+    AddProcToCGroup(#[source] io::Error),
 
-    #[error(display = "Failed to drop root user privileges for the process")]
-    DropRootUid(#[error(source)] nix::Error),
+    #[error("Failed to drop root user privileges for the process")]
+    DropRootUid(#[source] nix::Error),
 
-    #[error(display = "Failed to drop root group privileges for the process")]
-    DropRootGid(#[error(source)] nix::Error),
+    #[error("Failed to drop root group privileges for the process")]
+    DropRootGid(#[source] nix::Error),
 
-    #[error(display = "Failed to launch the process")]
-    Exec(#[error(source)] nix::Error),
+    #[error("Failed to launch the process")]
+    Exec(#[source] nix::Error),
 
-    #[error(display = "An argument contains interior nul bytes")]
-    ArgumentNulError(#[error(source)] NulError),
+    #[error("An argument contains interior nul bytes")]
+    ArgumentNul(#[source] NulError),
 
-    #[error(display = "Failed to find net_cls controller")]
-    FindNetClsController(#[error(source)] io::Error),
+    #[error("Failed to find net_cls controller")]
+    FindNetClsController(#[source] io::Error),
 
-    #[error(display = "No net_cls controller")]
+    #[error("No net_cls controller")]
     NoNetClsController,
 }
 
 fn main() {
     #[cfg(target_os = "linux")]
-    match run() {
-        Err(Error::InvalidArguments) => {
-            let mut args = env::args();
-            let program = args.next().unwrap_or_else(|| PROGRAM_NAME.to_string());
-            eprintln!("Usage: {program} COMMAND [ARGS]");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            let mut s = format!("{e}");
-            let mut source = e.source();
-            while let Some(error) = source {
-                write!(&mut s, "\nCaused by: {error}").expect("formatting failed");
-                source = error.source();
+    // Drop the impossible case
+    if let Err(error) = run().map(drop) {
+        match error {
+            Error::InvalidArguments => {
+                let mut args = env::args();
+                let program = args.next().unwrap_or_else(|| PROGRAM_NAME.to_string());
+                eprintln!("Usage: {program} COMMAND [ARGS]");
+                std::process::exit(1);
             }
-            eprintln!("{s}");
+            e => {
+                let mut s = format!("{e}");
+                let mut source = e.source();
+                while let Some(error) = source {
+                    write!(&mut s, "\nCaused by: {error}").expect("formatting failed");
+                    source = error.source();
+                }
+                eprintln!("{s}");
 
-            std::process::exit(1);
+                std::process::exit(1);
+            }
         }
-        _ => unreachable!("execv returned unexpectedly"),
     }
 }
 
@@ -76,13 +77,13 @@ fn main() {
 fn run() -> Result<Infallible, Error> {
     let mut args_iter = env::args_os().skip(1);
     let program = args_iter.next().ok_or(Error::InvalidArguments)?;
-    let program = CString::new(program.as_bytes()).map_err(Error::ArgumentNulError)?;
+    let program = CString::new(program.as_bytes()).map_err(Error::ArgumentNul)?;
 
     let args: Vec<CString> = env::args_os()
         .skip(1)
         .map(|arg| CString::new(arg.as_bytes()))
         .collect::<Result<Vec<CString>, NulError>>()
-        .map_err(Error::ArgumentNulError)?;
+        .map_err(Error::ArgumentNul)?;
 
     let cgroup_dir = find_net_cls_mount()
         .map_err(Error::FindNetClsController)?
@@ -95,6 +96,7 @@ fn run() -> Result<Infallible, Error> {
     let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(procs_path)
         .map_err(Error::AddProcToCGroup)?;
 

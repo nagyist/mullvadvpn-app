@@ -11,18 +11,17 @@ on:
       - Cargo.lock
       - '**/Cargo.toml'
   workflow_dispatch:
+
+permissions: {}
+
 jobs:
   cargo-vendor:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1.0.6
+        uses: actions/checkout@v4
         with:
-          toolchain: stable
-          default: true
+          submodules: true
 
       - name: Vendor Rust dependencies
         run: cargo vendor

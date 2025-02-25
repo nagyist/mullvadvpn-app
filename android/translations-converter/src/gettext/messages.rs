@@ -1,5 +1,4 @@
 use super::{msg_string::MsgString, parser::Parser, plural_form::PluralForm};
-use derive_more::{Display, Error, From};
 use std::{
     fs::File,
     io::{BufRead, BufReader},
@@ -104,13 +103,13 @@ impl From<MsgString> for MsgValue {
     }
 }
 
-#[derive(Debug, Display, Error, From)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Parser error while parsing file
-    #[display(fmt = "Failed to parse input file")]
-    Parse(super::parser::Error),
+    #[error("Failed to parse input file")]
+    Parse(#[from] super::parser::Error),
 
     /// IO error while reading input file.
-    #[display(fmt = "Failed to read from the input file")]
-    Io(std::io::Error),
+    #[error("Failed to read from the input file")]
+    Io(#[from] std::io::Error),
 }

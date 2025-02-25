@@ -3,30 +3,29 @@
 //  MullvadVPN
 //
 //  Created by Sajad Vishkai on 2022-10-03.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadREST
-import MullvadTransport
 import MullvadTypes
 import Operations
-import TunnelProviderMessaging
+import PacketTunnelCore
 
 struct PacketTunnelTransport: RESTTransport {
     var name: String {
         "packet-tunnel"
     }
 
-    let tunnel: Tunnel
+    let tunnel: any TunnelProtocol
 
-    init(tunnel: Tunnel) {
+    init(tunnel: any TunnelProtocol) {
         self.tunnel = tunnel
     }
 
     func sendRequest(
         _ request: URLRequest,
-        completion: @escaping (Data?, URLResponse?, Error?) -> Void
+        completion: @escaping @Sendable (Data?, URLResponse?, Error?) -> Void
     ) -> Cancellable {
         let proxyRequest = ProxyURLRequest(
             id: UUID(),

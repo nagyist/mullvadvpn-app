@@ -2,22 +2,30 @@
 
 set -eu
 
+INSTALL_DIR=$2
+
+# Workaround for issue in electron-builder where the pkg-scripts are run twice, once with the
+# correct install dir and once with an incorrect one. This guard prevents running the script when
+# called the second time. This can be reverted when the following issue has been fixed:
+# https://github.com/electron-userland/electron-builder/issues/8166
+if [[ $INSTALL_DIR == *"Mullvad VPN.app" ]]; then
+    exit 0
+fi
+
 LOG_DIR=/var/log/mullvad-vpn
 
 mkdir -p $LOG_DIR
-exec 2>&1 > $LOG_DIR/postinstall.log
+exec > $LOG_DIR/postinstall.log 2>&1
 
 echo "Running postinstall at $(date)"
-
-INSTALL_DIR=$2
 
 # Run CLI to force macOS to check the certificate, and shut down the already running daemon, if one
 # exists.
 # This is a temporary workaround. After 2023.3, we switched from signing with Amagicom AB to
 # Mullvad VPN AB certificates. This could potentially be removed when older versions are no longer
 # supported.
-"$INSTALL_DIR/Mullvad VPN.app/Contents/Resources/mullvad" || true
-"$TMPDIR/mullvad-setup" prepare-restart || \
+"$INSTALL_DIR/Mullvad VPN.app/Contents/Resources/mullvad" &>/dev/null || true
+"$TMPDIR/mullvad-setup" prepare-restart &>/dev/null || \
     echo "Failed to send 'prepare-restart' command to old mullvad-daemon"
 
 # NOTE: This path must be kept in sync with the path defined

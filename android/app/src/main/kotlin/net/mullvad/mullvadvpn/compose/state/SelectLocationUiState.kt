@@ -1,10 +1,13 @@
 package net.mullvad.mullvadvpn.compose.state
 
-import net.mullvad.mullvadvpn.relaylist.RelayCountry
-import net.mullvad.mullvadvpn.relaylist.RelayItem
+import net.mullvad.mullvadvpn.usecase.FilterChip
 
 sealed interface SelectLocationUiState {
-    object Loading : SelectLocationUiState
-    data class ShowData(val countries: List<RelayCountry>, val selectedRelay: RelayItem?) :
-        SelectLocationUiState
+    data object Loading : SelectLocationUiState
+
+    data class Data(
+        val filterChips: List<FilterChip>,
+        val multihopEnabled: Boolean,
+        val relayListType: RelayListType,
+    ) : SelectLocationUiState
 }

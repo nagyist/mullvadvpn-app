@@ -1,61 +1,53 @@
 package net.mullvad.mullvadvpn.test.e2e
 
-import androidx.test.runner.AndroidJUnit4
-import androidx.test.uiautomator.By
-import junit.framework.Assert.assertNotNull
-import net.mullvad.mullvadvpn.test.common.constant.LOGIN_FAILURE_TIMEOUT
-import net.mullvad.mullvadvpn.test.common.extension.clickAgreeOnPrivacyDisclaimer
-import net.mullvad.mullvadvpn.test.common.extension.clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove
-import net.mullvad.mullvadvpn.test.common.extension.findObjectWithTimeout
-import net.mullvad.mullvadvpn.test.e2e.misc.CleanupAccountTestRule
-import org.junit.Rule
-import org.junit.Test
-import org.junit.runner.RunWith
+import net.mullvad.mullvadvpn.test.common.page.ConnectPage
+import net.mullvad.mullvadvpn.test.common.page.LoginPage
+import net.mullvad.mullvadvpn.test.common.page.PrivacyPage
+import net.mullvad.mullvadvpn.test.common.page.on
+import net.mullvad.mullvadvpn.test.e2e.misc.AccountTestRule
+import org.junit.jupiter.api.Disabled
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.RegisterExtension
 
-@RunWith(AndroidJUnit4::class)
-class LoginTest : EndToEndTest() {
+class LoginTest : EndToEndTest(BuildConfig.FLAVOR_infrastructure) {
 
-    @Rule @JvmField val cleanupAccountTestRule = CleanupAccountTestRule()
-
-    @Test
-    fun testLoginWithInvalidCredentials() {
-        // Given
-        val invalidDummyAccountToken = invalidTestAccountToken
-
-        // When
-        app.launch()
-        device.clickAgreeOnPrivacyDisclaimer()
-        device.clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove()
-        app.waitForLoginPrompt()
-        app.attemptLogin(invalidDummyAccountToken)
-
-        // Then
-        device.findObjectWithTimeout(By.text("Login failed"), LOGIN_FAILURE_TIMEOUT)
-    }
+    @RegisterExtension @JvmField val accountTestRule = AccountTestRule()
 
     @Test
     fun testLoginWithValidCredentials() {
-        // Given
-        val token = validTestAccountToken
+        val validTestAccountNumber = accountTestRule.validAccountNumber
 
-        // When
-        app.launchAndEnsureLoggedIn(token)
+        app.launch()
 
-        // Then
-        app.ensureLoggedIn()
+        on<PrivacyPage> {
+            clickAgreeOnPrivacyDisclaimer()
+            clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove()
+        }
+
+        on<LoginPage> {
+            enterAccountNumber(validTestAccountNumber)
+            tapLoginButton()
+        }
+
+        on<ConnectPage>()
     }
 
     @Test
-    fun testLogout() {
-        // Given
-        app.launchAndEnsureLoggedIn(validTestAccountToken)
+    @Disabled("Failed login attempts are highly rate limited and cause test flakiness")
+    fun testLoginWithInvalidCredentials() {
+        val invalidDummyAccountNumber = accountTestRule.invalidAccountNumber
 
-        // When
-        app.clickSettingsCog()
-        app.clickListItemByText("Account")
-        app.clickActionButtonByText("Log out")
+        app.launch()
 
-        // Then
-        assertNotNull(device.findObjectWithTimeout(By.text("Login")))
+        on<PrivacyPage> {
+            clickAgreeOnPrivacyDisclaimer()
+            clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove()
+        }
+
+        on<LoginPage> {
+            enterAccountNumber(invalidDummyAccountNumber)
+            tapLoginButton()
+            verifyShowingInvalidAccount()
+        }
     }
 }

@@ -3,12 +3,12 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 17/01/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import StoreKit
 
-extension SKError: LocalizedError {
+extension SKError: Foundation.LocalizedError {
     public var errorDescription: String? {
         switch code {
         case .unknown:
@@ -29,7 +29,7 @@ extension SKError: LocalizedError {
             return NSLocalizedString(
                 "PAYMENT_CANCELLED",
                 tableName: "StoreKitErrors",
-                value: "User cancelled the request.",
+                value: "The payment request was cancelled.",
                 comment: ""
             )
         case .paymentInvalid:

@@ -1,141 +1,107 @@
 package net.mullvad.mullvadvpn.viewmodel
 
-import android.content.res.Resources
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ramcosta.composedestinations.generated.destinations.DeviceListDestination
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import net.mullvad.mullvadvpn.R
-import net.mullvad.mullvadvpn.compose.state.DeviceListItemUiState
+import net.mullvad.mullvadvpn.compose.state.DeviceItemUiState
 import net.mullvad.mullvadvpn.compose.state.DeviceListUiState
-import net.mullvad.mullvadvpn.model.Device
-import net.mullvad.mullvadvpn.model.DeviceList
-import net.mullvad.mullvadvpn.model.RemoveDeviceResult
-import net.mullvad.mullvadvpn.repository.DeviceRepository
-
-typealias DeviceId = String
+import net.mullvad.mullvadvpn.lib.model.AccountNumber
+import net.mullvad.mullvadvpn.lib.model.Device
+import net.mullvad.mullvadvpn.lib.model.DeviceId
+import net.mullvad.mullvadvpn.lib.model.GetDeviceListError
+import net.mullvad.mullvadvpn.lib.shared.DeviceRepository
 
 class DeviceListViewModel(
     private val deviceRepository: DeviceRepository,
-    private val resources: Resources,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.Default
+    savedStateHandle: SavedStateHandle,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
-    private val _stagedDeviceId = MutableStateFlow<DeviceId?>(null)
-    private val _loadingDevices = MutableStateFlow<List<DeviceId>>(emptyList())
+    private val accountNumber: AccountNumber =
+        DeviceListDestination.argsFrom(savedStateHandle).accountNumber
 
-    private val _toastMessages = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val toastMessages = _toastMessages.asSharedFlow()
+    private val loadingDevices = MutableStateFlow<Set<DeviceId>>(emptySet())
+    private val deviceList = MutableStateFlow<List<Device>>(emptyList())
+    private val loading = MutableStateFlow(true)
+    private val error = MutableStateFlow<GetDeviceListError?>(null)
 
-    var accountToken: String? = null
-    private var cachedDeviceList: List<Device>? = null
+    private val _uiSideEffect = Channel<DeviceListSideEffect>()
+    val uiSideEffect = _uiSideEffect.receiveAsFlow()
 
-    val uiState =
-        combine(deviceRepository.deviceList, _stagedDeviceId, _loadingDevices) {
-                deviceList,
-                stagedDeviceId,
-                loadingDevices ->
-                val devices =
-                    if (deviceList is DeviceList.Available) {
-                        deviceList.devices.also { cachedDeviceList = it }
-                    } else {
-                        cachedDeviceList
-                    }
-                val deviceUiItems =
-                    devices
-                        ?.sortedBy { it.creationDate }
-                        ?.map { device ->
-                            DeviceListItemUiState(
-                                device,
-                                loadingDevices.any { loadingDevice -> device.id == loadingDevice }
-                            )
-                        }
-                val isLoading = devices == null
-                val stagedDevice = devices?.firstOrNull { device -> device.id == stagedDeviceId }
-                DeviceListUiState(
-                    deviceUiItems = deviceUiItems ?: emptyList(),
-                    isLoading = isLoading,
-                    stagedDevice = stagedDevice
-                )
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), DeviceListUiState.INITIAL)
-
-    fun stageDeviceForRemoval(deviceId: DeviceId) {
-        _stagedDeviceId.value = deviceId
-    }
-
-    fun clearStagedDevice() {
-        _stagedDeviceId.value = null
-    }
-
-    fun confirmRemovalOfStagedDevice() {
-        val token = accountToken
-        val stagedDeviceId = _stagedDeviceId.value
-
-        if (token != null && stagedDeviceId != null) {
-            viewModelScope.launch {
-                withContext(dispatcher) {
-                    val result =
-                        withTimeoutOrNull(DEVICE_REMOVAL_TIMEOUT_MILLIS) {
-                            deviceRepository.deviceRemovalEvent
-                                .onSubscription {
-                                    clearStagedDevice()
-                                    setLoadingDevice(stagedDeviceId)
-                                    deviceRepository.removeDevice(token, stagedDeviceId)
-                                }
-                                .filter { (deviceId, result) ->
-                                    deviceId == stagedDeviceId && result == RemoveDeviceResult.Ok
-                                }
-                                .first()
-                        }
-
-                    clearLoadingDevice(stagedDeviceId)
-
-                    if (result == null) {
-                        _toastMessages.tryEmit(
-                            resources.getString(R.string.failed_to_remove_device)
+    val uiState: StateFlow<DeviceListUiState> =
+        combine(
+                loadingDevices,
+                deviceList.map { it.sortedBy { it.creationDate } },
+                loading,
+                error,
+            ) { loadingDevices, devices, loading, error ->
+                when {
+                    loading -> DeviceListUiState.Loading
+                    error != null -> DeviceListUiState.Error(error)
+                    else ->
+                        DeviceListUiState.Content(
+                            devices.map { DeviceItemUiState(it, loadingDevices.contains(it.id)) }
                         )
-                        refreshDeviceList()
-                    }
                 }
             }
-        } else {
-            _toastMessages.tryEmit(resources.getString(R.string.error_occurred))
-            clearLoadingDevices()
-            clearStagedDevice()
-            refreshDeviceList()
+            .onStart { fetchDevices() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), DeviceListUiState.Loading)
+
+    fun fetchDevices() =
+        viewModelScope.launch {
+            error.value = null
+            loading.value = true
+            deviceRepository
+                .deviceList(accountNumber)
+                .fold({ error.value = it }, { deviceList.value = it })
+            loading.value = false
         }
+
+    fun removeDevice(deviceIdToRemove: DeviceId) =
+        viewModelScope.launch(dispatcher) {
+            setLoadingState(deviceIdToRemove, true)
+            deviceRepository
+                .removeDevice(accountNumber, deviceIdToRemove)
+                .fold(
+                    {
+                        _uiSideEffect.send(DeviceListSideEffect.FailedToRemoveDevice)
+                        setLoadingState(deviceIdToRemove, false)
+                        deviceRepository.deviceList(accountNumber).onRight { deviceList.value = it }
+                    },
+                    { removeDeviceFromState(deviceIdToRemove) },
+                )
+        }
+
+    private fun setLoadingState(deviceId: DeviceId, isLoading: Boolean) {
+        loadingDevices.update { if (isLoading) it + deviceId else it - deviceId }
     }
 
-    fun refreshDeviceState() = deviceRepository.refreshDeviceState()
+    fun continueToLogin() =
+        viewModelScope.launch {
+            _uiSideEffect.send(DeviceListSideEffect.NavigateToLogin(accountNumber = accountNumber))
+        }
 
-    fun refreshDeviceList() =
-        accountToken?.let { token -> deviceRepository.refreshDeviceList(token) }
-
-    private fun setLoadingDevice(deviceId: DeviceId) {
-        _loadingDevices.value = _loadingDevices.value.toMutableList().apply { add(deviceId) }
+    private fun removeDeviceFromState(deviceId: DeviceId) {
+        deviceList.update { devices -> devices.filter { item -> item.id != deviceId } }
+        loadingDevices.update { it - deviceId }
     }
+}
 
-    private fun clearLoadingDevice(deviceId: DeviceId) {
-        _loadingDevices.value = _loadingDevices.value.toMutableList().apply { remove(deviceId) }
-    }
+sealed interface DeviceListSideEffect {
+    data object FailedToRemoveDevice : DeviceListSideEffect
 
-    private fun clearLoadingDevices() {
-        _loadingDevices.value = emptyList()
-    }
-
-    companion object {
-        private const val DEVICE_REMOVAL_TIMEOUT_MILLIS = 5000L
-    }
+    data class NavigateToLogin(val accountNumber: AccountNumber) : DeviceListSideEffect
 }
