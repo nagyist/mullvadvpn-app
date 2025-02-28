@@ -4,24 +4,27 @@ use talpid_types::ErrorExt;
 
 impl From<&mullvad_types::settings::Settings> for proto::Settings {
     fn from(settings: &mullvad_types::settings::Settings) -> Self {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "android", target_os = "macos"))]
         let split_tunnel = {
-            let mut converted_list = vec![];
-            for path in settings.split_tunnel.apps.clone().iter() {
-                match path.as_path().as_os_str().to_str() {
-                    Some(path) => converted_list.push(path.to_string()),
+            let apps = settings
+                .split_tunnel
+                .apps
+                .iter()
+                .filter_map(|app| match app.clone().to_string() {
                     None => {
-                        log::error!("failed to convert OS string: {:?}", path);
+                        log::error!("Failed to convert application to string: {:?}", app);
+                        None
                     }
-                }
-            }
+                    string => string,
+                })
+                .collect();
 
             Some(proto::SplitTunnelSettings {
                 enable_exclusions: settings.split_tunnel.enable_exclusions,
-                apps: converted_list,
+                apps,
             })
         };
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         let split_tunnel = None;
 
         Self {
@@ -31,7 +34,10 @@ impl From<&mullvad_types::settings::Settings> for proto::Settings {
             )),
             bridge_state: Some(proto::BridgeState::from(settings.bridge_state)),
             allow_lan: settings.allow_lan,
+            #[cfg(not(target_os = "android"))]
             block_when_disconnected: settings.block_when_disconnected,
+            #[cfg(target_os = "android")]
+            block_when_disconnected: false,
             auto_connect: settings.auto_connect,
             tunnel_options: Some(proto::TunnelOptions::from(&settings.tunnel_options)),
             show_beta_releases: settings.show_beta_releases,
@@ -39,6 +45,18 @@ impl From<&mullvad_types::settings::Settings> for proto::Settings {
                 &settings.obfuscation_settings,
             )),
             split_tunnel,
+            custom_lists: Some(proto::CustomListSettings::from(
+                settings.custom_lists.clone(),
+            )),
+            api_access_methods: Some(proto::ApiAccessMethodSettings::from(
+                settings.api_access_methods.clone(),
+            )),
+            relay_overrides: settings
+                .relay_overrides
+                .iter()
+                .cloned()
+                .map(proto::RelayOverride::from)
+                .collect(),
         }
     }
 }
@@ -58,6 +76,7 @@ impl From<&mullvad_types::settings::DnsOptions> for proto::DnsOptions {
                 block_malware: options.default_options.block_malware,
                 block_adult_content: options.default_options.block_adult_content,
                 block_gambling: options.default_options.block_gambling,
+                block_social_media: options.default_options.block_social_media,
             }),
             custom_options: Some(proto::CustomDnsOptions {
                 addresses: options
@@ -75,27 +94,24 @@ impl From<&mullvad_types::settings::TunnelOptions> for proto::TunnelOptions {
     fn from(options: &mullvad_types::settings::TunnelOptions) -> Self {
         Self {
             openvpn: Some(proto::tunnel_options::OpenvpnOptions {
-                mssfix: u32::from(options.openvpn.mssfix.unwrap_or_default()),
+                mssfix: options.openvpn.mssfix.map(u32::from),
             }),
             wireguard: Some(proto::tunnel_options::WireguardOptions {
-                mtu: u32::from(options.wireguard.mtu.unwrap_or_default()),
+                mtu: options.wireguard.mtu.map(u32::from),
                 rotation_interval: options.wireguard.rotation_interval.map(|ivl| {
                     prost_types::Duration::try_from(std::time::Duration::from(ivl))
                         .expect("Failed to convert std::time::Duration to prost_types::Duration for tunnel_options.wireguard.rotation_interval")
                 }),
-                #[cfg(windows)]
-                use_wireguard_nt: options.wireguard.use_wireguard_nt,
-                #[cfg(not(windows))]
-                use_wireguard_nt: false,
                 quantum_resistant: Some(proto::QuantumResistantState::from(options.wireguard.quantum_resistant)),
+                #[cfg(daita)]
+                daita: Some(proto::DaitaSettings::from(options.wireguard.daita.clone())),
+                #[cfg(not(daita))]
+                daita: None,
             }),
             generic: Some(proto::tunnel_options::GenericOptions {
                 enable_ipv6: options.generic.enable_ipv6,
             }),
-            #[cfg(not(target_os = "android"))]
             dns_options: Some(proto::DnsOptions::from(&options.dns_options)),
-            #[cfg(target_os = "android")]
-            dns_options: None,
         }
     }
 }
@@ -134,7 +150,19 @@ impl TryFrom<proto::Settings> for mullvad_types::settings::Settings {
                 .ok_or(FromProtobufTypeError::InvalidArgument(
                     "missing obfuscation settings",
                 ))?;
-        #[cfg(windows)]
+        let custom_lists_settings =
+            settings
+                .custom_lists
+                .ok_or(FromProtobufTypeError::InvalidArgument(
+                    "missing custom lists settings",
+                ))?;
+        let api_access_methods_settings =
+            settings
+                .api_access_methods
+                .ok_or(FromProtobufTypeError::InvalidArgument(
+                    "missing api access methods settings",
+                ))?;
+        #[cfg(any(windows, target_os = "android", target_os = "macos"))]
         let split_tunnel = settings
             .split_tunnel
             .ok_or(FromProtobufTypeError::InvalidArgument(
@@ -150,20 +178,30 @@ impl TryFrom<proto::Settings> for mullvad_types::settings::Settings {
             )?,
             bridge_state,
             allow_lan: settings.allow_lan,
+            #[cfg(not(target_os = "android"))]
             block_when_disconnected: settings.block_when_disconnected,
             auto_connect: settings.auto_connect,
             tunnel_options: mullvad_types::settings::TunnelOptions::try_from(tunnel_options)?,
+            relay_overrides: settings
+                .relay_overrides
+                .into_iter()
+                .map(mullvad_types::relay_constraints::RelayOverride::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             show_beta_releases: settings.show_beta_releases,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "android", target_os = "macos"))]
             split_tunnel: mullvad_types::settings::SplitTunnelSettings::from(split_tunnel),
             obfuscation_settings: mullvad_types::relay_constraints::ObfuscationSettings::try_from(
                 obfuscation_settings,
             )?,
-            // NOTE: This field is meaningless when obtained from gRPC
-            wg_migration_rand_num: std::f32::NAN,
             // NOTE: This field is set based on mullvad-types. It's not based on the actual settings
             // version.
             settings_version: CURRENT_SETTINGS_VERSION,
+            custom_lists: mullvad_types::custom_list::CustomListsSettings::try_from(
+                custom_lists_settings,
+            )?,
+            api_access_methods: mullvad_types::access_method::Settings::try_from(
+                api_access_methods_settings,
+            )?,
         })
     }
 }
@@ -171,32 +209,27 @@ impl TryFrom<proto::Settings> for mullvad_types::settings::Settings {
 pub fn try_bridge_state_from_i32(
     bridge_state: i32,
 ) -> Result<mullvad_types::relay_constraints::BridgeState, FromProtobufTypeError> {
-    match proto::bridge_state::State::from_i32(bridge_state) {
-        Some(proto::bridge_state::State::Auto) => {
+    match proto::bridge_state::State::try_from(bridge_state) {
+        Ok(proto::bridge_state::State::Auto) => {
             Ok(mullvad_types::relay_constraints::BridgeState::Auto)
         }
-        Some(proto::bridge_state::State::On) => {
-            Ok(mullvad_types::relay_constraints::BridgeState::On)
-        }
-        Some(proto::bridge_state::State::Off) => {
+        Ok(proto::bridge_state::State::On) => Ok(mullvad_types::relay_constraints::BridgeState::On),
+        Ok(proto::bridge_state::State::Off) => {
             Ok(mullvad_types::relay_constraints::BridgeState::Off)
         }
-        None => Err(FromProtobufTypeError::InvalidArgument(
+        Err(_) => Err(FromProtobufTypeError::InvalidArgument(
             "invalid bridge state",
         )),
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android", target_os = "macos"))]
 impl From<proto::SplitTunnelSettings> for mullvad_types::settings::SplitTunnelSettings {
     fn from(value: proto::SplitTunnelSettings) -> Self {
-        mullvad_types::settings::SplitTunnelSettings {
+        use mullvad_types::settings::{SplitApp, SplitTunnelSettings};
+        SplitTunnelSettings {
             enable_exclusions: value.enable_exclusions,
-            apps: value
-                .apps
-                .into_iter()
-                .map(std::path::PathBuf::from)
-                .collect(),
+            apps: value.apps.into_iter().map(SplitApp::from).collect(),
         }
     }
 }
@@ -230,20 +263,10 @@ impl TryFrom<proto::TunnelOptions> for mullvad_types::settings::TunnelOptions {
 
         Ok(Self {
             openvpn: net::openvpn::TunnelOptions {
-                mssfix: if openvpn_options.mssfix != 0 {
-                    Some(openvpn_options.mssfix as u16)
-                } else {
-                    None
-                },
+                mssfix: openvpn_options.mssfix.map(|mssfix| mssfix as u16),
             },
             wireguard: mullvad_types::wireguard::TunnelOptions {
-                mtu: if wireguard_options.mtu != 0 {
-                    Some(wireguard_options.mtu as u16)
-                } else {
-                    None
-                },
-                #[cfg(windows)]
-                use_wireguard_nt: wireguard_options.use_wireguard_nt,
+                mtu: wireguard_options.mtu.map(|mtu| mtu as u16),
                 rotation_interval: wireguard_options
                     .rotation_interval
                     .map(std::time::Duration::try_from)
@@ -264,11 +287,17 @@ impl TryFrom<proto::TunnelOptions> for mullvad_types::settings::TunnelOptions {
                     .ok_or(FromProtobufTypeError::InvalidArgument(
                         "missing quantum resistant state",
                     ))??,
+                #[cfg(daita)]
+                daita: wireguard_options
+                    .daita
+                    .map(mullvad_types::wireguard::DaitaSettings::from)
+                    .ok_or(FromProtobufTypeError::InvalidArgument(
+                        "missing daita settings",
+                    ))?,
             },
             generic: net::GenericTunnelOptions {
                 enable_ipv6: generic_options.enable_ipv6,
             },
-            #[cfg(not(target_os = "android"))]
             dns_options: mullvad_types::settings::DnsOptions::try_from(dns_options)?,
         })
     }
@@ -284,10 +313,10 @@ impl TryFrom<proto::DnsOptions> for mullvad_types::settings::DnsOptions {
             DnsState as MullvadDnsState,
         };
 
-        let state = match proto::dns_options::DnsState::from_i32(options.state) {
-            Some(proto::dns_options::DnsState::Default) => MullvadDnsState::Default,
-            Some(proto::dns_options::DnsState::Custom) => MullvadDnsState::Custom,
-            None => {
+        let state = match proto::dns_options::DnsState::try_from(options.state) {
+            Ok(proto::dns_options::DnsState::Default) => MullvadDnsState::Default,
+            Ok(proto::dns_options::DnsState::Custom) => MullvadDnsState::Custom,
+            Err(_) => {
                 return Err(FromProtobufTypeError::InvalidArgument(
                     "invalid DNS options state",
                 ))
@@ -315,6 +344,7 @@ impl TryFrom<proto::DnsOptions> for mullvad_types::settings::DnsOptions {
                 block_malware: default_options.block_malware,
                 block_adult_content: default_options.block_adult_content,
                 block_gambling: default_options.block_gambling,
+                block_social_media: default_options.block_social_media,
             },
             custom_options: MullvadCustomDnsOptions {
                 addresses: custom_options

@@ -80,30 +80,12 @@ Once done all screenshots should be saved under `ios/Screenshots` folder.
 
 ### Localizations
 
-#### Update localizations from source
+The iOS app does not yet have translations.
 
-Run the following command in terminal:
-
-```
-python3 update_localizations.py
-```
-
-#### Locking Python dependencies
-
-1. Freeze dependencies:
-
-```
-pip3 freeze -r requirements.txt
-```
-
-and save the output into `requirements.txt`.
-
-
-2. Hash them with `hashin` tool:
-
-```
-hashin --python 3.7 --verbose --update-all
-```
+There was a script in the past to help with translations, but it was removed.
+Whenever we want to start adding translations for real, this script can be
+resurrected from the git history if we deem it to be the best path forward.
+Look for `ios/requirements.txt`.
 
 ## Icons and assets
 
@@ -115,3 +97,7 @@ ios/convert-assets.rb --app-icon
 ios/convert-assets.rb --import-desktop-assets
 ios/convert-assets.rb --additional-assets
 ```
+
+## Cached relays
+
+The script `relays-prebuild.sh` runs on each Xcode build and updates the cached relay list whenever there *IS NO* relay file. To get a fresh relay file on demand, simply remove `MullvadREST/Assets/relays.json` and build the Xcode project.

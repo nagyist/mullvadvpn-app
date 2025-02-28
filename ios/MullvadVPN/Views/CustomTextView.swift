@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 16/09/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -19,11 +19,11 @@ class CustomTextView: UITextView {
 
     /// Placeholder string
     var placeholder: String? {
-        set {
-            placeholderTextLabel.text = newValue
-        }
         get {
             placeholderTextLabel.text
+        }
+        set {
+            placeholderTextLabel.text = newValue
         }
     }
 
@@ -56,9 +56,6 @@ class CustomTextView: UITextView {
     }
 
     override var accessibilityLabel: String? {
-        set {
-            super.accessibilityLabel = newValue
-        }
         get {
             if self.text.isEmpty {
                 return placeholderTextLabel.text
@@ -66,12 +63,12 @@ class CustomTextView: UITextView {
                 return super.accessibilityLabel
             }
         }
+        set {
+            super.accessibilityLabel = newValue
+        }
     }
 
     override var accessibilityPath: UIBezierPath? {
-        set {
-            super.accessibilityPath = newValue
-        }
         get {
             if roundCorners {
                 return UIBezierPath(
@@ -82,9 +79,12 @@ class CustomTextView: UITextView {
                 return UIBezierPath(rect: accessibilityFrame)
             }
         }
+        set {
+            super.accessibilityPath = newValue
+        }
     }
 
-    private var notificationObserver: Any?
+    nonisolated(unsafe) private var notificationObserver: Any?
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -124,8 +124,10 @@ class CustomTextView: UITextView {
             forName: NSTextStorage.didProcessEditingNotification,
             object: textStorage,
             queue: OperationQueue.main
-        ) { [weak self] note in
-            self?.updatePlaceholderVisibility()
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updatePlaceholderVisibility()
+            }
         }
 
         updatePlaceholderVisibility()

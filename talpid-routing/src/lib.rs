@@ -1,10 +1,13 @@
 //! Manage routing tables on various platforms.
-
+#![allow(rustdoc::private_intra_doc_links)]
 #![deny(missing_docs)]
-#![deny(rust_2018_idioms)]
 
 use ipnetwork::IpNetwork;
 use std::{fmt, net::IpAddr};
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+/// Burst guard
+pub mod debounce;
 
 #[cfg(target_os = "windows")]
 #[path = "windows/mod.rs"]
@@ -21,13 +24,56 @@ mod imp;
 use netlink_packet_route::rtnl::constants::RT_TABLE_MAIN;
 
 #[cfg(target_os = "macos")]
-pub use imp::{DefaultRouteEvent, PlatformError};
+pub use imp::{
+    imp::{DefaultRouteEvent, RouteError},
+    PlatformError,
+};
 
-pub use imp::{Error, RouteManager};
+pub use imp::{Error, RouteManagerHandle};
 
-pub use imp::RouteManagerHandle;
+/// Link-layer/MAC adress
+#[cfg(target_os = "macos")]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub struct MacAddress(pub [u8; 6]);
+
+#[cfg(target_os = "macos")]
+impl MacAddress {
+    /// Consume bytes that make up the link address
+    pub fn into_bytes(self) -> [u8; 6] {
+        self.0
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<[u8; 6]> for MacAddress {
+    fn from(addr: [u8; 6]) -> Self {
+        Self(addr)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl fmt::Display for MacAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:<02X}{:<02X}{:<02X}{:<02X}{:<02X}{:<02X}",
+            self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5]
+        )
+    }
+}
+
+/// Gateway, including IP address and MAC address
+#[cfg(target_os = "macos")]
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct Gateway {
+    /// Network layer address for the gateway
+    pub ip_address: IpAddr,
+    /// Link layer address for the gateway
+    pub mac_address: MacAddress,
+}
 
 /// A network route with a specific network node, destination and an optional metric.
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct Route {
     node: Node,
@@ -35,10 +81,18 @@ pub struct Route {
     metric: Option<u32>,
     #[cfg(target_os = "linux")]
     table_id: u32,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mtu: Option<u32>,
 }
+
+/// A network route with a specific network node, destination and an optional metric.
+#[cfg(target_os = "android")]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct Route(IpNetwork);
 
 impl Route {
     /// Construct a new Route
+    #[cfg(not(target_os = "android"))]
     pub fn new(node: Node, prefix: IpNetwork) -> Self {
         Self {
             node,
@@ -46,7 +100,15 @@ impl Route {
             metric: None,
             #[cfg(target_os = "linux")]
             table_id: u32::from(RT_TABLE_MAIN),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            mtu: None,
         }
+    }
+
+    /// Construct a new Route
+    #[cfg(target_os = "android")]
+    pub fn new(prefix: IpNetwork) -> Self {
+        Self(prefix)
     }
 
     #[cfg(target_os = "linux")]
@@ -56,11 +118,13 @@ impl Route {
     }
 
     /// Returns the network node of the route.
+    #[cfg(target_os = "linux")]
     pub fn get_node(&self) -> &Node {
         &self.node
     }
 }
 
+#[cfg(target_os = "linux")]
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} via {}", self.prefix, self.node)?;
@@ -69,13 +133,30 @@ impl fmt::Display for Route {
         }
         #[cfg(target_os = "linux")]
         write!(f, " table {}", self.table_id)?;
+        #[cfg(target_os = "linux")]
+        if let Some(mtu) = self.mtu {
+            write!(f, " mtu {mtu}")?;
+        }
         Ok(())
     }
 }
 
-/// A network route that should be applied by the RouteManager.
+#[cfg(target_os = "android")]
+impl From<&talpid_types::android::RouteInfo> for Route {
+    fn from(route_info: &talpid_types::android::RouteInfo) -> Self {
+        let network = IpNetwork::new(
+            route_info.destination.address,
+            route_info.destination.prefix_length as u8,
+        )
+        .unwrap();
+        Self::new(network)
+    }
+}
+
+/// A network route that should be applied by the route manager.
 /// It can either be routed through a specific network node or it can be routed through the current
 /// default route.
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct RequiredRoute {
     /// Route's prefix
@@ -84,8 +165,12 @@ pub struct RequiredRoute {
     /// Specifies whether the route should be added to the main routing table or not.
     #[cfg(target_os = "linux")]
     main_table: bool,
+    /// Specifies route MTU
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mtu: Option<u16>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl RequiredRoute {
     /// Constructs a new required route.
     pub fn new(prefix: IpNetwork, node: impl Into<NetNode>) -> Self {
@@ -94,6 +179,8 @@ impl RequiredRoute {
             prefix,
             #[cfg(target_os = "linux")]
             main_table: true,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            mtu: None,
         }
     }
 
@@ -103,6 +190,13 @@ impl RequiredRoute {
         self.main_table = main_table;
         self
     }
+
+    /// Set route MTU to the given value.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn mtu(mut self, mtu: u16) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
 }
 
 /// A NetNode represents a network node - either a real one or a symbolic default one.
@@ -110,7 +204,7 @@ impl RequiredRoute {
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub enum NetNode {
     /// A real node will be used to set a regular route that will remain unchanged for the lifetime
-    /// of the RouteManager
+    /// of the route manager
     RealNode(Node),
     /// A default node is a symbolic node that will resolve to the network node used in the current
     /// most preferable default route

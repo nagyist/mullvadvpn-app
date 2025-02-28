@@ -4,17 +4,21 @@ set -eu
 shopt -s nullglob
 
 CODE_SIGNING_KEY_FINGERPRINT="A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF"
-UPLOAD_SERVER="releases.mullvad.net"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-UPLOAD_DIR="$SCRIPT_DIR/upload"
+
+# shellcheck source=ci/buildserver-config.sh
+source "$SCRIPT_DIR/buildserver-config.sh"
 
 cd "$UPLOAD_DIR"
 
 function rsync_upload {
     local file=$1
     local upload_dir=$2
-    rsync -av --mkpath --rsh='ssh -p 1122' "$file" "build@$UPLOAD_SERVER:$upload_dir/"
+    for server in "${PRODUCTION_UPLOAD_SERVERS[@]}"; do
+        echo "Uploading $file to $server:$upload_dir"
+        rsync -av --mkpath --rsh='ssh -p 1122' "$file" "$server:$upload_dir/"
+    done
 }
 
 while true; do
@@ -22,24 +26,26 @@ while true; do
     for checksums_path in *.sha256; do
         sleep 1
 
-        # Strip everything from the last "+" in the file name to only keep the version and tag (if
-        # present).
-        version="${checksums_path%+*}"
+        # Parse the platform name and version out of the filename of the checksums file.
+        platform="$(echo "$checksums_path" | cut -d + -f 1)"
+        version="$(echo "$checksums_path" | cut -d + -f 3,4 | sed 's/\.sha256//')"
         if ! sha256sum --quiet -c "$checksums_path"; then
             echo "Failed to verify checksums for $version"
             continue
         fi
 
         if [[ $version == *"-dev-"* ]]; then
-            upload_path="builds"
+            upload_path="$platform/builds"
         else
-            upload_path="releases"
+            upload_path="$platform/releases"
         fi
 
         files=$(awk '{print $2}' < "$checksums_path")
         for file in $files; do
             file_upload_dir="$upload_path/$version"
-            if [[ ! $file == MullvadVPN-* ]]; then
+            if [[ $platform == "desktop" && ! $file == MullvadVPN-* ]]; then
+                file_upload_dir="$file_upload_dir/additional-files"
+            elif [[ $platform == "android" && ! $file =~ MullvadVPN-"$version"(.apk|.play.apk|.play.aab) ]]; then
                 file_upload_dir="$file_upload_dir/additional-files"
             fi
 

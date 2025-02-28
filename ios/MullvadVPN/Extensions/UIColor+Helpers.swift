@@ -3,12 +3,16 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 06/05/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
-import UIKit
+import SwiftUI
 
 extension UIColor {
+    var color: Color {
+        Color(self)
+    }
+
     /// Returns the color lighter by the given percent (in range from 0..1)
     func lightened(by percent: CGFloat) -> UIColor? {
         darkened(by: -percent)

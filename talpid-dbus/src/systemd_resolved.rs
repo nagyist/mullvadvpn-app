@@ -1,5 +1,4 @@
 use dbus::{
-    self,
     arg::{self, RefArg},
     blocking::{
         stdintf::org_freedesktop_dbus::{Properties, PropertiesPropertiesChanged},
@@ -7,66 +6,70 @@ use dbus::{
     },
     message::{MatchRule, SignalArgs},
 };
-use lazy_static::lazy_static;
 use libc::{AF_INET, AF_INET6};
-use std::{fs, io, net::IpAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    fs, io,
+    net::IpAddr,
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to initialize a connection to D-Bus")]
-    ConnectDBus(#[error(source)] dbus::Error),
+    #[error("Failed to initialize a connection to D-Bus")]
+    ConnectDBus(#[source] dbus::Error),
 
-    #[error(display = "Failed to read /etc/resolv.conf: _0")]
-    ReadResolvConfError(#[error(source)] io::Error),
+    #[error("Failed to read /etc/resolv.conf: {0}")]
+    ReadResolvConfError(#[source] io::Error),
 
-    #[error(display = "/etc/resolv.conf contents do not match systemd-resolved resolv.conf")]
+    #[error("/etc/resolv.conf contents do not match systemd-resolved resolv.conf")]
     ResolvConfDiffers,
 
-    #[error(display = "/etc/resolv.conf is not a symlink to Systemd resolved")]
+    #[error("/etc/resolv.conf is not a symlink to Systemd resolved")]
     NotSymlinkedToResolvConf,
 
-    #[error(display = "Static stub file does not point to localhost")]
+    #[error("Static stub file does not point to localhost")]
     StaticStubNotPointingToLocalhost,
 
-    #[error(display = "Systemd resolved not detected")]
-    NoSystemdResolved(#[error(source)] dbus::Error),
+    #[error("Systemd resolved not detected")]
+    NoSystemdResolved(#[source] dbus::Error),
 
-    #[error(display = "Failed to find link interface in resolved manager")]
-    GetLinkError(#[error(source)] Box<Error>),
+    #[error("Failed to find link interface in resolved manager")]
+    GetLinkError(#[source] Box<Error>),
 
-    #[error(display = "Failed to configure DNS domains")]
-    SetDomainsError(#[error(source)] dbus::Error),
+    #[error("Failed to configure DNS domains")]
+    SetDomainsError(#[source] dbus::Error),
 
-    #[error(display = "Failed to revert DNS settings of interface: {}", _0)]
-    RevertDnsError(String, #[error(source)] dbus::Error),
+    #[error("Failed to revert DNS settings of interface: {0}")]
+    RevertDnsError(String, #[source] dbus::Error),
 
-    #[error(display = "Failed to replace DNS settings")]
+    #[error("Failed to replace DNS settings")]
     ReplaceDnsError,
 
-    #[error(display = "Failed to perform RPC call on D-Bus")]
-    DBusRpcError(#[error(source)] dbus::Error),
+    #[error("Failed to perform RPC call on D-Bus")]
+    DBusRpcError(#[source] dbus::Error),
 
-    #[error(display = "Failed to add a match to listen for DNS config updates")]
-    DnsUpdateMatchError(#[error(source)] dbus::Error),
+    #[error("Failed to add a match to listen for DNS config updates")]
+    DnsUpdateMatchError(#[source] dbus::Error),
 
-    #[error(display = "Failed to remove a match for DNS config updates")]
-    DnsUpdateRemoveMatchError(#[error(source)] dbus::Error),
+    #[error("Failed to remove a match for DNS config updates")]
+    DnsUpdateRemoveMatchError(#[source] dbus::Error),
 
-    #[error(display = "Async D-Bus task failed")]
-    AsyncTaskError(#[error(source)] tokio::task::JoinError),
+    #[error("Async D-Bus task failed")]
+    AsyncTaskError(#[source] tokio::task::JoinError),
 }
 
-lazy_static! {
-    static ref RESOLVED_STUB_PATHS: Vec<&'static Path> = vec![
+static RESOLVED_STUB_PATHS: LazyLock<Vec<&'static Path>> = LazyLock::new(|| {
+    vec![
         Path::new("/run/systemd/resolve/stub-resolv.conf"),
         Path::new("/run/systemd/resolve/resolv.conf"),
         Path::new("/var/run/systemd/resolve/stub-resolv.conf"),
         Path::new("/var/run/systemd/resolve/resolv.conf"),
-    ];
-}
+    ]
+});
 
 const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 const STATIC_STUB_PATH: &str = "/usr/lib/systemd/resolv.conf";
@@ -205,8 +208,7 @@ impl SystemdResolved {
                     let parts = contents.trim().split(' ');
                     parts
                         .map(str::parse::<IpAddr>)
-                        .map(|maybe_ip| maybe_ip.map(|addr| addr.is_loopback()).unwrap_or(false))
-                        .any(|is_loopback| is_loopback)
+                        .any(|maybe_ip| maybe_ip.map(|addr| addr.is_loopback()).unwrap_or(false))
                 })
                 .unwrap_or(false);
 
@@ -296,10 +298,7 @@ impl SystemdResolved {
             .map(|result: (dbus::Path<'static>,)| result.0)
     }
 
-    fn get_link_dns<'a, 'b: 'a>(
-        &'a self,
-        link_object_path: &'b dbus::Path<'static>,
-    ) -> Result<Vec<IpAddr>> {
+    fn get_link_dns(&self, link_object_path: &dbus::Path<'static>) -> Result<Vec<IpAddr>> {
         let servers: Vec<(i32, Vec<u8>)> = self
             .as_link_object(link_object_path.clone())
             .get(LINK_INTERFACE, DNS_SERVERS)
@@ -311,9 +310,9 @@ impl SystemdResolved {
             .collect())
     }
 
-    fn set_link_dns<'a, 'b: 'a>(
-        &'a self,
-        link_object_path: &'b dbus::Path<'static>,
+    fn set_link_dns(
+        &self,
+        link_object_path: &dbus::Path<'static>,
         servers: &[IpAddr],
     ) -> Result<()> {
         let servers = servers
@@ -327,7 +326,7 @@ impl SystemdResolved {
             // replaced in systemd-resolved.
             // v248.3
             link_object
-                .method_call(
+                .method_call::<(), _, _, _>(
                     LINK_INTERFACE,
                     SET_DNS_METHOD,
                     (Vec::<(i32, Vec<u8>)>::new(),),
@@ -369,9 +368,9 @@ impl SystemdResolved {
         }).map_err(Error::DBusRpcError)
     }
 
-    fn get_link_dns_domains<'a, 'b: 'a>(
-        &'a self,
-        link_object_path: &'b dbus::Path<'static>,
+    fn get_link_dns_domains(
+        &self,
+        link_object_path: &dbus::Path<'static>,
     ) -> Result<Vec<(String, bool)>> {
         let domains: Vec<(String, bool)> = self
             .as_link_object(link_object_path.clone())
@@ -398,9 +397,9 @@ impl SystemdResolved {
         }
     }
 
-    fn set_link_dns_domains<'a, 'b: 'a>(
-        &'a self,
-        link_object_path: &'b dbus::Path<'static>,
+    fn set_link_dns_domains(
+        &self,
+        link_object_path: &dbus::Path<'static>,
         domains: &[(&str, bool)],
     ) -> Result<()> {
         Proxy::new(

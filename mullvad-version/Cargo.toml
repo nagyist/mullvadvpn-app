@@ -1,17 +1,21 @@
 [package]
 name = "mullvad-version"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
-license = "GPL-3.0"
-edition = "2021"
-publish = false
-
 description = """
 Computes the Mullvad VPN app product version. This crate is the single source of truth for
 what version string a build should have. This crate is responsible for computing the
 `-dev-$git_hash` suffix as well as transforming the version into semver, Android versionCode
 and other formats.
 """
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
-[target.'cfg(not(target_os="android"))'.dependencies]
-regex = "1.6.0"
+[lints]
+workspace = true
+
+
+[dependencies]
+regex-lite = "0.1"
+serde = { workspace = true, optional = true }

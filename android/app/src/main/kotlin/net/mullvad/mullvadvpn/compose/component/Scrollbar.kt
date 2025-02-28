@@ -68,23 +68,29 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
+import net.mullvad.mullvadvpn.lib.theme.AppTheme
+import net.mullvad.mullvadvpn.lib.theme.color.AlphaScrollbar
 
 fun Modifier.drawHorizontalScrollbar(
     state: ScrollState,
-    reverseScrolling: Boolean = false
-): Modifier = drawScrollbar(state, Orientation.Horizontal, reverseScrolling)
+    color: Color,
+    reverseScrolling: Boolean = false,
+): Modifier = drawScrollbar(state, Orientation.Horizontal, color, reverseScrolling)
 
 fun Modifier.drawVerticalScrollbar(
     state: ScrollState,
-    reverseScrolling: Boolean = false
-): Modifier = drawScrollbar(state, Orientation.Vertical, reverseScrolling)
+    color: Color,
+    reverseScrolling: Boolean = false,
+): Modifier = drawScrollbar(state, Orientation.Vertical, color, reverseScrolling)
 
 private fun Modifier.drawScrollbar(
     state: ScrollState,
     orientation: Orientation,
-    reverseScrolling: Boolean
+    color: Color,
+    reverseScrolling: Boolean,
 ): Modifier =
-    drawScrollbar(orientation, reverseScrolling) { reverseDirection, atEnd, color, alpha ->
+    drawScrollbar(orientation, color, reverseScrolling) { reverseDirection, atEnd, paintColor, alpha
+        ->
         if (state.maxValue > 0) {
             val canvasSize = if (orientation == Orientation.Horizontal) size.width else size.height
             val totalSize = canvasSize + state.maxValue
@@ -94,30 +100,34 @@ private fun Modifier.drawScrollbar(
                 orientation,
                 reverseDirection,
                 atEnd,
-                color,
+                paintColor,
                 alpha,
                 thumbSize,
-                startOffset
+                startOffset,
             )
         }
     }
 
 fun Modifier.drawHorizontalScrollbar(
     state: LazyListState,
-    reverseScrolling: Boolean = false
-): Modifier = drawScrollbar(state, Orientation.Horizontal, reverseScrolling)
+    color: Color,
+    reverseScrolling: Boolean = false,
+): Modifier = drawScrollbar(state, Orientation.Horizontal, color, reverseScrolling)
 
 fun Modifier.drawVerticalScrollbar(
     state: LazyListState,
-    reverseScrolling: Boolean = false
-): Modifier = drawScrollbar(state, Orientation.Vertical, reverseScrolling)
+    color: Color,
+    reverseScrolling: Boolean = false,
+): Modifier = drawScrollbar(state, Orientation.Vertical, color, reverseScrolling)
 
 private fun Modifier.drawScrollbar(
     state: LazyListState,
     orientation: Orientation,
-    reverseScrolling: Boolean
+    color: Color,
+    reverseScrolling: Boolean,
 ): Modifier =
-    drawScrollbar(orientation, reverseScrolling) { reverseDirection, atEnd, color, alpha ->
+    drawScrollbar(orientation, color, reverseScrolling) { reverseDirection, atEnd, paintColor, alpha
+        ->
         val layoutInfo = state.layoutInfo
         val viewportSize = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
         val items = layoutInfo.visibleItemsInfo
@@ -137,10 +147,10 @@ private fun Modifier.drawScrollbar(
                 orientation,
                 reverseDirection,
                 atEnd,
-                color,
+                paintColor,
                 alpha,
                 thumbSize,
-                startOffset
+                startOffset,
             )
         }
     }
@@ -148,9 +158,14 @@ private fun Modifier.drawScrollbar(
 fun Modifier.drawVerticalScrollbar(
     state: LazyGridState,
     spanCount: Int,
-    reverseScrolling: Boolean = false
+    color: Color,
+    reverseScrolling: Boolean = false,
 ): Modifier =
-    drawScrollbar(Orientation.Vertical, reverseScrolling) { reverseDirection, atEnd, color, alpha ->
+    drawScrollbar(Orientation.Vertical, color, reverseScrolling) {
+        reverseDirection,
+        atEnd,
+        paintColor,
+        alpha ->
         val layoutInfo = state.layoutInfo
         val viewportSize = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
         val items = layoutInfo.visibleItemsInfo
@@ -176,10 +191,10 @@ fun Modifier.drawVerticalScrollbar(
                 Orientation.Vertical,
                 reverseDirection,
                 atEnd,
-                color,
+                paintColor,
                 alpha,
                 thumbSize,
-                startOffset
+                startOffset,
             )
         }
     }
@@ -191,7 +206,7 @@ private fun DrawScope.drawScrollbar(
     color: Color,
     alpha: () -> Float,
     thumbSize: Float,
-    startOffset: Float
+    startOffset: Float,
 ) {
     val thicknessPx = Thickness.toPx()
     val radiusPx = Radius.toPx()
@@ -199,12 +214,12 @@ private fun DrawScope.drawScrollbar(
         if (orientation == Orientation.Horizontal) {
             Offset(
                 if (reverseDirection) size.width - startOffset - thumbSize else startOffset,
-                if (atEnd) size.height - thicknessPx else 0f
+                if (atEnd) size.height - thicknessPx else 0f,
             )
         } else {
             Offset(
                 if (atEnd) size.width - thicknessPx else 0f,
-                if (reverseDirection) size.height - startOffset - thumbSize else startOffset
+                if (reverseDirection) size.height - startOffset - thumbSize else startOffset,
             )
         }
     val size =
@@ -219,22 +234,23 @@ private fun DrawScope.drawScrollbar(
         topLeft = topLeft,
         size = size,
         alpha = alpha(),
-        cornerRadius = CornerRadius(radiusPx, radiusPx)
+        cornerRadius = CornerRadius(radiusPx, radiusPx),
     )
 }
 
 private fun Modifier.drawScrollbar(
     orientation: Orientation,
+    color: Color,
     reverseScrolling: Boolean,
     onDraw:
         DrawScope.(
-            reverseDirection: Boolean, atEnd: Boolean, color: Color, alpha: () -> Float
-        ) -> Unit
+            reverseDirection: Boolean, atEnd: Boolean, color: Color, alpha: () -> Float,
+        ) -> Unit,
 ): Modifier = composed {
     val scrolled = remember {
         MutableSharedFlow<Unit>(
             extraBufferCapacity = 1,
-            onBufferOverflow = BufferOverflow.DROP_OLDEST
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
         )
     }
     val nestedScrollConnection =
@@ -243,7 +259,7 @@ private fun Modifier.drawScrollbar(
                 override fun onPostScroll(
                     consumed: Offset,
                     available: Offset,
-                    source: NestedScrollSource
+                    source: NestedScrollSource,
                 ): Offset {
                     val delta =
                         if (orientation == Orientation.Horizontal) consumed.x else consumed.y
@@ -269,16 +285,11 @@ private fun Modifier.drawScrollbar(
         } else reverseScrolling
     val atEnd = if (orientation == Orientation.Vertical) isLtr else true
 
-    val color = BarColor
-
     Modifier.nestedScroll(nestedScrollConnection).drawWithContent {
         drawContent()
         onDraw(reverseDirection, atEnd, color, alpha::value)
     }
 }
-
-private val BarColor: Color
-    @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
 
 private val Thickness = 8.dp
 private val Radius = 4.dp
@@ -287,22 +298,36 @@ private val FadeOutAnimationSpec =
 
 @Preview(widthDp = 400, heightDp = 400, showBackground = true)
 @Composable
-internal fun ScrollbarPreview() {
-    val state = rememberScrollState()
-    Column(
-        modifier = Modifier.drawVerticalScrollbar(state).verticalScroll(state),
-    ) {
-        repeat(50) {
-            Text(text = "Item ${it + 1}", modifier = Modifier.fillMaxWidth().padding(16.dp))
+private fun PreviewScrollbar() {
+    AppTheme {
+        val state = rememberScrollState()
+        Column(
+            modifier =
+                Modifier.drawVerticalScrollbar(
+                        state = state,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = AlphaScrollbar),
+                    )
+                    .verticalScroll(state)
+        ) {
+            repeat(50) {
+                Text(text = "Item ${it + 1}", modifier = Modifier.fillMaxWidth().padding(16.dp))
+            }
         }
     }
 }
 
 @Preview(widthDp = 400, heightDp = 400, showBackground = true)
 @Composable
-internal fun LazyListScrollbarPreview() {
+private fun PreviewLazyListScrollbar() {
     val state = rememberLazyListState()
-    LazyColumn(modifier = Modifier.drawVerticalScrollbar(state), state = state) {
+    LazyColumn(
+        modifier =
+            Modifier.drawVerticalScrollbar(
+                state = state,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = AlphaScrollbar),
+            ),
+        state = state,
+    ) {
         items(50) {
             Text(text = "Item ${it + 1}", modifier = Modifier.fillMaxWidth().padding(16.dp))
         }
@@ -311,13 +336,20 @@ internal fun LazyListScrollbarPreview() {
 
 @Preview(widthDp = 400, showBackground = true)
 @Composable
-internal fun HorizontalScrollbarPreview() {
+private fun PreviewHorizontalScrollbar() {
     val state = rememberScrollState()
-    Row(modifier = Modifier.drawHorizontalScrollbar(state).horizontalScroll(state)) {
+    Row(
+        modifier =
+            Modifier.drawHorizontalScrollbar(
+                    state = state,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = AlphaScrollbar),
+                )
+                .horizontalScroll(state)
+    ) {
         repeat(50) {
             Text(
                 text = (it + 1).toString(),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
             )
         }
     }
@@ -325,13 +357,20 @@ internal fun HorizontalScrollbarPreview() {
 
 @Preview(widthDp = 400, showBackground = true)
 @Composable
-internal fun LazyListHorizontalScrollbarPreview() {
+private fun PreviewLazyListHorizontalScrollbar() {
     val state = rememberLazyListState()
-    LazyRow(modifier = Modifier.drawHorizontalScrollbar(state), state = state) {
+    LazyRow(
+        modifier =
+            Modifier.drawHorizontalScrollbar(
+                state = state,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = AlphaScrollbar),
+            ),
+        state = state,
+    ) {
         items(50) {
             Text(
                 text = (it + 1).toString(),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
             )
         }
     }

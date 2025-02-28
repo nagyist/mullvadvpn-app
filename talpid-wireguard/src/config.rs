@@ -3,15 +3,22 @@ use std::{
     ffi::CString,
     net::{Ipv4Addr, Ipv6Addr},
 };
+use talpid_types::net::wireguard::{PeerConfig, PrivateKey};
 use talpid_types::net::{obfuscation::ObfuscatorConfig, wireguard, GenericTunnelOptions};
+
+/// Name to use for the tunnel device
+#[cfg(target_os = "linux")]
+pub(crate) const MULLVAD_INTERFACE_NAME: &str = "wg0-mullvad";
 
 /// Config required to set up a single WireGuard tunnel
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Contains tunnel endpoint specific config
     pub tunnel: wireguard::TunnelConfig,
-    /// List of peer configurations
-    pub peers: Vec<wireguard::PeerConfig>,
+    /// Entry peer
+    pub entry_peer: wireguard::PeerConfig,
+    /// Multihop exit peer
+    pub exit_peer: Option<wireguard::PeerConfig>,
     /// IPv4 gateway
     pub ipv4_gateway: Ipv4Addr,
     /// IPv6 gateway
@@ -24,79 +31,52 @@ pub struct Config {
     /// Enable IPv6 routing rules
     #[cfg(target_os = "linux")]
     pub enable_ipv6: bool,
-    /// Temporary switch for wireguard-nt
-    #[cfg(target_os = "windows")]
-    pub use_wireguard_nt: bool,
     /// Obfuscator config to be used for reaching the relay.
     pub obfuscator_config: Option<ObfuscatorConfig>,
+    /// Enable quantum-resistant PSK exchange
+    pub quantum_resistant: bool,
+    /// Enable DAITA
+    pub daita: bool,
 }
 
-/// Set the MTU to the lowest possible whilst still allowing for IPv6 to help with wireless
-/// carriers that do a lot of encapsulation.
-const DEFAULT_MTU: u16 = if cfg!(target_os = "android") {
-    1280
-} else {
-    1380
-};
-
 /// Configuration errors
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Supplied parameters don't contain a valid tunnel IP
-    #[error(display = "No valid tunnel IP")]
+    #[error("No valid tunnel IP")]
     InvalidTunnelIpError,
 
     /// Peer has no valid IPs
-    #[error(display = "Supplied peer has no valid IPs")]
+    #[error("Supplied peer has no valid IPs")]
     InvalidPeerIpError,
-
-    /// Parameters don't contain any peers
-    #[error(display = "No peers supplied")]
-    NoPeersSuppliedError,
 }
 
 impl Config {
     /// Constructs a Config from parameters
-    pub fn from_parameters(params: &wireguard::TunnelParameters) -> Result<Config, Error> {
-        let tunnel = params.connection.tunnel.clone();
-        let mut peers = vec![params.connection.peer.clone()];
-        if let Some(exit_peer) = &params.connection.exit_peer {
-            peers.push(exit_peer.clone());
-        }
+    pub fn from_parameters(
+        params: &wireguard::TunnelParameters,
+        default_mtu: u16,
+    ) -> Result<Config, Error> {
         Self::new(
-            tunnel,
-            peers,
             &params.connection,
             &params.options,
             &params.generic_options,
-            params.obfuscation.clone(),
+            &params.obfuscation,
+            default_mtu,
         )
     }
 
     /// Constructs a new Config struct
-    pub fn new(
-        mut tunnel: wireguard::TunnelConfig,
-        mut peers: Vec<wireguard::PeerConfig>,
-        connection_config: &wireguard::ConnectionConfig,
+    fn new(
+        connection: &wireguard::ConnectionConfig,
         wg_options: &wireguard::TunnelOptions,
         generic_options: &GenericTunnelOptions,
-        obfuscator_config: Option<ObfuscatorConfig>,
+        obfuscator_config: &Option<ObfuscatorConfig>,
+        default_mtu: u16,
     ) -> Result<Config, Error> {
-        if peers.is_empty() {
-            return Err(Error::NoPeersSuppliedError);
-        }
-        let mtu = wg_options.mtu.unwrap_or(DEFAULT_MTU);
-        for peer in &mut peers {
-            peer.allowed_ips = peer
-                .allowed_ips
-                .iter()
-                .cloned()
-                .filter(|ip| ip.is_ipv4() || generic_options.enable_ipv6)
-                .collect();
-            if peer.allowed_ips.is_empty() {
-                return Err(Error::InvalidPeerIpError);
-            }
-        }
+        let mut tunnel = connection.tunnel.clone();
+
+        let mtu = wg_options.mtu.unwrap_or(default_mtu);
 
         if tunnel.addresses.is_empty() {
             return Err(Error::InvalidTunnelIpError);
@@ -105,59 +85,87 @@ impl Config {
             .addresses
             .retain(|ip| ip.is_ipv4() || generic_options.enable_ipv6);
 
-        let ipv6_gateway = if generic_options.enable_ipv6 {
-            connection_config.ipv6_gateway
-        } else {
-            None
-        };
+        let ipv6_gateway = connection
+            .ipv6_gateway
+            .filter(|_opt| generic_options.enable_ipv6);
 
-        Ok(Config {
+        let mut config = Config {
             tunnel,
-            peers,
-            ipv4_gateway: connection_config.ipv4_gateway,
+            entry_peer: connection.peer.clone(),
+            exit_peer: connection.exit_peer.clone(),
+            ipv4_gateway: connection.ipv4_gateway,
             ipv6_gateway,
             mtu,
             #[cfg(target_os = "linux")]
-            fwmark: connection_config.fwmark,
+            fwmark: connection.fwmark,
             #[cfg(target_os = "linux")]
             enable_ipv6: generic_options.enable_ipv6,
-            #[cfg(target_os = "windows")]
-            use_wireguard_nt: wg_options.use_wireguard_nt,
-            obfuscator_config,
-        })
+            obfuscator_config: obfuscator_config.to_owned(),
+            quantum_resistant: wg_options.quantum_resistant,
+            #[cfg(daita)]
+            daita: wg_options.daita,
+            #[cfg(not(daita))]
+            daita: false,
+        };
+
+        for peer in config.peers_mut() {
+            peer.allowed_ips
+                .retain(|ip| ip.is_ipv4() || generic_options.enable_ipv6);
+            if peer.allowed_ips.is_empty() {
+                return Err(Error::InvalidPeerIpError);
+            }
+        }
+
+        Ok(config)
     }
 
     /// Returns a CString with the appropriate config for WireGuard-go
     // TODO: Consider outputting both overriding and additive configs
     pub fn to_userspace_format(&self) -> CString {
-        // the order of insertion matters, public key entry denotes a new peer entry
-        let mut wg_conf = WgConfigBuffer::new();
-        wg_conf
-            .add("private_key", self.tunnel.private_key.to_bytes().as_ref())
-            .add("listen_port", "0");
+        userspace_format(
+            &self.tunnel.private_key,
+            self.peers(),
+            #[cfg(target_os = "linux")]
+            self.fwmark,
+        )
+    }
 
-        #[cfg(target_os = "linux")]
-        if let Some(fwmark) = &self.fwmark {
-            wg_conf.add("fwmark", fwmark.to_string().as_str());
-        }
+    /// Return whether the config connects to an exit peer from another remote peer.
+    pub fn is_multihop(&self) -> bool {
+        self.exit_peer.is_some()
+    }
 
-        wg_conf.add("replace_peers", "true");
+    /// Return the exit peer. `exit_peer` if it is set, otherwise `entry_peer`.
+    pub fn exit_peer(&self) -> &wireguard::PeerConfig {
+        self.exit_peer.as_ref().unwrap_or(&self.entry_peer)
+    }
 
-        for peer in &self.peers {
-            wg_conf
-                .add("public_key", peer.public_key.as_bytes().as_ref())
-                .add("endpoint", peer.endpoint.to_string().as_str())
-                .add("replace_allowed_ips", "true");
-            if let Some(ref psk) = peer.psk {
-                wg_conf.add("preshared_key", psk.as_bytes().as_ref());
-            }
-            for addr in &peer.allowed_ips {
-                wg_conf.add("allowed_ip", addr.to_string().as_str());
-            }
-        }
+    /// Return the exit peer. `exit_peer` if it is set, otherwise `entry_peer`.
+    pub fn exit_peer_mut(&mut self) -> &mut wireguard::PeerConfig {
+        self.exit_peer.as_mut().unwrap_or(&mut self.entry_peer)
+    }
 
-        let bytes = wg_conf.into_config();
-        CString::new(bytes).expect("null bytes inside config")
+    /// Return an iterator over all peers.
+    pub fn peers(&self) -> impl Iterator<Item = &wireguard::PeerConfig> {
+        self.exit_peer
+            .as_ref()
+            .into_iter()
+            .chain(std::iter::once(&self.entry_peer))
+    }
+
+    /// Return a mutable iterator over all peers.
+    pub fn peers_mut(&mut self) -> impl Iterator<Item = &mut wireguard::PeerConfig> {
+        self.exit_peer
+            .as_mut()
+            .into_iter()
+            .chain(std::iter::once(&mut self.entry_peer))
+    }
+
+    /// Return routes for all allowed IPs.
+    pub fn get_tunnel_destinations(&self) -> impl Iterator<Item = ipnetwork::IpNetwork> + '_ {
+        self.peers()
+            .flat_map(|peer| peer.allowed_ips.iter())
+            .cloned()
     }
 }
 
@@ -207,5 +215,50 @@ impl WgConfigBuffer {
     pub fn into_config(mut self) -> Vec<u8> {
         self.buf.push(b'\n');
         self.buf
+    }
+}
+
+/// Returns a CString with the appropriate config for WireGuard-go
+#[allow(single_use_lifetimes)]
+pub fn userspace_format<'a>(
+    private_key: &PrivateKey,
+    peers: impl Iterator<Item = &'a PeerConfig>,
+    #[cfg(target_os = "linux")] fwmark: Option<u32>,
+) -> CString {
+    // the order of insertion matters, public key entry denotes a new peer entry
+    let mut wg_conf = WgConfigBuffer::new();
+    wg_conf
+        .add::<&[u8]>("private_key", private_key.to_bytes().as_ref())
+        .add("listen_port", "0");
+
+    #[cfg(target_os = "linux")]
+    if let Some(fwmark) = fwmark {
+        wg_conf.add("fwmark", fwmark.to_string().as_str());
+    }
+
+    wg_conf.add("replace_peers", "true");
+
+    for peer in peers {
+        write_peer_to_config(&mut wg_conf, peer)
+    }
+
+    let bytes = wg_conf.into_config();
+    CString::new(bytes).expect("null bytes inside config")
+}
+
+fn write_peer_to_config(wg_conf: &mut WgConfigBuffer, peer: &PeerConfig) {
+    wg_conf
+        .add::<&[u8]>("public_key", peer.public_key.as_bytes().as_ref())
+        .add("endpoint", peer.endpoint.to_string().as_str())
+        .add("replace_allowed_ips", "true");
+    if let Some(ref psk) = peer.psk {
+        wg_conf.add::<&[u8]>("preshared_key", psk.as_bytes().as_ref());
+    }
+    for addr in &peer.allowed_ips {
+        wg_conf.add("allowed_ip", addr.to_string().as_str());
+    }
+    #[cfg(daita)]
+    if peer.constant_packet_size {
+        wg_conf.add("constant_packet_size", "true");
     }
 }

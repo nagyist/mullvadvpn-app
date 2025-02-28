@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 15/12/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -12,9 +12,9 @@ import MullvadREST
 import MullvadTypes
 import NetworkExtension
 import Operations
-import TunnelProviderMessaging
+import PacketTunnelCore
 
-class MapConnectionStatusOperation: AsyncOperation {
+class MapConnectionStatusOperation: AsyncOperation, @unchecked Sendable {
     private let interactor: TunnelInteractor
     private let connectionStatus: NEVPNStatus
     private var request: Cancellable?
@@ -22,7 +22,7 @@ class MapConnectionStatusOperation: AsyncOperation {
 
     private let logger = Logger(label: "TunnelManager.MapConnectionStatusOperation")
 
-    init(
+    required init(
         queue: DispatchQueue,
         interactor: TunnelInteractor,
         connectionStatus: NEVPNStatus,
@@ -35,6 +35,7 @@ class MapConnectionStatusOperation: AsyncOperation {
         super.init(dispatchQueue: queue)
     }
 
+    // swiftlint:disable:next function_body_length
     override func main() {
         guard let tunnel = interactor.tunnel else {
             setTunnelDisconnectedStatus()
@@ -46,77 +47,55 @@ class MapConnectionStatusOperation: AsyncOperation {
         let tunnelState = interactor.tunnelStatus.state
 
         switch connectionStatus {
-        case .connecting:
-            switch tunnelState {
-            case .connecting:
-                break
-
-            default:
-                interactor.updateTunnelStatus { tunnelStatus in
-                    tunnelStatus.state = .connecting(nil)
-                }
-            }
-
-            fetchTunnelStatus(tunnel: tunnel) { packetTunnelStatus in
-                if packetTunnelStatus.isNetworkReachable {
-                    return packetTunnelStatus.tunnelRelay.map { .connecting($0) }
-                } else {
-                    return .waitingForConnectivity(.noConnection)
-                }
-            }
-            return
-
-        case .reasserting:
-            fetchTunnelStatus(tunnel: tunnel) { packetTunnelStatus in
-                if packetTunnelStatus.isNetworkReachable {
-                    return packetTunnelStatus.tunnelRelay.map { .reconnecting($0) }
-                } else {
-                    return .waitingForConnectivity(.noConnection)
-                }
-            }
-            return
-
-        case .connected:
-            fetchTunnelStatus(tunnel: tunnel) { packetTunnelStatus in
-                if packetTunnelStatus.isNetworkReachable {
-                    return packetTunnelStatus.tunnelRelay.map { .connected($0) }
-                } else {
-                    return .waitingForConnectivity(.noConnection)
+        case .connecting, .reasserting, .connected:
+            fetchTunnelStatus(tunnel: tunnel) { observedState in
+                switch observedState {
+                case let .connected(connectionState):
+                    return connectionState.isNetworkReachable
+                        ? .connected(
+                            connectionState.selectedRelays,
+                            isPostQuantum: connectionState.isPostQuantum,
+                            isDaita: connectionState.isDaitaEnabled
+                        )
+                        : .waitingForConnectivity(.noConnection)
+                case let .connecting(connectionState):
+                    return connectionState.isNetworkReachable
+                        ? .connecting(
+                            connectionState.selectedRelays,
+                            isPostQuantum: connectionState.isPostQuantum,
+                            isDaita: connectionState.isDaitaEnabled
+                        )
+                        : .waitingForConnectivity(.noConnection)
+                case let .negotiatingEphemeralPeer(connectionState, privateKey):
+                    return connectionState.isNetworkReachable
+                        ? .negotiatingEphemeralPeer(
+                            connectionState.selectedRelays,
+                            privateKey,
+                            isPostQuantum: connectionState.isPostQuantum,
+                            isDaita: connectionState.isDaitaEnabled
+                        )
+                        : .waitingForConnectivity(.noConnection)
+                case let .reconnecting(connectionState):
+                    return connectionState.isNetworkReachable
+                        ? .reconnecting(
+                            connectionState.selectedRelays,
+                            isPostQuantum: connectionState.isPostQuantum,
+                            isDaita: connectionState.isDaitaEnabled
+                        )
+                        : .waitingForConnectivity(.noConnection)
+                case let .error(blockedState):
+                    return .error(blockedState.reason)
+                case .initial, .disconnecting, .disconnected:
+                    return .none
                 }
             }
             return
 
         case .disconnected:
-            switch tunnelState {
-            case .pendingReconnect:
-                logger.debug("Ignore disconnected state when pending reconnect.")
-
-            case .disconnecting(.reconnect):
-                logger.debug("Restart the tunnel on disconnect.")
-                interactor.updateTunnelStatus { tunnelStatus in
-                    tunnelStatus = TunnelStatus()
-                    tunnelStatus.state = .pendingReconnect
-                }
-                interactor.startTunnel()
-
-            default:
-                setTunnelDisconnectedStatus()
-            }
+            handleDisconnectedState(tunnelState)
 
         case .disconnecting:
-            switch tunnelState {
-            case .disconnecting:
-                break
-            default:
-                interactor.updateTunnelStatus { tunnelStatus in
-                    let packetTunnelStatus = tunnelStatus.packetTunnelStatus
-
-                    tunnelStatus = TunnelStatus()
-                    tunnelStatus.state = packetTunnelStatus.isNetworkReachable
-                        ? .disconnecting(.nothing)
-                        : .waitingForConnectivity(.noNetwork)
-                }
-            }
+            handleDisconnectingState(tunnelState)
 
         case .invalid:
             setTunnelDisconnectedStatus()
@@ -132,6 +111,43 @@ class MapConnectionStatusOperation: AsyncOperation {
         request?.cancel()
     }
 
+    private func handleDisconnectingState(_ tunnelState: TunnelState) {
+        switch tunnelState {
+        case .disconnecting:
+            break
+        default:
+            interactor.updateTunnelStatus { tunnelStatus in
+                // Avoid displaying waiting for connectivity banners if the tunnel in a blocked state when disconnecting
+                if tunnelStatus.observedState.blockedState != nil {
+                    tunnelStatus.state = .disconnecting(.nothing)
+                } else {
+                    let isNetworkReachable = tunnelStatus.observedState.connectionState?.isNetworkReachable ?? false
+                    tunnelStatus.state = isNetworkReachable
+                        ? .disconnecting(.nothing)
+                        : .waitingForConnectivity(.noNetwork)
+                }
+            }
+        }
+    }
+
+    private func handleDisconnectedState(_ tunnelState: TunnelState) {
+        switch tunnelState {
+        case .pendingReconnect:
+            logger.debug("Ignore disconnected state when pending reconnect.")
+
+        case .disconnecting(.reconnect):
+            logger.debug("Restart the tunnel on disconnect.")
+            interactor.updateTunnelStatus { tunnelStatus in
+                tunnelStatus = TunnelStatus()
+                tunnelStatus.state = .pendingReconnect
+            }
+            interactor.startTunnel()
+
+        default:
+            setTunnelDisconnectedStatus()
+        }
+    }
+
     private func setTunnelDisconnectedStatus() {
         interactor.updateTunnelStatus { tunnelStatus in
             tunnelStatus = TunnelStatus()
@@ -142,18 +158,18 @@ class MapConnectionStatusOperation: AsyncOperation {
     }
 
     private func fetchTunnelStatus(
-        tunnel: Tunnel,
-        mapToState: @escaping (PacketTunnelStatus) -> TunnelState?
+        tunnel: any TunnelProtocol,
+        mapToState: @escaping @Sendable (ObservedState) -> TunnelState?
     ) {
-        request = tunnel.getTunnelStatus { [weak self] completion in
+        request = tunnel.getTunnelStatus { [weak self] result in
             guard let self else { return }
 
             dispatchQueue.async {
-                if case let .success(packetTunnelStatus) = completion, !self.isCancelled {
+                if case let .success(observedState) = result, !self.isCancelled {
                     self.interactor.updateTunnelStatus { tunnelStatus in
-                        tunnelStatus.packetTunnelStatus = packetTunnelStatus
+                        tunnelStatus.observedState = observedState
 
-                        if let newState = mapToState(packetTunnelStatus) {
+                        if let newState = mapToState(observedState) {
                             tunnelStatus.state = newState
                         }
                     }

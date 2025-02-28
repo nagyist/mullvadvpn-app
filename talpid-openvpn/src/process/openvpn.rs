@@ -1,15 +1,12 @@
-use duct;
-
-use super::stoppable_process::StoppableProcess;
-use os_pipe::{pipe, PipeWriter};
-use parking_lot::Mutex;
-use shell_escape;
+use futures::channel::oneshot;
 use std::{
     ffi::{OsStr, OsString},
     fmt, io,
     path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
 };
-use talpid_types::{net, ErrorExt};
+use talpid_types::net::{self, proxy::CustomProxy};
 
 static BASE_ARGUMENTS: &[&[&str]] = &[
     &["--client"],
@@ -68,7 +65,7 @@ pub struct OpenVpnCommand {
     plugin: Option<(PathBuf, Vec<String>)>,
     log: Option<PathBuf>,
     tunnel_options: net::openvpn::TunnelOptions,
-    proxy_settings: Option<net::openvpn::ProxySettings>,
+    proxy_settings: Option<CustomProxy>,
     tunnel_alias: Option<OsString>,
     enable_ipv6: bool,
     proxy_port: Option<u16>,
@@ -184,15 +181,17 @@ impl OpenVpnCommand {
     }
 
     /// Sets the proxy settings.
-    pub fn proxy_settings(&mut self, proxy_settings: net::openvpn::ProxySettings) -> &mut Self {
+    pub fn proxy_settings(&mut self, proxy_settings: CustomProxy) -> &mut Self {
         self.proxy_settings = Some(proxy_settings);
         self
     }
 
     /// Build a runnable expression from the current state of the command.
-    pub fn build(&self) -> duct::Expression {
+    pub fn build(&self) -> tokio::process::Command {
         log::debug!("Building expression: {}", &self);
-        duct::cmd(&self.openvpn_bin, self.get_arguments()).unchecked()
+        let mut handle = tokio::process::Command::new(&self.openvpn_bin);
+        handle.args(self.get_arguments());
+        handle
     }
 
     /// Returns all arguments that the subprocess would be spawned with.
@@ -302,19 +301,19 @@ impl OpenVpnCommand {
     fn proxy_arguments(&self) -> Vec<String> {
         let mut args = vec![];
         match self.proxy_settings {
-            Some(net::openvpn::ProxySettings::Local(ref local_proxy)) => {
+            Some(CustomProxy::Socks5Local(ref local_proxy)) => {
                 args.push("--socks-proxy".to_owned());
                 args.push("127.0.0.1".to_owned());
-                args.push(local_proxy.port.to_string());
+                args.push(local_proxy.local_port.to_string());
                 args.push("--route".to_owned());
-                args.push(local_proxy.peer.ip().to_string());
+                args.push(local_proxy.remote_endpoint.address.ip().to_string());
                 args.push("255.255.255.255".to_owned());
                 args.push("net_gateway".to_owned());
             }
-            Some(net::openvpn::ProxySettings::Remote(ref remote_proxy)) => {
+            Some(CustomProxy::Socks5Remote(ref remote_proxy)) => {
                 args.push("--socks-proxy".to_owned());
-                args.push(remote_proxy.address.ip().to_string());
-                args.push(remote_proxy.address.port().to_string());
+                args.push(remote_proxy.endpoint.ip().to_string());
+                args.push(remote_proxy.endpoint.port().to_string());
 
                 if let Some(ref _auth) = remote_proxy.auth {
                     if let Some(ref auth_file) = self.proxy_auth_path {
@@ -325,11 +324,11 @@ impl OpenVpnCommand {
                 }
 
                 args.push("--route".to_owned());
-                args.push(remote_proxy.address.ip().to_string());
+                args.push(remote_proxy.endpoint.ip().to_string());
                 args.push("255.255.255.255".to_owned());
                 args.push("net_gateway".to_owned());
             }
-            Some(net::openvpn::ProxySettings::Shadowsocks(ref ss)) => {
+            Some(CustomProxy::Shadowsocks(ref ss)) => {
                 args.push("--socks-proxy".to_owned());
                 args.push("127.0.0.1".to_owned());
 
@@ -340,7 +339,7 @@ impl OpenVpnCommand {
                 }
 
                 args.push("--route".to_owned());
-                args.push(ss.peer.ip().to_string());
+                args.push(ss.endpoint.ip().to_string());
                 args.push("255.255.255.255".to_owned());
                 args.push("net_gateway".to_owned());
             }
@@ -363,80 +362,94 @@ impl fmt::Display for OpenVpnCommand {
     }
 }
 
-/// Proc handle for an openvpn process
+/// Handle to a running OpenVPN process.
 pub struct OpenVpnProcHandle {
-    /// Duct handle
-    pub inner: duct::Handle,
-    /// Standard input handle
-    pub stdin: Mutex<Option<PipeWriter>>,
+    stop_tx: Option<oneshot::Sender<Duration>>,
+    proc: tokio::task::JoinHandle<io::Result<std::process::ExitStatus>>,
 }
 
-/// Impl for proc handle
 impl OpenVpnProcHandle {
-    /// Constructor for a new openvpn proc handle
-    pub fn new(mut cmd: duct::Expression) -> io::Result<Self> {
-        use is_terminal::IsTerminal;
+    /// Configures the expression to run OpenVPN in a way compatible with this handle
+    /// and spawns it. Returns the handle.
+    pub fn new(mut cmd: &mut tokio::process::Command) -> io::Result<Self> {
+        use std::io::IsTerminal;
 
         if !std::io::stdout().is_terminal() {
-            cmd = cmd.stdout_null();
+            cmd = cmd.stdout(std::process::Stdio::null())
         }
 
         if !std::io::stderr().is_terminal() {
-            cmd = cmd.stderr_null();
+            cmd = cmd.stderr(std::process::Stdio::null())
         }
 
-        let (reader, writer) = pipe()?;
-        let proc_handle = cmd.stdin_file(reader).start()?;
+        let mut proc_handle = cmd.stdin(Stdio::piped()).spawn()?;
+
+        let (stop_tx, mut stop_rx) = oneshot::channel();
+
+        let proc = tokio::spawn(async move {
+            let stdin = proc_handle.stdin.take().expect("expected stdin handle");
+
+            tokio::select! {
+                timeout = &mut stop_rx => {
+                    // Dropping our stdin handle so that it is closed once. Closing the handle should
+                    // gracefully stop our OpenVPN child process. This only works because our OpenVPN
+                    // fork expects this.
+                    drop(stdin);
+
+                    if let Ok(timeout) = timeout {
+                        //
+                        // Controlled shutdown using nice_kill()
+                        //
+
+                        log::debug!("Trying to stop child process gracefully");
+
+                        match tokio::time::timeout(timeout, proc_handle.wait()).await {
+                            Ok(_) => log::debug!("Child process terminated gracefully"),
+                            Err(_) => {
+                                log::warn!(
+                                    "Child process did not terminate gracefully within timeout, forcing termination"
+                                );
+                                proc_handle.kill().await?;
+                            }
+                        }
+                    } else {
+                        //
+                        // If the abort channel is just dropped, kill the process immediately.
+                        //
+                        log::debug!("Killing OpenVPN process forcefully");
+                        let _ = proc_handle.kill().await;
+                    }
+
+                    proc_handle.wait().await
+                }
+
+                //
+                // If the process exits on its own, we're also done.
+                //
+                result = proc_handle.wait() => {
+                    log::debug!("OpenVPN process terminated");
+                    result
+                }
+            }
+        });
 
         Ok(Self {
-            inner: proc_handle,
-            stdin: Mutex::new(Some(writer)),
+            stop_tx: Some(stop_tx),
+            proc,
         })
     }
-}
 
-impl StoppableProcess for OpenVpnProcHandle {
-    /// Closes STDIN to stop the openvpn process
-    fn stop(&self) {
-        // Dropping our stdin handle so that it is closed once. Closing the handle should
-        // gracefully stop our openvpn child process.
-        if self.stdin.lock().take().is_none() {
-            log::warn!("Tried to close OpenVPN stdin handle twice, this is a bug");
+    /// Begins to kill the process, causing `wait()` to return. This function does not wait for the
+    /// operation to complete.
+    pub fn kill(&mut self, timeout: std::time::Duration) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(timeout);
         }
     }
 
-    fn kill(&self) -> io::Result<()> {
-        log::warn!("Killing OpenVPN process");
-        self.inner.kill()?;
-        log::debug!("OpenVPN forcefully killed");
-        Ok(())
-    }
-
-    fn has_stopped(&self) -> io::Result<bool> {
-        match self.inner.try_wait() {
-            Ok(None) => Ok(false),
-            Ok(Some(_)) => Ok(true),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-impl Drop for OpenVpnProcHandle {
-    fn drop(&mut self) {
-        let result = match self.has_stopped() {
-            Ok(false) => self.kill(),
-            Err(e) => {
-                log::error!(
-                    "{}",
-                    e.display_chain_with_msg("Failed to check if OpenVPN is running")
-                );
-                self.kill()
-            }
-            _ => Ok(()),
-        };
-        if let Err(error) = result {
-            log::error!("{}", error.display_chain_with_msg("Failed to kill OpenVPN"));
-        }
+    /// Waits for the child to exit completely.
+    pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        (&mut self.proc).await.expect("openvpn task panicked")
     }
 }
 

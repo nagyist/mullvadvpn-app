@@ -1,13 +1,14 @@
+#![allow(clippy::undocumented_unsafe_blocks)] // Remove me if you dare.
+
 use crate::cli;
-use libc::c_void;
-use mullvad_daemon::{runtime::new_runtime_builder, DaemonShutdownHandle};
+use mullvad_daemon::{runtime::new_multi_thread, DaemonShutdownHandle};
 use std::{
     env,
-    ffi::OsString,
+    ffi::{c_void, OsString},
     ptr, slice,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, LazyLock,
     },
     thread,
     time::{Duration, Instant},
@@ -39,12 +40,12 @@ static SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const SERVICE_RECOVERY_LAST_RESTART_DELAY: Duration = Duration::from_secs(60 * 10);
 const SERVICE_FAILURE_RESET_PERIOD: Duration = Duration::from_secs(60 * 15);
 
-lazy_static::lazy_static! {
-    static ref SERVICE_ACCESS: ServiceAccess = ServiceAccess::QUERY_CONFIG
-    | ServiceAccess::CHANGE_CONFIG
-    | ServiceAccess::START
-    | ServiceAccess::DELETE;
-}
+static SERVICE_ACCESS: LazyLock<ServiceAccess> = LazyLock::new(|| {
+    ServiceAccess::QUERY_CONFIG
+        | ServiceAccess::CHANGE_CONFIG
+        | ServiceAccess::START
+        | ServiceAccess::DELETE
+});
 
 pub fn run() -> Result<(), String> {
     // Start the service dispatcher.
@@ -98,7 +99,7 @@ pub fn handle_service_main(_arguments: Vec<OsString>) {
 
     let log_dir = crate::get_log_dir(cli::get_config()).expect("Log dir should be available here");
 
-    let runtime = new_runtime_builder().build();
+    let runtime = new_multi_thread().build();
     let runtime = match runtime {
         Err(error) => {
             log::error!("{}", error.display_chain());
@@ -318,14 +319,13 @@ fn accepted_controls_by_state(state: ServiceState) -> ServiceControlAccept {
     }
 }
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum InstallError {
-    #[error(display = "Unable to connect to service manager")]
-    ConnectServiceManager(#[error(source)] windows_service::Error),
+    #[error("Unable to connect to service manager")]
+    ConnectServiceManager(#[source] windows_service::Error),
 
-    #[error(display = "Unable to create a service")]
-    CreateService(#[error(source)] windows_service::Error),
+    #[error("Unable to create a service")]
+    CreateService(#[source] windows_service::Error),
 }
 
 pub fn install_service() -> Result<(), InstallError> {

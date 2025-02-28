@@ -12,10 +12,17 @@
 # Passed by Xcode
 ACTION=$1
 
+# Do normal builds when building documentation.
+if [ "$ACTION" == "docbuild" ]; then
+  ACTION="build"
+fi
+
 if [ "$SOURCE_PACKAGES_PATH" == "" ]; then
   # When archiving, Xcode sets the action to "install"
   if [ "$ACTION" == "install" ]; then
     SOURCE_PACKAGES_PATH="$BUILD_DIR/../../../../../SourcePackages"
+  elif [ "$ENABLE_PREVIEWS" == "YES" ]; then
+    SOURCE_PACKAGES_PATH="$BUILD_DIR/../../../../../../SourcePackages"
   else
     SOURCE_PACKAGES_PATH="$BUILD_DIR/../../SourcePackages"
   fi
@@ -29,8 +36,11 @@ if [ "$RESOLVED_SOURCE_PACKAGES_PATH" == "" ]; then
 fi
 
 # Compile the path to the Makefile directory
-WIREGUARD_KIT_GO_PATH="$RESOLVED_SOURCE_PACKAGES_PATH/checkouts/wireguard-apple/Sources/WireGuardKitGo"
+WIREGUARD_KIT_GO_PATH="wireguard-apple/Sources/WireGuardKitGo"
 echo "WireGuardKitGo path resolved to $WIREGUARD_KIT_GO_PATH"
 
+export PATH=/opt/homebrew/opt/go@1.21/bin:$PATH
+
 # Run make
+# shellcheck disable=SC2086
 /usr/bin/make -C "$WIREGUARD_KIT_GO_PATH" $ACTION

@@ -9,22 +9,38 @@ use std::{
 pub mod network_interface;
 
 pub mod tun_provider;
-use futures::{channel::oneshot, future::BoxFuture};
+use futures::{
+    channel::{
+        mpsc::UnboundedSender,
+        oneshot::{self, Sender},
+    },
+    SinkExt,
+};
 use talpid_routing::RouteManagerHandle;
 use talpid_types::net::AllowedTunnelTraffic;
 use tun_provider::TunProvider;
 
+/// Size of IPv4 header in bytes
+pub const IPV4_HEADER_SIZE: u16 = 20;
+/// Size of IPv6 header in bytes
+pub const IPV6_HEADER_SIZE: u16 = 40;
+/// Size of wireguard header in bytes
+pub const WIREGUARD_HEADER_SIZE: u16 = 40;
+/// Size of ICMP header in bytes
+pub const ICMP_HEADER_SIZE: u16 = 8;
+/// Smallest allowed MTU for IPv4 in bytes
+pub const MIN_IPV4_MTU: u16 = 576;
+/// Smallest allowed MTU for IPv6 in bytes
+pub const MIN_IPV6_MTU: u16 = 1280;
+
 /// Arguments for creating a tunnel.
-pub struct TunnelArgs<'a, L>
-where
-    L: (Fn(TunnelEvent) -> BoxFuture<'static, ()>) + Send + Clone + Sync + 'static,
-{
-    /// Toktio runtime handle.
+pub struct TunnelArgs<'a> {
+    /// Tokio runtime handle.
     pub runtime: tokio::runtime::Handle,
     /// Resource directory path.
     pub resource_dir: &'a Path,
     /// Callback function called when an event happens.
-    pub on_event: L,
+    pub event_hook: EventHook,
     /// Receiver oneshot channel for closing the tunnel.
     pub tunnel_close_rx: oneshot::Receiver<()>,
     /// Mutex to tunnel provider.
@@ -33,6 +49,24 @@ where
     pub retry_attempt: u32,
     /// Route manager handle.
     pub route_manager: RouteManagerHandle,
+}
+
+#[derive(Clone)]
+pub struct EventHook {
+    event_tx: UnboundedSender<(TunnelEvent, Sender<()>)>,
+}
+
+impl EventHook {
+    pub fn new(event_tx: UnboundedSender<(TunnelEvent, Sender<()>)>) -> Self {
+        Self { event_tx }
+    }
+
+    pub async fn on_event(&mut self, event: TunnelEvent) {
+        let (tx, rx) = oneshot::channel::<()>();
+        if let Ok(()) = self.event_tx.send((event, tx)).await {
+            let _ = rx.await;
+        }
+    }
 }
 
 /// Information about a VPN tunnel.
@@ -46,6 +80,17 @@ pub struct TunnelMetadata {
     pub ipv4_gateway: Ipv4Addr,
     /// The IP to the IPv6 default gateway on the tunnel interface.
     pub ipv6_gateway: Option<Ipv6Addr>,
+}
+
+impl TunnelMetadata {
+    /// Return a copy of all gateway addresses
+    pub fn gateways(&self) -> Vec<IpAddr> {
+        let mut addrs = vec![self.ipv4_gateway.into()];
+        if let Some(gateway) = self.ipv6_gateway {
+            addrs.push(gateway.into());
+        }
+        addrs
+    }
 }
 
 /// Possible events from the VPN tunnel and the child process managing it.

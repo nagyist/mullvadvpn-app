@@ -3,18 +3,18 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 27/10/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
 
 class SettingsAddDNSEntryCell: SettingsCell {
-    var action: (() -> Void)?
+    var tapAction: (() -> Void)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
 
-        backgroundView?.backgroundColor = UIColor.SubSubCell.backgroundColor
+        backgroundView?.backgroundColor = UIColor.Cell.Background.indentationLevelTwo
 
         let gestureRecognizer = UITapGestureRecognizer(
             target: self,
@@ -29,7 +29,7 @@ class SettingsAddDNSEntryCell: SettingsCell {
 
     @objc func handleTap(_ sender: UIGestureRecognizer) {
         if case .ended = sender.state {
-            action?()
+            tapAction?()
         }
     }
 }

@@ -3,28 +3,29 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 29/03/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
 
-class RedeemVoucherOperation: ResultOperation<REST.SubmitVoucherResponse> {
+class RedeemVoucherOperation: ResultOperation<REST.SubmitVoucherResponse>, @unchecked Sendable {
     private let logger = Logger(label: "RedeemVoucherOperation")
     private let interactor: TunnelInteractor
 
     private let voucherCode: String
-    private let apiProxy: REST.APIProxy
+    private let apiProxy: APIQuerying
     private var task: Cancellable?
 
     init(
         dispatchQueue: DispatchQueue,
         interactor: TunnelInteractor,
         voucherCode: String,
-        apiProxy: REST.APIProxy
+        apiProxy: APIQuerying
     ) {
         self.interactor = interactor
         self.voucherCode = voucherCode

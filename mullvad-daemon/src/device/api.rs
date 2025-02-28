@@ -2,6 +2,8 @@ use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use futures::{future::FusedFuture, Future};
+#[cfg(target_os = "android")]
+use mullvad_types::account::PlayPurchasePaymentToken;
 use mullvad_types::{account::VoucherSubmission, device::Device, wireguard::WireguardData};
 
 use super::{Error, PrivateAccountAndDevice, ResponseTx};
@@ -45,6 +47,27 @@ impl CurrentApiCall {
         tx: ResponseTx<VoucherSubmission>,
     ) {
         self.current_call = Some(Call::VoucherSubmission(voucher_call, Some(tx)));
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn set_init_play_purchase(
+        &mut self,
+        init_play_purchase_call: ApiCall<PlayPurchasePaymentToken>,
+        tx: ResponseTx<PlayPurchasePaymentToken>,
+    ) {
+        self.current_call = Some(Call::InitPlayPurchase(init_play_purchase_call, Some(tx)));
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn set_verify_play_purchase(
+        &mut self,
+        verify_play_purchase_call: ApiCall<()>,
+        tx: ResponseTx<()>,
+    ) {
+        self.current_call = Some(Call::VerifyPlayPurchase(
+            verify_play_purchase_call,
+            Some(tx),
+        ));
     }
 
     pub fn is_validating(&self) -> bool {
@@ -109,6 +132,13 @@ enum Call {
         ApiCall<VoucherSubmission>,
         Option<ResponseTx<VoucherSubmission>>,
     ),
+    #[cfg(target_os = "android")]
+    InitPlayPurchase(
+        ApiCall<PlayPurchasePaymentToken>,
+        Option<ResponseTx<PlayPurchasePaymentToken>>,
+    ),
+    #[cfg(target_os = "android")]
+    VerifyPlayPurchase(ApiCall<()>, Option<ResponseTx<()>>),
     ExpiryCheck(ApiCall<DateTime<Utc>>),
 }
 
@@ -121,20 +151,37 @@ impl futures::Future for Call {
     ) -> std::task::Poll<Self::Output> {
         use Call::*;
         match &mut *self {
-            Login(call, tx) => {
-                if let std::task::Poll::Ready(response) = Pin::new(call).poll(cx) {
+            Login(call, tx) => match Pin::new(call).poll(cx) {
+                std::task::Poll::Ready(response) => {
                     std::task::Poll::Ready(ApiResult::Login(response, tx.take().unwrap()))
-                } else {
-                    std::task::Poll::Pending
                 }
-            }
+                _ => std::task::Poll::Pending,
+            },
             TimerKeyRotation(call) | OneshotKeyRotation(call) => {
                 Pin::new(call).poll(cx).map(ApiResult::Rotation)
             }
             Validation(call) => Pin::new(call).poll(cx).map(ApiResult::Validation),
-            VoucherSubmission(call, tx) => {
+            VoucherSubmission(call, tx) => match Pin::new(call).poll(cx) {
+                std::task::Poll::Ready(response) => std::task::Poll::Ready(
+                    ApiResult::VoucherSubmission(response, tx.take().unwrap()),
+                ),
+                _ => std::task::Poll::Pending,
+            },
+            #[cfg(target_os = "android")]
+            InitPlayPurchase(call, tx) => {
                 if let std::task::Poll::Ready(response) = Pin::new(call).poll(cx) {
-                    std::task::Poll::Ready(ApiResult::VoucherSubmission(
+                    std::task::Poll::Ready(ApiResult::InitPlayPurchase(
+                        response,
+                        tx.take().unwrap(),
+                    ))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+            #[cfg(target_os = "android")]
+            VerifyPlayPurchase(call, tx) => {
+                if let std::task::Poll::Ready(response) = Pin::new(call).poll(cx) {
+                    std::task::Poll::Ready(ApiResult::VerifyPlayPurchase(
                         response,
                         tx.take().unwrap(),
                     ))
@@ -155,5 +202,12 @@ pub(crate) enum ApiResult {
         Result<VoucherSubmission, Error>,
         ResponseTx<VoucherSubmission>,
     ),
+    #[cfg(target_os = "android")]
+    InitPlayPurchase(
+        Result<PlayPurchasePaymentToken, Error>,
+        ResponseTx<PlayPurchasePaymentToken>,
+    ),
+    #[cfg(target_os = "android")]
+    VerifyPlayPurchase(Result<(), Error>, ResponseTx<()>),
     ExpiryCheck(Result<DateTime<Utc>, Error>),
 }

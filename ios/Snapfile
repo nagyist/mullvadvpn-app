@@ -1,10 +1,12 @@
+ios_version '17.2'
+
 # A list of devices you want to take the screenshots from
 devices([
-  "iPhone 8 Plus", # 5.5"
-  "iPhone 11 Pro Max", # 6.5"
-  "iPhone 14 Pro Max", # 6.7"
-  "iPad Pro (12.9-inch) (2nd generation)",
-  "iPad Pro (12.9-inch) (6th generation)"
+  "iPhone SE (3rd generation)",
+  "iPhone 15 Pro",
+  "iPhone 15 Pro Max",
+  "iPad Pro 11-inch (M4)",
+  "iPad Pro 13-inch (M4)"
 ])
 
 languages([
@@ -14,8 +16,11 @@ languages([
   # ["pt", "pt_BR"] # Portuguese with Brazilian locale
 ])
 
-# The name of the scheme which contains the UI Tests
-scheme("MullvadVPNScreenshots")
+# The name of the scheme which contains the screenshot UI Tests
+scheme("MullvadVPN")
+
+# The name of the test plan which contains the UI Tests
+testplan("MullvadVPNScreenshots")
 
 # Where should the resulting screenshots be stored?
 output_directory("./Screenshots")

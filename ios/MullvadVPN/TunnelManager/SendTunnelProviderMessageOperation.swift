@@ -3,30 +3,30 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 27/01/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadTypes
 import NetworkExtension
 import Operations
-import TunnelProviderMessaging
+import PacketTunnelCore
 import UIKit
 
 /// Delay for sending tunnel provider messages to the tunnel when in connecting state.
 /// Used to workaround a bug when talking to the tunnel too early during startup may cause it
 /// to freeze.
-private let connectingStateWaitDelay: TimeInterval = 5
+private let connectingStateWaitDelay: Duration = .seconds(5)
 
 /// Default timeout in seconds.
-private let defaultTimeout: TimeInterval = 5
+private let defaultTimeout: Duration = .seconds(5)
 
-final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> {
+final class SendTunnelProviderMessageOperation<Output: Sendable>: ResultOperation<Output>, @unchecked Sendable {
     typealias DecoderHandler = (Data?) throws -> Output
 
-    private let application: UIApplication
-    private let tunnel: Tunnel
+    private let backgroundTaskProvider: BackgroundTaskProviding
+    private let tunnel: any TunnelProtocol
     private let message: TunnelProviderMessage
-    private let timeout: TimeInterval
+    private let timeout: Duration
 
     private let decoderHandler: DecoderHandler
 
@@ -38,14 +38,14 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
 
     init(
         dispatchQueue: DispatchQueue,
-        application: UIApplication,
-        tunnel: Tunnel,
+        backgroundTaskProvider: BackgroundTaskProviding,
+        tunnel: any TunnelProtocol,
         message: TunnelProviderMessage,
-        timeout: TimeInterval? = nil,
+        timeout: Duration? = nil,
         decoderHandler: @escaping DecoderHandler,
         completionHandler: CompletionHandler?
     ) {
-        self.application = application
+        self.backgroundTaskProvider = backgroundTaskProvider
         self.tunnel = tunnel
         self.message = message
         self.timeout = timeout ?? defaultTimeout
@@ -60,7 +60,7 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
 
         addObserver(
             BackgroundObserver(
-                application: application,
+                backgroundTaskProvider: backgroundTaskProvider,
                 name: "Send tunnel provider message: \(message)",
                 cancelUponExpiration: true
             )
@@ -68,7 +68,7 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
     }
 
     override func main() {
-        setTimeoutTimer(connectingStateWaitDelay: 0)
+        setTimeoutTimer(connectingStateWaitDelay: .zero)
 
         statusObserver = tunnel.addBlockObserver(queue: dispatchQueue) { [weak self] _, status in
             self?.handleVPNStatus(status)
@@ -98,7 +98,7 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
         statusObserver = nil
     }
 
-    private func setTimeoutTimer(connectingStateWaitDelay delay: TimeInterval) {
+    private func setTimeoutTimer(connectingStateWaitDelay delay: Duration) {
         let workItem = DispatchWorkItem { [weak self] in
             self?.finish(result: .failure(SendTunnelProviderMessageError.timeout))
         }
@@ -193,7 +193,7 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
             return
         }
 
-        guard application.backgroundTimeRemaining > timeout else {
+        guard backgroundTaskProvider.backgroundTimeRemaining > timeout else {
             finish(result: .failure(SendTunnelProviderMessageError.notEnoughBackgroundTime))
             return
         }
@@ -212,54 +212,6 @@ final class SendTunnelProviderMessageOperation<Output>: ResultOperation<Output> 
         } catch {
             finish(result: .failure(SendTunnelProviderMessageError.system(error)))
         }
-    }
-}
-
-extension SendTunnelProviderMessageOperation where Output: Codable {
-    convenience init(
-        dispatchQueue: DispatchQueue,
-        application: UIApplication,
-        tunnel: Tunnel,
-        message: TunnelProviderMessage,
-        timeout: TimeInterval? = nil,
-        completionHandler: @escaping CompletionHandler
-    ) {
-        self.init(
-            dispatchQueue: dispatchQueue,
-            application: application,
-            tunnel: tunnel,
-            message: message,
-            timeout: timeout,
-            decoderHandler: { data in
-                if let data {
-                    return try TunnelProviderReply(messageData: data).value
-                } else {
-                    throw EmptyTunnelProviderResponseError()
-                }
-            },
-            completionHandler: completionHandler
-        )
-    }
-}
-
-extension SendTunnelProviderMessageOperation where Output == Void {
-    convenience init(
-        dispatchQueue: DispatchQueue,
-        application: UIApplication,
-        tunnel: Tunnel,
-        message: TunnelProviderMessage,
-        timeout: TimeInterval? = nil,
-        completionHandler: CompletionHandler?
-    ) {
-        self.init(
-            dispatchQueue: dispatchQueue,
-            application: application,
-            tunnel: tunnel,
-            message: message,
-            timeout: timeout,
-            decoderHandler: { _ in () },
-            completionHandler: completionHandler
-        )
     }
 }
 

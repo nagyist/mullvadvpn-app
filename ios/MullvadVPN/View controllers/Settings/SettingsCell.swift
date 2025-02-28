@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 22/05/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -17,26 +17,27 @@ enum SettingsDisclosureType {
     var image: UIImage? {
         switch self {
         case .none:
-            return nil
+            nil
         case .chevron:
-            return UIImage(named: "IconChevron")
+            UIImage(resource: .iconChevron)
         case .externalLink:
-            return UIImage(named: "IconExtlink")
+            UIImage(resource: .iconExtlink)
         case .tick:
-            return UIImage(named: "IconTickSml")
+            UIImage(resource: .iconTickSml)
         }
     }
 }
 
-class SettingsCell: UITableViewCell {
+class SettingsCell: UITableViewCell, CustomCellDisclosureHandling {
     typealias InfoButtonHandler = () -> Void
 
-    let contentContainerSubviewMaxCount = 2
-    let titleLabel = UILabel()
-    let detailTitleLabel = UILabel()
     let disclosureImageView = UIImageView(image: nil)
-    let contentContainer = UIStackView()
-    var infoButtonHandler: InfoButtonHandler?
+    let mainContentContainer = UIView()
+    let leftContentContainer = UIView()
+    let rightContentContainer = UIView()
+    var infoButtonHandler: InfoButtonHandler? { didSet {
+        infoButton.isHidden = infoButtonHandler == nil
+    }}
 
     var disclosureType: SettingsDisclosureType = .none {
         didSet {
@@ -57,12 +58,33 @@ class SettingsCell: UITableViewCell {
         }
     }
 
+    let titleLabel: UILabel = {
+        let label = UILabel()
+        label.font = UIFont.systemFont(ofSize: 17)
+        label.textColor = UIColor.Cell.titleTextColor
+        label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        return label
+    }()
+
+    let detailTitleLabel: UILabel = {
+        let label = UILabel()
+        label.font = UIFont.systemFont(ofSize: 13)
+        label.textColor = UIColor.Cell.detailTextColor
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }()
+
+    private var subCellLeadingIndentation: CGFloat = 0
     private let buttonWidth: CGFloat = 24
+
     private let infoButton: UIButton = {
         let button = UIButton(type: .custom)
-        button.accessibilityIdentifier = "InfoButton"
+        button.setAccessibilityIdentifier(.infoButton)
         button.tintColor = .white
         button.setImage(UIImage(named: "IconInfo"), for: .normal)
+        button.isHidden = true
         return button
     }()
 
@@ -70,49 +92,38 @@ class SettingsCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
 
         backgroundView = UIView()
-        backgroundView?.backgroundColor = UIColor.Cell.backgroundColor
+        backgroundView?.backgroundColor = UIColor.Cell.Background.normal
 
         selectedBackgroundView = UIView()
-        selectedBackgroundView?.backgroundColor = UIColor.Cell.selectedAltBackgroundColor
+        selectedBackgroundView?.backgroundColor = UIColor.Cell.Background.selectedAlt
 
         separatorInset = .zero
         backgroundColor = .clear
         contentView.backgroundColor = .clear
 
-        infoButton.isHidden = true
-        infoButton.addTarget(
-            self,
-            action: #selector(handleInfoButton(_:)),
-            for: .touchUpInside
-        )
+        infoButton.addTarget(self, action: #selector(handleInfoButton(_:)), for: .touchUpInside)
 
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = UIFont.systemFont(ofSize: 17)
-        titleLabel.textColor = UIColor.Cell.titleTextColor
+        subCellLeadingIndentation = contentView.layoutMargins.left + UIMetrics.TableView.cellIndentationWidth
 
-        detailTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        detailTitleLabel.font = UIFont.systemFont(ofSize: 13)
-        detailTitleLabel.textColor = UIColor.Cell.detailTextColor
-
-        titleLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        detailTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        detailTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        rightContentContainer.setContentHuggingPriority(.required, for: .horizontal)
 
         setLayoutMargins()
 
         let buttonAreaWidth = UIMetrics.contentLayoutMargins.leading + UIMetrics
             .contentLayoutMargins.trailing + buttonWidth
 
-        let content = UIView()
-        content.addConstrainedSubviews([titleLabel, infoButton, detailTitleLabel]) {
+        let infoButtonConstraint = infoButton.trailingAnchor.constraint(
+            greaterThanOrEqualTo: mainContentContainer.trailingAnchor
+        )
+        infoButtonConstraint.priority = .defaultLow
+
+        mainContentContainer.addConstrainedSubviews([titleLabel, infoButton, detailTitleLabel]) {
             switch style {
             case .subtitle:
                 titleLabel.pinEdgesToSuperview(.init([.top(0), .leading(0)]))
-                detailTitleLabel.pinEdgesToSuperview(.all().excluding(.top))
-                detailTitleLabel.topAnchor.constraint(equalToSystemSpacingBelow: titleLabel.bottomAnchor, multiplier: 1)
-                infoButton.trailingAnchor.constraint(greaterThanOrEqualTo: content.trailingAnchor)
+                detailTitleLabel.pinEdgesToSuperview(.all().excluding([.top, .trailing]))
+                detailTitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor)
+                infoButtonConstraint
 
             default:
                 titleLabel.pinEdgesToSuperview(.all().excluding(.trailing))
@@ -120,8 +131,6 @@ class SettingsCell: UITableViewCell {
                 detailTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: infoButton.trailingAnchor)
             }
 
-            infoButton.pinEdgesToSuperview(.init([.top(0)]))
-            infoButton.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor)
             infoButton.leadingAnchor.constraint(
                 equalTo: titleLabel.trailingAnchor,
                 constant: -UIMetrics.interButtonSpacing
@@ -130,11 +139,17 @@ class SettingsCell: UITableViewCell {
             infoButton.widthAnchor.constraint(equalToConstant: buttonAreaWidth)
         }
 
-        contentContainer.addArrangedSubview(content)
-        contentContainer.spacing = 12
+        contentView.addConstrainedSubviews([leftContentContainer, mainContentContainer, rightContentContainer]) {
+            mainContentContainer.pinEdgesToSuperviewMargins(.all().excluding([.leading, .trailing]))
 
-        contentView.addConstrainedSubviews([contentContainer]) {
-            contentContainer.pinEdgesToSuperviewMargins()
+            leftContentContainer.pinEdgesToSuperviewMargins(.all().excluding(.trailing))
+            leftContentContainer.trailingAnchor.constraint(equalTo: mainContentContainer.leadingAnchor)
+
+            rightContentContainer.pinEdgesToSuperview(.all().excluding(.leading))
+            rightContentContainer.leadingAnchor.constraint(equalTo: mainContentContainer.trailingAnchor)
+            rightContentContainer.widthAnchor.constraint(
+                greaterThanOrEqualToConstant: UIMetrics.TableView.cellIndentationWidth
+            )
         }
     }
 
@@ -145,32 +160,33 @@ class SettingsCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
 
-        removeLeftView()
-        setInfoButtonIsVisible(false)
+        infoButton.isHidden = true
+        removeLeadingView()
+        removeTrailingView()
         setLayoutMargins()
     }
 
     func applySubCellStyling() {
-        contentView.layoutMargins.left += UIMetrics.cellIndentationWidth
-        backgroundView?.backgroundColor = UIColor.SubCell.backgroundColor
+        contentView.layoutMargins.left = subCellLeadingIndentation
+        backgroundView?.backgroundColor = UIColor.Cell.Background.indentationLevelOne
     }
 
-    func setInfoButtonIsVisible(_ visible: Bool) {
-        infoButton.isHidden = !visible
+    func setLeadingView(superviewProvider: (UIView) -> Void) {
+        removeLeadingView()
+        superviewProvider(leftContentContainer)
     }
 
-    func setLeftView(_ view: UIView) {
-        removeLeftView()
-
-        if contentContainer.arrangedSubviews.count <= 1 {
-            contentContainer.insertArrangedSubview(view, at: 0)
-        }
+    func removeLeadingView() {
+        leftContentContainer.subviews.forEach { $0.removeFromSuperview() }
     }
 
-    func removeLeftView() {
-        if contentContainer.arrangedSubviews.count >= contentContainerSubviewMaxCount {
-            contentContainer.arrangedSubviews.first?.removeFromSuperview()
-        }
+    func setTrailingView(superviewProvider: (UIView) -> Void) {
+        removeTrailingView()
+        superviewProvider(rightContentContainer)
+    }
+
+    func removeTrailingView() {
+        rightContentContainer.subviews.forEach { $0.removeFromSuperview() }
     }
 
     @objc private func handleInfoButton(_ sender: UIControl) {
@@ -179,9 +195,9 @@ class SettingsCell: UITableViewCell {
 
     private func setLayoutMargins() {
         // Set layout margins for standard acceessories added into the cell (reorder control, etc..)
-        directionalLayoutMargins = UIMetrics.settingsCellLayoutMargins
+        directionalLayoutMargins = UIMetrics.SettingsCell.layoutMargins
 
         // Set layout margins for cell content
-        contentView.directionalLayoutMargins = UIMetrics.settingsCellLayoutMargins
+        contentView.directionalLayoutMargins = UIMetrics.SettingsCell.layoutMargins
     }
 }

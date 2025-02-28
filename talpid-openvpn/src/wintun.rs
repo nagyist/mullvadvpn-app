@@ -1,24 +1,17 @@
-use lazy_static::lazy_static;
-use std::{
-    ffi::CStr,
-    fmt, io, mem,
-    os::windows::io::RawHandle,
-    path::Path,
-    ptr,
-    sync::{Arc, Mutex},
-};
-use talpid_types::ErrorExt;
+#![allow(clippy::undocumented_unsafe_blocks)] // Remove me if you dare.
+
+use once_cell::sync::OnceCell;
+use std::{ffi::CStr, fmt, io, mem, os::windows::io::RawHandle, path::Path, ptr};
+use talpid_types::{win32_err, ErrorExt};
 use widestring::{U16CStr, U16CString};
 use windows_sys::{
     core::GUID,
     Win32::{
-        Foundation::{HINSTANCE, NO_ERROR},
+        Foundation::{FreeLibrary, HMODULE},
         NetworkManagement::{IpHelper::ConvertInterfaceLuidToGuid, Ndis::NET_LUID_LH},
         System::{
             Com::StringFromGUID2,
-            LibraryLoader::{
-                FreeLibrary, GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH,
-            },
+            LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
             Registry::REG_SAM_FLAGS,
         },
     },
@@ -28,16 +21,16 @@ use winreg::{
     RegKey,
 };
 
-lazy_static! {
-    /// Shared `WintunDll` instance
-    static ref WINTUN_DLL: Mutex<Option<Arc<WintunDll>>> = Mutex::new(None);
-}
+/// Shared `WintunDll` instance
+static WINTUN_DLL: OnceCell<WintunDll> = OnceCell::new();
 
 type WintunCreateAdapterFn = unsafe extern "stdcall" fn(
     name: *const u16,
     tunnel_type: *const u16,
     requested_guid: *const GUID,
 ) -> RawHandle;
+
+type WintunOpenAdapterFn = unsafe extern "stdcall" fn(name: *const u16) -> RawHandle;
 
 type WintunCloseAdapterFn = unsafe extern "stdcall" fn(adapter: RawHandle);
 
@@ -57,8 +50,9 @@ enum WintunLoggerLevel {
 }
 
 pub struct WintunDll {
-    handle: HINSTANCE,
+    handle: HMODULE,
     func_create: WintunCreateAdapterFn,
+    func_open: WintunOpenAdapterFn,
     func_close: WintunCloseAdapterFn,
     func_get_adapter_luid: WintunGetAdapterLuidFn,
     func_set_logger: WintunSetLoggerFn,
@@ -69,7 +63,7 @@ unsafe impl Sync for WintunDll {}
 
 /// Represents a Wintun adapter.
 pub struct WintunAdapter {
-    dll_handle: Arc<WintunDll>,
+    dll_handle: &'static WintunDll,
     handle: RawHandle,
     name: U16CString,
 }
@@ -87,7 +81,7 @@ unsafe impl Sync for WintunAdapter {}
 
 impl WintunAdapter {
     pub fn create(
-        dll_handle: Arc<WintunDll>,
+        dll_handle: &'static WintunDll,
         name: &U16CStr,
         tunnel_type: &U16CStr,
         requested_guid: Option<GUID>,
@@ -123,10 +117,7 @@ impl WintunAdapter {
 
     pub fn guid(&self) -> io::Result<GUID> {
         let mut guid = mem::MaybeUninit::zeroed();
-        let result = unsafe { ConvertInterfaceLuidToGuid(&self.luid(), guid.as_mut_ptr()) };
-        if result != NO_ERROR as i32 {
-            return Err(io::Error::from_raw_os_error(result));
-        }
+        win32_err!(unsafe { ConvertInterfaceLuidToGuid(&self.luid(), guid.as_mut_ptr()) })?;
         Ok(unsafe { guid.assume_init() })
     }
 
@@ -182,16 +173,8 @@ impl Drop for WintunAdapter {
 }
 
 impl WintunDll {
-    pub fn instance(resource_dir: &Path) -> io::Result<Arc<Self>> {
-        let mut dll = (*WINTUN_DLL).lock().expect("Wintun mutex poisoned");
-        match &*dll {
-            Some(dll) => Ok(dll.clone()),
-            None => {
-                let new_dll = Arc::new(Self::new(resource_dir)?);
-                *dll = Some(new_dll.clone());
-                Ok(new_dll)
-            }
-        }
+    pub fn instance(resource_dir: &Path) -> io::Result<&'static Self> {
+        WINTUN_DLL.get_or_try_init(|| Self::new(resource_dir))
     }
 
     fn new(resource_dir: &Path) -> io::Result<Self> {
@@ -206,46 +189,34 @@ impl WintunDll {
     }
 
     fn new_inner(
-        handle: HINSTANCE,
-        get_proc_fn: unsafe fn(
-            HINSTANCE,
-            &CStr,
-        ) -> io::Result<unsafe extern "system" fn() -> isize>,
+        handle: HMODULE,
+        get_proc_fn: unsafe fn(HMODULE, &CStr) -> io::Result<unsafe extern "system" fn() -> isize>,
     ) -> io::Result<Self> {
         Ok(WintunDll {
             handle,
             func_create: unsafe {
-                *((&get_proc_fn(
-                    handle,
-                    CStr::from_bytes_with_nul(b"WintunCreateAdapter\0").unwrap(),
-                )?) as *const _ as *const _)
+                *((&get_proc_fn(handle, c"WintunCreateAdapter")?) as *const _ as *const _)
+            },
+            func_open: unsafe {
+                *((&get_proc_fn(handle, c"WintunOpenAdapter")?) as *const _ as *const _)
             },
             func_close: unsafe {
-                *((&get_proc_fn(
-                    handle,
-                    CStr::from_bytes_with_nul(b"WintunCloseAdapter\0").unwrap(),
-                )?) as *const _ as *const _)
+                *((&get_proc_fn(handle, c"WintunCloseAdapter")?) as *const _ as *const _)
             },
             func_get_adapter_luid: unsafe {
-                *((&get_proc_fn(
-                    handle,
-                    CStr::from_bytes_with_nul(b"WintunGetAdapterLUID\0").unwrap(),
-                )?) as *const _ as *const _)
+                *((&get_proc_fn(handle, c"WintunGetAdapterLUID")?) as *const _ as *const _)
             },
             func_set_logger: unsafe {
-                *((&get_proc_fn(
-                    handle,
-                    CStr::from_bytes_with_nul(b"WintunSetLogger\0").unwrap(),
-                )?) as *const _ as *const _)
+                *((&get_proc_fn(handle, c"WintunSetLogger")?) as *const _ as *const _)
             },
         })
     }
 
     unsafe fn get_proc_address(
-        handle: HINSTANCE,
+        handle: HMODULE,
         name: &CStr,
     ) -> io::Result<unsafe extern "system" fn() -> isize> {
-        let handle = GetProcAddress(handle, name.as_ptr() as *const u8);
+        let handle = unsafe { GetProcAddress(handle, name.as_ptr() as *const u8) };
         handle.ok_or(io::Error::last_os_error())
     }
 
@@ -261,23 +232,41 @@ impl WintunDll {
         };
         let handle = unsafe { (self.func_create)(name.as_ptr(), tunnel_type.as_ptr(), guid_ptr) };
         if handle.is_null() {
-            return Err(io::Error::last_os_error());
+            log::error!(
+                "Failed to create Wintun adapter: {}",
+                io::Error::last_os_error()
+            );
+            // This is an attempt to fix the elusive "Failed to create Wintun adapter" error.
+            // we cannot reproduce the issue on our end, but if it is caused by an existing adapter
+            // that hasn't been cleaned up properly, it may help to open the adapter and return it.
+            log::info!(
+                "Attempting to open existing adapter with name: '{}'",
+                name.to_string_lossy()
+            );
+            let handle = unsafe { (self.func_open)(name.as_ptr()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            } else {
+                return Ok(handle);
+            }
         }
         Ok(handle)
     }
 
     pub unsafe fn close_adapter(&self, adapter: RawHandle) {
-        (self.func_close)(adapter);
+        unsafe { (self.func_close)(adapter) };
     }
 
     pub unsafe fn get_adapter_luid(&self, adapter: RawHandle) -> NET_LUID_LH {
         let mut luid = mem::MaybeUninit::<NET_LUID_LH>::zeroed();
-        (self.func_get_adapter_luid)(adapter, luid.as_mut_ptr());
-        luid.assume_init()
+        unsafe {
+            (self.func_get_adapter_luid)(adapter, luid.as_mut_ptr());
+            luid.assume_init()
+        }
     }
 
-    pub fn activate_logging(self: &Arc<Self>) -> WintunLoggerHandle {
-        WintunLoggerHandle::from_handle(self.clone())
+    pub fn activate_logging(&'static self) -> WintunLoggerHandle {
+        WintunLoggerHandle::from_handle(self)
     }
 
     fn set_logger(&self, logger: Option<WintunLoggerCbFn>) {
@@ -292,11 +281,11 @@ impl Drop for WintunDll {
 }
 
 pub struct WintunLoggerHandle {
-    dll_handle: Arc<WintunDll>,
+    dll_handle: &'static WintunDll,
 }
 
 impl WintunLoggerHandle {
-    fn from_handle(dll_handle: Arc<WintunDll>) -> Self {
+    fn from_handle(dll_handle: &'static WintunDll) -> Self {
         dll_handle.set_logger(Some(Self::callback));
         Self { dll_handle }
     }
@@ -360,8 +349,11 @@ fn find_adapter_registry_key(find_guid: &str, permissions: REG_SAM_FLAGS) -> io:
 /// Obtain a string representation for a GUID object.
 fn string_from_guid(guid: &GUID) -> String {
     let mut buffer = [0u16; 40];
-    let length = unsafe { StringFromGUID2(guid, &mut buffer[0] as *mut _, buffer.len() as i32 - 1) }
-        as usize;
+
+    // SAFETY: `guid` and `buffer` are valid references.
+    let length =
+        unsafe { StringFromGUID2(guid, buffer.as_mut_ptr(), buffer.len() as i32 - 1) } as usize;
+
     // cannot fail because `buffer` is large enough
     assert!(length > 0);
     let length = length - 1;
@@ -373,7 +365,7 @@ mod tests {
     use super::*;
 
     fn get_proc_fn(
-        _handle: HINSTANCE,
+        _handle: HMODULE,
         _symbol: &CStr,
     ) -> io::Result<unsafe extern "system" fn() -> isize> {
         Ok(null_fn)

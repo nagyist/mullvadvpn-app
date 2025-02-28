@@ -3,55 +3,74 @@
 //  MullvadVPN
 //
 //  Created by Jon Petersson on 2023-03-09.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+import MullvadSettings
 import UIKit
 
-struct SettingsCellFactory: CellFactoryProtocol {
+protocol SettingsCellEventHandler {
+    func showInfo(for button: SettingsInfoButtonItem)
+}
+
+@MainActor
+final class SettingsCellFactory: @preconcurrency CellFactoryProtocol, Sendable {
     let tableView: UITableView
+    var delegate: SettingsCellEventHandler?
+    var viewModel: SettingsViewModel
     private let interactor: SettingsInteractor
 
     init(tableView: UITableView, interactor: SettingsInteractor) {
         self.tableView = tableView
         self.interactor = interactor
+
+        viewModel = SettingsViewModel(from: interactor.tunnelSettings)
     }
 
     func makeCell(for item: SettingsDataSource.Item, indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: item.reuseIdentifier.rawValue, for: indexPath)
+        let cell: UITableViewCell
 
+        cell = tableView
+            .dequeueReusableCell(
+                withIdentifier: item.reuseIdentifier.rawValue
+            ) ?? SettingsCell(
+                style: item.reuseIdentifier.cellStyle,
+                reuseIdentifier: item.reuseIdentifier.rawValue
+            )
+
+        // Configure the cell with the common logic
         configureCell(cell, item: item, indexPath: indexPath)
 
         return cell
     }
 
+    // swiftlint:disable:next function_body_length
     func configureCell(_ cell: UITableViewCell, item: SettingsDataSource.Item, indexPath: IndexPath) {
         switch item {
-        case .preferences:
+        case .vpnSettings:
             guard let cell = cell as? SettingsCell else { return }
 
             cell.titleLabel.text = NSLocalizedString(
-                "PREFERENCES_CELL_LABEL",
+                "VPN_SETTINGS_CELL_LABEL",
                 tableName: "Settings",
                 value: "VPN settings",
                 comment: ""
             )
             cell.detailTitleLabel.text = nil
-            cell.accessibilityIdentifier = "PreferencesCell"
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
             cell.disclosureType = .chevron
 
-        case .version:
+        case .changelog:
             guard let cell = cell as? SettingsCell else { return }
-
             cell.titleLabel.text = NSLocalizedString(
                 "APP_VERSION_CELL_LABEL",
                 tableName: "Settings",
-                value: "App version",
+                value: "What's new",
                 comment: ""
             )
             cell.detailTitleLabel.text = Bundle.main.productVersion
-            cell.accessibilityIdentifier = nil
-            cell.disclosureType = .none
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
+            cell.disclosureType = .chevron
 
         case .problemReport:
             guard let cell = cell as? SettingsCell else { return }
@@ -63,7 +82,7 @@ struct SettingsCellFactory: CellFactoryProtocol {
                 comment: ""
             )
             cell.detailTitleLabel.text = nil
-            cell.accessibilityIdentifier = nil
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
             cell.disclosureType = .chevron
 
         case .faq:
@@ -76,8 +95,60 @@ struct SettingsCellFactory: CellFactoryProtocol {
                 comment: ""
             )
             cell.detailTitleLabel.text = nil
-            cell.accessibilityIdentifier = nil
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
             cell.disclosureType = .externalLink
+
+        case .apiAccess:
+            guard let cell = cell as? SettingsCell else { return }
+            cell.titleLabel.text = NSLocalizedString(
+                "API_ACCESS_CELL_LABEL",
+                tableName: "Settings",
+                value: "API access",
+                comment: ""
+            )
+            cell.detailTitleLabel.text = nil
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
+            cell.disclosureType = .chevron
+
+        case .daita:
+            guard let cell = cell as? SettingsCell else { return }
+
+            cell.titleLabel.text = NSLocalizedString(
+                "DAITA_CELL_LABEL",
+                tableName: "Settings",
+                value: "DAITA",
+                comment: ""
+            )
+
+            cell.detailTitleLabel.text = NSLocalizedString(
+                "DAITA_CELL_DETAIL_LABEL",
+                tableName: "Settings",
+                value: viewModel.daitaSettings.daitaState.isEnabled ? "On" : "Off",
+                comment: ""
+            )
+
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
+            cell.disclosureType = .chevron
+
+        case .multihop:
+            guard let cell = cell as? SettingsCell else { return }
+
+            cell.titleLabel.text = NSLocalizedString(
+                "MULTIHOP_CELL_LABEL",
+                tableName: "Settings",
+                value: "Multihop",
+                comment: ""
+            )
+
+            cell.detailTitleLabel.text = NSLocalizedString(
+                "MULTIHOP_CELL_DETAIL_LABEL",
+                tableName: "Settings",
+                value: viewModel.multihopState.isEnabled ? "On" : "Off",
+                comment: ""
+            )
+
+            cell.setAccessibilityIdentifier(item.accessibilityIdentifier)
+            cell.disclosureType = .chevron
         }
     }
 }

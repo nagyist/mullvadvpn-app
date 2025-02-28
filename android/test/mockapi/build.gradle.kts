@@ -1,37 +1,46 @@
 plugins {
-    id(Dependencies.Plugin.androidTestId)
-    id(Dependencies.Plugin.kotlinAndroidId)
+    alias(libs.plugins.android.test)
+    alias(libs.plugins.kotlin.android)
+
+    id(Dependencies.junit5AndroidPluginId) version Versions.junit5Plugin
 }
 
 android {
     namespace = "net.mullvad.mullvadvpn.test.mockapi"
-    compileSdk = Versions.Android.compileSdkVersion
+    compileSdk = Versions.compileSdkVersion
+    buildToolsVersion = Versions.buildToolsVersion
 
     defaultConfig {
-        minSdk = Versions.Android.minSdkVersion
-        targetSdk = Versions.Android.targetSdkVersion
+        minSdk = Versions.minSdkVersion
         testApplicationId = "net.mullvad.mullvadvpn.test.mockapi"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["runnerBuilder"] =
+            "de.mannodermaus.junit5.AndroidJUnit5Builder"
         targetProjectPath = ":app"
 
-        testInstrumentationRunnerArguments.putAll(
-            mapOf(
-                "clearPackageData" to "true",
-            )
-        )
+        missingDimensionStrategy(FlavorDimensions.BILLING, Flavors.OSS)
+        missingDimensionStrategy(FlavorDimensions.INFRASTRUCTURE, Flavors.PROD)
+
+        testInstrumentationRunnerArguments.putAll(mapOf("clearPackageData" to "true"))
     }
 
-    testOptions {
-        execution = "ANDROIDX_TEST_ORCHESTRATOR"
+    flavorDimensions += FlavorDimensions.BILLING
+
+    productFlavors {
+        create(Flavors.OSS) { dimension = FlavorDimensions.BILLING }
+        create(Flavors.PLAY) { dimension = FlavorDimensions.BILLING }
     }
+
+    testOptions { execution = "ANDROIDX_TEST_ORCHESTRATOR" }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
         jvmTarget = Versions.jvmTarget
+        allWarningsAsErrors = true
     }
 
     lint {
@@ -39,30 +48,43 @@ android {
         abortOnError = true
         warningsAsErrors = true
     }
-}
 
-configure<org.owasp.dependencycheck.gradle.extension.DependencyCheckExtension> {
-    // Skip the lintClassPath configuration, which relies on many dependencies that has been flagged
-    // to have CVEs, as it's related to the lint tooling rather than the project's compilation class
-    // path. The alternative would be to suppress specific CVEs, however that could potentially
-    // result in suppressed CVEs in project compilation class path.
-    skipConfigurations = listOf("lintClassPath")
-    suppressionFile = "$projectDir/../test-suppression.xml"
+    packaging {
+        resources {
+            pickFirsts +=
+                setOf(
+                    // Fixes packaging error caused by: jetified-junit-*
+                    "META-INF/LICENSE.md",
+                    "META-INF/LICENSE-notice.md",
+                )
+        }
+    }
 }
 
 dependencies {
-    implementation(project(Projects.testCommon))
-    implementation(project(Dependencies.Mullvad.endpointLib))
+    implementation(projects.lib.endpoint)
+    implementation(projects.test.common)
 
-    implementation(Dependencies.AndroidX.testCore)
+    implementation(libs.androidx.test.core)
     // Fixes: https://github.com/android/android-test/issues/1589
-    implementation(Dependencies.AndroidX.testMonitor)
-    implementation(Dependencies.AndroidX.testRunner)
-    implementation(Dependencies.AndroidX.testRules)
-    implementation(Dependencies.AndroidX.testUiAutomator)
-    implementation(Dependencies.jodaTime)
-    implementation(Dependencies.Kotlin.stdlib)
-    implementation(Dependencies.mockkWebserver)
+    implementation(libs.androidx.test.monitor)
+    implementation(libs.androidx.test.runner)
+    implementation(libs.androidx.test.rules)
+    implementation(libs.androidx.test.uiautomator)
+    implementation(libs.kermit)
+    implementation(Dependencies.junitJupiterApi)
+    implementation(Dependencies.junit5AndroidTestExtensions)
+    implementation(Dependencies.junit5AndroidTestRunner)
+    implementation(libs.kotlin.stdlib)
+    implementation(libs.mockkWebserver)
 
-    androidTestUtil(Dependencies.AndroidX.testOrchestrator)
+    androidTestUtil(libs.androidx.test.orchestrator)
+
+    // Needed or else the app crashes when launched
+    implementation(Dependencies.junit5AndroidTestCompose)
+    implementation(libs.compose.material3)
+
+    // Need these for forcing later versions of dependencies
+    implementation(libs.compose.ui)
+    implementation(libs.androidx.activity.compose)
 }

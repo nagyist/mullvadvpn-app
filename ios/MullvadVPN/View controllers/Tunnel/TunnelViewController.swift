@@ -2,24 +2,38 @@
 //  TunnelViewController.swift
 //  MullvadVPN
 //
-//  Created by pronebird on 20/03/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Created by Jon Petersson on 2024-12-10.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+import Combine
 import MapKit
 import MullvadLogging
+import MullvadREST
+import MullvadSettings
 import MullvadTypes
-import TunnelProviderMessaging
-import UIKit
+import SwiftUI
 
 class TunnelViewController: UIViewController, RootContainment {
     private let logger = Logger(label: "TunnelViewController")
     private let interactor: TunnelViewControllerInteractor
-    private let contentView = TunnelControlView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
     private var tunnelState: TunnelState = .disconnected
+    private var connectionViewViewModel: ConnectionViewViewModel
+    private var indicatorsViewViewModel: FeatureIndicatorsViewModel
+    private var connectionView: ConnectionView
+    private var connectionController: UIHostingController<ConnectionView>?
 
     var shouldShowSelectLocationPicker: (() -> Void)?
     var shouldShowCancelTunnelAlert: (() -> Void)?
+
+    let activityIndicator: SpinnerActivityIndicatorView = {
+        let activityIndicator = SpinnerActivityIndicatorView(style: .large)
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+        activityIndicator.tintColor = .white
+        activityIndicator.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        activityIndicator.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        return activityIndicator
+    }()
 
     private let mapViewController = MapViewController()
 
@@ -43,8 +57,30 @@ class TunnelViewController: UIViewController, RootContainment {
         false
     }
 
+    var prefersNotificationBarHidden: Bool {
+        false
+    }
+
     init(interactor: TunnelViewControllerInteractor) {
         self.interactor = interactor
+
+        tunnelState = interactor.tunnelStatus.state
+        connectionViewViewModel = ConnectionViewViewModel(
+            tunnelStatus: interactor.tunnelStatus,
+            relayConstraints: interactor.tunnelSettings.relayConstraints,
+            relayCache: RelayCache(cacheDirectory: ApplicationConfiguration.containerURL),
+            customListRepository: CustomListRepository()
+        )
+        indicatorsViewViewModel = FeatureIndicatorsViewModel(
+            tunnelSettings: interactor.tunnelSettings,
+            ipOverrides: interactor.ipOverrides,
+            tunnelState: tunnelState
+        )
+
+        connectionView = ConnectionView(
+            connectionViewModel: connectionViewViewModel,
+            indicatorsViewModel: indicatorsViewViewModel
+        )
 
         super.init(nibName: nil, bundle: nil)
     }
@@ -56,15 +92,31 @@ class TunnelViewController: UIViewController, RootContainment {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        interactor.didUpdateDeviceState = { [weak self] deviceState, previousDeviceState in
+        interactor.didUpdateDeviceState = { [weak self] _, _ in
             self?.setNeedsHeaderBarStyleAppearanceUpdate()
         }
 
         interactor.didUpdateTunnelStatus = { [weak self] tunnelStatus in
+            self?.connectionViewViewModel.update(tunnelStatus: tunnelStatus)
             self?.setTunnelState(tunnelStatus.state, animated: true)
+            self?.indicatorsViewViewModel.tunnelState = tunnelStatus.state
+            self?.view.setNeedsLayout()
         }
 
-        contentView.actionHandler = { [weak self] action in
+        interactor.didGetOutgoingAddress = { [weak self] outgoingConnectionInfo in
+            self?.connectionViewViewModel.outgoingConnectionInfo = outgoingConnectionInfo
+        }
+
+        interactor.didUpdateTunnelSettings = { [weak self] tunnelSettings in
+            self?.indicatorsViewViewModel.tunnelSettings = tunnelSettings
+            self?.connectionViewViewModel.relayConstraints = tunnelSettings.relayConstraints
+        }
+
+        interactor.didUpdateIpOverrides = { [weak self] overrides in
+            self?.indicatorsViewViewModel.ipOverrides = overrides
+        }
+
+        connectionView.action = { [weak self] action in
             switch action {
             case .connect:
                 self?.interactor.startTunnel()
@@ -88,27 +140,14 @@ class TunnelViewController: UIViewController, RootContainment {
         }
 
         addMapController()
-        addContentView()
-
-        tunnelState = interactor.tunnelStatus.state
-        updateContentView(animated: false)
+        addActivityIndicator()
+        addConnectionView()
         updateMap(animated: false)
-    }
-
-    override func viewWillTransition(
-        to size: CGSize,
-        with coordinator: UIViewControllerTransitionCoordinator
-    ) {
-        super.viewWillTransition(to: size, with: coordinator)
-
-        coordinator.animate(alongsideTransition: nil, completion: { context in
-            self.updateContentView(animated: context.isAnimated)
-        })
     }
 
     func setMainContentHidden(_ isHidden: Bool, animated: Bool) {
         let actions = {
-            self.contentView.alpha = isHidden ? 0 : 1
+            _ = self.connectionView.opacity(isHidden ? 0 : 1)
         }
 
         if animated {
@@ -122,79 +161,91 @@ class TunnelViewController: UIViewController, RootContainment {
 
     private func setTunnelState(_ tunnelState: TunnelState, animated: Bool) {
         self.tunnelState = tunnelState
+
         setNeedsHeaderBarStyleAppearanceUpdate()
 
         guard isViewLoaded else { return }
 
-        updateContentView(animated: animated)
         updateMap(animated: animated)
     }
 
     private func updateMap(animated: Bool) {
         switch tunnelState {
-        case let .connecting(tunnelRelay):
+        case let .connecting(tunnelRelays, _, _):
             mapViewController.removeLocationMarker()
-            contentView.setAnimatingActivity(true)
-            mapViewController.setCenter(tunnelRelay?.location.geoCoordinate, animated: animated)
+            mapViewController.setCenter(tunnelRelays?.exit.location.geoCoordinate, animated: animated)
+            activityIndicator.startAnimating()
 
-        case let .reconnecting(tunnelRelay):
+        case let .reconnecting(tunnelRelays, _, _), let .negotiatingEphemeralPeer(tunnelRelays, _, _, _):
+            activityIndicator.startAnimating()
             mapViewController.removeLocationMarker()
-            contentView.setAnimatingActivity(true)
-            mapViewController.setCenter(tunnelRelay.location.geoCoordinate, animated: animated)
+            mapViewController.setCenter(tunnelRelays.exit.location.geoCoordinate, animated: animated)
 
-        case let .connected(tunnelRelay):
-            let center = tunnelRelay.location.geoCoordinate
-
-            mapViewController.setCenter(center, animated: animated) {
-                self.contentView.setAnimatingActivity(false)
-                self.mapViewController.addLocationMarker(coordinate: center)
-            }
+        case let .connected(tunnelRelays, _, _):
+            let center = tunnelRelays.exit.location.geoCoordinate
+            mapViewController.setCenter(center, animated: animated)
+            activityIndicator.stopAnimating()
+            mapViewController.addLocationMarker(coordinate: center)
 
         case .pendingReconnect:
+            activityIndicator.startAnimating()
             mapViewController.removeLocationMarker()
-            contentView.setAnimatingActivity(true)
 
-        case .waitingForConnectivity:
+        case .waitingForConnectivity, .error:
+            activityIndicator.stopAnimating()
             mapViewController.removeLocationMarker()
-            contentView.setAnimatingActivity(false)
 
         case .disconnected, .disconnecting:
+            activityIndicator.stopAnimating()
             mapViewController.removeLocationMarker()
-            contentView.setAnimatingActivity(false)
             mapViewController.setCenter(nil, animated: animated)
         }
     }
 
-    private func updateContentView(animated: Bool) {
-        contentView.update(from: tunnelState, animated: animated)
-    }
-
     private func addMapController() {
         let mapView = mapViewController.view!
-        mapView.translatesAutoresizingMaskIntoConstraints = false
-        mapViewController.alignmentView = contentView.mapCenterAlignmentView
 
         addChild(mapViewController)
-        view.addSubview(mapView)
+        mapViewController.alignmentView = activityIndicator
         mapViewController.didMove(toParent: self)
 
-        NSLayoutConstraint.activate([
-            mapView.topAnchor.constraint(equalTo: view.topAnchor),
-            mapView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            mapView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            mapView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
+        view.addConstrainedSubviews([mapView]) {
+            mapView.pinEdgesToSuperview()
+        }
     }
 
-    private func addContentView() {
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(contentView)
+    /// Computes a constraint multiplier based on the screen size
+    private func computeHeightBreakpointMultiplier() -> CGFloat {
+        let screenBounds = UIWindow().screen.coordinateSpace.bounds
+        return screenBounds.height < 700 ? 2.0 : 1.5
+    }
 
-        NSLayoutConstraint.activate([
-            contentView.topAnchor.constraint(equalTo: view.topAnchor),
-            contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
+    private func addActivityIndicator() {
+        // If the device doesn't have a lot of vertical screen estate, center the progress view higher on the map
+        // so the connection view details do not shadow it unless fully expanded if possible
+        let heightConstraintMultiplier = computeHeightBreakpointMultiplier()
+
+        let verticalCenteredAnchor = activityIndicator.centerYAnchor.anchorWithOffset(to: view.centerYAnchor)
+        view.addConstrainedSubviews([activityIndicator]) {
+            activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor)
+            verticalCenteredAnchor.constraint(
+                equalTo: activityIndicator.heightAnchor,
+                multiplier: heightConstraintMultiplier
+            )
+        }
+    }
+
+    private func addConnectionView() {
+        let connectionController = UIHostingController(rootView: connectionView)
+        self.connectionController = connectionController
+
+        let connectionViewProxy = connectionController.view!
+        connectionViewProxy.backgroundColor = .clear
+
+        addChild(connectionController)
+        connectionController.didMove(toParent: self)
+        view.addConstrainedSubviews([activityIndicator, connectionViewProxy]) {
+            connectionViewProxy.pinEdgesToSuperview(.all())
+        }
     }
 }

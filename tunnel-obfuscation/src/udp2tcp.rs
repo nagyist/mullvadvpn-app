@@ -6,37 +6,37 @@ use udp_over_tcp::{
     TcpOptions,
 };
 
-pub struct Udp2TcpSettings {
+#[derive(Debug)]
+pub struct Settings {
     pub peer: SocketAddr,
     #[cfg(target_os = "linux")]
     pub fwmark: Option<u32>,
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to create obfuscator
-    #[error(display = "Failed to create obfuscator")]
-    CreateObfuscator(#[error(source)] udp2tcp::Error),
+    #[error("Failed to create obfuscator")]
+    CreateObfuscator(#[source] udp2tcp::Error),
 
     /// Failed to determine UDP socket details
-    #[error(display = "Failed to determine UDP socket details")]
-    GetUdpSocketDetails(#[error(source)] std::io::Error),
+    #[error("Failed to determine UDP socket details")]
+    GetUdpSocketDetails(#[source] std::io::Error),
 
     /// Failed to run obfuscator
-    #[error(display = "Failed to run obfuscator")]
-    RunObfuscator(#[error(source)] udp2tcp::Error),
+    #[error("Failed to run obfuscator")]
+    RunObfuscator(#[source] udp2tcp::Error),
 }
 
-struct Udp2Tcp {
+pub struct Udp2Tcp {
     local_addr: SocketAddr,
     instance: Udp2TcpImpl,
 }
 
 impl Udp2Tcp {
-    pub async fn new(settings: &Udp2TcpSettings) -> Result<Self> {
+    pub(crate) async fn new(settings: &Settings) -> Result<Self> {
         let listen_addr = if settings.peer.is_ipv4() {
             SocketAddr::new("127.0.0.1".parse().unwrap(), 0)
         } else {
@@ -85,8 +85,16 @@ impl Obfuscator for Udp2Tcp {
     fn remote_socket_fd(&self) -> std::os::unix::io::RawFd {
         self.instance.remote_tcp_fd()
     }
-}
 
-pub async fn create_obfuscator(settings: &Udp2TcpSettings) -> Result<Box<dyn Obfuscator>> {
-    Ok(Box::new(Udp2Tcp::new(settings).await?))
+    fn packet_overhead(&self) -> u16 {
+        let max_tcp_header_len = 60; // https://datatracker.ietf.org/doc/html/rfc9293#section-3.1-6.22.1
+        let udp_header_len = 8; // https://datatracker.ietf.org/doc/html/rfc768
+
+        // TODO: Make `HEADER_LEN` constant public in udp-over-tcp lib and use it instead
+        let udp_over_tcp_header_len = size_of::<u16>();
+
+        let overhead = max_tcp_header_len - udp_header_len + udp_over_tcp_header_len;
+
+        u16::try_from(overhead).expect("packet overhead is less than u16::MAX")
+    }
 }

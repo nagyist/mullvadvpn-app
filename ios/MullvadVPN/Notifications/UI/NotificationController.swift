@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 01/06/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -12,7 +12,6 @@ final class NotificationController: UIViewController {
     let bannerView: NotificationBannerView = {
         let bannerView = NotificationBannerView()
         bannerView.translatesAutoresizingMaskIntoConstraints = false
-        bannerView.isHidden = true
         bannerView.isAccessibilityElement = true
         return bannerView
     }()
@@ -63,19 +62,11 @@ final class NotificationController: UIViewController {
             // avoid undesired horizontal expansion animation.
             view.layoutIfNeeded()
 
-            bannerView.isHidden = false
             hideBannerConstraint?.isActive = false
             showBannerConstraint?.isActive = true
         } else {
             showBannerConstraint?.isActive = false
             hideBannerConstraint?.isActive = true
-        }
-
-        let finish = { [weak self] in
-            if self?.lastNotification == nil {
-                self?.bannerView.isHidden = true
-            }
-            completion?()
         }
 
         if animated {
@@ -89,12 +80,12 @@ final class NotificationController: UIViewController {
                 self.view.layoutIfNeeded()
             }
             animator.addCompletion { _ in
-                finish()
+                completion?()
             }
             animator.startAnimation()
         } else {
             view.layoutIfNeeded()
-            finish()
+            completion?()
         }
     }
 
@@ -106,7 +97,8 @@ final class NotificationController: UIViewController {
         bannerView.title = notification.title
         bannerView.body = notification.body
         bannerView.style = notification.style
-        bannerView.action = notification.action
+        bannerView.action = notification.button
+        bannerView.tapAction = notification.tapAction
         bannerView.accessibilityLabel = "\(notification.title)\n\(notification.body.string)"
 
         // Do not emit the .layoutChanged unless the banner is focused to avoid capturing

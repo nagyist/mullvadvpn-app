@@ -3,35 +3,35 @@
 //  PacketTunnel
 //
 //  Created by pronebird on 30/05/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadREST
 import MullvadTypes
-import class WireGuardKitTypes.PublicKey
+import WireGuardKitTypes
 
 /// An object that implements remote service used by `DeviceCheckOperation`.
 struct DeviceCheckRemoteService: DeviceCheckRemoteServiceProtocol {
-    private let accountsProxy: REST.AccountsProxy
-    private let devicesProxy: REST.DevicesProxy
+    private let accountsProxy: RESTAccountHandling
+    private let devicesProxy: DeviceHandling
 
-    init(accountsProxy: REST.AccountsProxy, devicesProxy: REST.DevicesProxy) {
+    init(accountsProxy: RESTAccountHandling, devicesProxy: DeviceHandling) {
         self.accountsProxy = accountsProxy
         self.devicesProxy = devicesProxy
     }
 
     func getAccountData(
         accountNumber: String,
-        completion: @escaping (Result<Account, Error>) -> Void
+        completion: @escaping @Sendable (Result<Account, Error>) -> Void
     ) -> Cancellable {
-        accountsProxy.getAccountData(accountNumber: accountNumber, retryStrategy: .noRetry, completion: completion)
+        accountsProxy.getAccountData(accountNumber: accountNumber).execute(completionHandler: completion)
     }
 
     func getDevice(
         accountNumber: String,
         identifier: String,
-        completion: @escaping (Result<Device, Error>) -> Void
+        completion: @escaping @Sendable (Result<Device, Error>) -> Void
     ) -> Cancellable {
         devicesProxy.getDevice(
             accountNumber: accountNumber,
@@ -45,7 +45,7 @@ struct DeviceCheckRemoteService: DeviceCheckRemoteServiceProtocol {
         accountNumber: String,
         identifier: String,
         publicKey: PublicKey,
-        completion: @escaping (Result<Device, Error>) -> Void
+        completion: @escaping @Sendable (Result<Device, Error>) -> Void
     ) -> Cancellable {
         devicesProxy.rotateDeviceKey(
             accountNumber: accountNumber,

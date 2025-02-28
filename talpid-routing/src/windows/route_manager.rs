@@ -10,14 +10,15 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
 };
-use talpid_windows_net::{
+use talpid_types::win32_err;
+use talpid_windows::net::{
     inet_sockaddr_from_socketaddr, try_socketaddr_from_inet_sockaddr, AddressFamily,
 };
 use widestring::{WideCStr, WideCString};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_BUFFER_OVERFLOW, ERROR_NOT_FOUND, ERROR_NO_DATA, ERROR_OBJECT_ALREADY_EXISTS,
-        ERROR_SUCCESS, NO_ERROR,
+        ERROR_SUCCESS,
     },
     NetworkManagement::{
         IpHelper::{
@@ -37,7 +38,6 @@ use windows_sys::Win32::{
 };
 
 type Network = IpNetwork;
-type NodeAddress = SOCKADDR_INET;
 
 /// Callback handle for the default route changed callback. Produced by the RouteManager.
 pub struct CallbackHandle {
@@ -51,7 +51,9 @@ impl Drop for CallbackHandle {
         match callbacks.remove(&self.nonce) {
             Some(_) => (),
             None => {
-                log::warn!("Could not un-register route manager callback due to it already being de-registered");
+                log::warn!(
+                    "Could not un-register route manager callback due to it already being de-registered"
+                );
             }
         }
     }
@@ -80,12 +82,6 @@ impl PartialEq for RegisteredRoute {
             && (self.next_hop == other.next_hop)
             && (self.network == other.network)
     }
-}
-
-#[derive(Clone)]
-pub struct Node {
-    pub device_name: Option<widestring::U16CString>,
-    pub gateway: Option<NodeAddress>,
 }
 
 #[derive(Clone)]
@@ -215,18 +211,17 @@ impl RouteManagerInternal {
         //
         // The simplest thing in this case is to just overwrite the route.
         //
-
-        if ERROR_OBJECT_ALREADY_EXISTS as i32 == status {
+        if ERROR_OBJECT_ALREADY_EXISTS == status {
             // SAFETY: DestinationPrefix must be initialized to a valid prefix. NextHop must have
             // a valid IP address and family. At least one of InterfaceLuid and InterfaceIndex must
             // be set to the interface.
             status = unsafe { SetIpForwardEntry2(&spec) };
         }
 
-        if NO_ERROR as i32 != status {
+        win32_err!(status).map_err(|e| {
             log::error!("Could not register route in routing table");
-            return Err(Error::AddToRouteTable(io::Error::from_raw_os_error(status)));
-        }
+            Error::AddToRouteTable(e)
+        })?;
 
         Ok(RegisteredRoute {
             network: route.network,
@@ -263,14 +258,11 @@ impl RouteManagerInternal {
                         None => {
                             let mut luid = NET_LUID_LH { Value: 0 };
                             // SAFETY: No specific safety requirement
-                            if NO_ERROR as i32
-                                != unsafe {
-                                    ConvertInterfaceAliasToLuid(device_name.as_ptr(), &mut luid)
-                                }
-                            {
+                            if let Err(e) = win32_err!(unsafe {
+                                ConvertInterfaceAliasToLuid(device_name.as_ptr(), &mut luid)
+                            }) {
                                 log::error!(
-                                    "Unable to derive interface LUID from interface alias: {:?}",
-                                    device_name
+                                    "Unable to get interface LUID for interface \"{device_name:?}\": {e}"
                                 );
                                 return Err(Error::DeviceNameNotFound);
                             } else {
@@ -355,26 +347,19 @@ impl RouteManagerInternal {
         // SAFETY: DestinationPrefix must be initialized to a valid prefix. NextHop must have
         // a valid IP address and family. At least one of InterfaceLuid and InterfaceIndex must be
         // set to the interface.
-        let status = unsafe { DeleteIpForwardEntry2(&r) };
-
-        match u32::try_from(status) {
-            Ok(ERROR_NOT_FOUND) => {
-                log::warn!("Attempting to delete route which was not present in routing table, ignoring and proceeding. Route: {}", route);
-            }
-            Ok(NO_ERROR) => (),
-            _ => {
-                log::error!(
-                    "Failed to delete route in routing table. Route: {}, Status: {}",
-                    route,
-                    status
+        match win32_err!(unsafe { DeleteIpForwardEntry2(&r) }) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(ERROR_NOT_FOUND as i32) => {
+                log::warn!(
+                    "Attempting to delete route which was not present in routing table, ignoring and proceeding. Route: {route}"
                 );
-                return Err(Error::DeleteFromRouteTable(io::Error::from_raw_os_error(
-                    status,
-                )));
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to delete route in routing table. Route: {route}, Error: {e}");
+                Err(Error::DeleteFromRouteTable(e))
             }
         }
-
-        Ok(())
     }
 
     fn restore_into_routing_table(route: &RegisteredRoute) -> Result<()> {
@@ -396,16 +381,10 @@ impl RouteManagerInternal {
         // SAFETY: DestinationPrefix must be initialized to a valid prefix. NextHop must have a
         // valid IP address and family. At least one of InterfaceLuid and InterfaceIndex must be set
         // to the interface.
-        let status = unsafe { CreateIpForwardEntry2(&spec) };
-
-        if NO_ERROR as i32 != status {
-            log::error!(
-                "Could not register route in routing table. Route: {}, Status: {}",
-                route,
-                status
-            );
-            return Err(Error::AddToRouteTable(io::Error::from_raw_os_error(status)));
-        }
+        win32_err!(unsafe { CreateIpForwardEntry2(&spec) }).map_err(|e| {
+            log::error!("Could not register route in routing table. Route: {route}");
+            Error::AddToRouteTable(e)
+        })?;
         Ok(())
     }
 
@@ -609,7 +588,7 @@ fn interface_luid_from_gateway(gateway: &SOCKADDR_INET) -> Result<NET_LUID_LH> {
     // Select the interface with the best (lowest) metric.
     //
     matches
-        .get(0)
+        .first()
         .map(|interface| interface.Luid)
         .ok_or_else(|| {
             log::error!("Unable to find network adapter with specified gateway");
@@ -621,7 +600,8 @@ fn interface_luid_from_gateway(gateway: &SOCKADDR_INET) -> Result<NET_LUID_LH> {
 unsafe fn get_first_gateway_address_reference(
     adapter: &IP_ADAPTER_ADDRESSES_LH,
 ) -> &IP_ADAPTER_GATEWAY_ADDRESS_LH {
-    &*adapter.FirstGatewayAddress
+    // SAFETY: See function docs
+    unsafe { &*adapter.FirstGatewayAddress }
 }
 
 fn adapter_interface_enabled(
@@ -632,6 +612,7 @@ fn adapter_interface_enabled(
         // SAFETY: All fields in the Anonymous2 union are at represented by a u32 so dereferencing
         // them is safe
         AF_INET => Ok(0 != unsafe { adapter.Anonymous2.Flags } & IP_ADAPTER_IPV4_ENABLED),
+        // SAFETY: Same as above.
         AF_INET6 => Ok(0 != unsafe { adapter.Anonymous2.Flags } & IP_ADAPTER_IPV6_ENABLED),
         _ => Err(Error::InvalidSiFamily),
     }
@@ -649,7 +630,7 @@ unsafe fn isolate_gateway_address(
     loop {
         // SAFETY: The contract states that Address.lpSockaddr is dereferenceable if the element is
         // non-null
-        if family == (*gateway.Address.lpSockaddr).sa_family {
+        if family == (unsafe { *gateway.Address.lpSockaddr }).sa_family {
             // SAFETY: The contract states that this field must have lifetime 'a
             matches.push(&gateway.Address);
         }
@@ -660,7 +641,7 @@ unsafe fn isolate_gateway_address(
 
         // SAFETY: Gateway.Next is not null here and the contract states it must be dereferenceable
         // if non-null
-        gateway = &*gateway.Next;
+        gateway = unsafe { &*gateway.Next };
     }
 
     matches
@@ -683,6 +664,7 @@ fn equal_address(lhs: &SOCKADDR_INET, rhs: &SOCKET_ADDRESS) -> Result<bool> {
         return Ok(false);
     }
 
+    // SAFETY: The si_family field is always valid
     match unsafe { lhs.si_family } {
         AF_INET => {
             let typed_rhs = rhs.lpSockaddr as *mut SOCKADDR_IN;
@@ -780,9 +762,15 @@ impl Adapters {
         let code_size = u32::try_from(std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>()).unwrap();
 
         if system_size < code_size {
-            log::error!("Expecting IP_ADAPTER_ADDRESSES to have size {code_size} bytes. Found structure with size {system_size} bytes.");
-            return Err(Error::Adapter(io::Error::new(io::ErrorKind::Other,
-                format!("Expecting IP_ADAPTER_ADDRESSES to have size {code_size} bytes. Found structure with size {system_size} bytes."))));
+            log::error!(
+                "Expecting IP_ADAPTER_ADDRESSES to have size {code_size} bytes. Found structure with size {system_size} bytes."
+            );
+            return Err(Error::Adapter(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Expecting IP_ADAPTER_ADDRESSES to have size {code_size} bytes. Found structure with size {system_size} bytes."
+                ),
+            )));
         }
 
         // Initialize members.
@@ -844,7 +832,7 @@ impl<'a> Iterator for AdaptersIterator<'a> {
 pub fn win_ip_address_prefix_from_ipnetwork_port_zero(from: IpNetwork) -> IP_ADDRESS_PREFIX {
     // Port should not matter so we set it to 0
     let prefix =
-        talpid_windows_net::inet_sockaddr_from_socketaddr(std::net::SocketAddr::new(from.ip(), 0));
+        talpid_windows::net::inet_sockaddr_from_socketaddr(std::net::SocketAddr::new(from.ip(), 0));
     IP_ADDRESS_PREFIX {
         Prefix: prefix,
         PrefixLength: from.prefix(),
@@ -854,7 +842,7 @@ pub fn win_ip_address_prefix_from_ipnetwork_port_zero(from: IpNetwork) -> IP_ADD
 /// Convert to a windows defined `SOCKADDR_INET` from a `IpAddr` but set the port to 0
 pub fn inet_sockaddr_from_ipaddr(from: IpAddr) -> SOCKADDR_INET {
     // Port should not matter so we set it to 0
-    talpid_windows_net::inet_sockaddr_from_socketaddr(std::net::SocketAddr::new(from, 0))
+    talpid_windows::net::inet_sockaddr_from_socketaddr(std::net::SocketAddr::new(from, 0))
 }
 
 /// Convert to a `AddressFamily` from a `ipnetwork::IpNetwork`

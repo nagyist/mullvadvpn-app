@@ -1,69 +1,82 @@
 package net.mullvad.mullvadvpn.compose.screen
 
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import de.mannodermaus.junit5.compose.ComposeContext
 import io.mockk.MockKAnnotations
-import io.mockk.Runs
-import io.mockk.every
-import io.mockk.impl.annotations.MockK
-import io.mockk.just
+import io.mockk.mockk
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableStateFlow
+import net.mullvad.mullvadvpn.compose.createEdgeToEdgeComposeExtension
+import net.mullvad.mullvadvpn.compose.setContentWithTheme
 import net.mullvad.mullvadvpn.compose.state.DeviceRevokedUiState
-import net.mullvad.mullvadvpn.compose.theme.AppTheme
-import net.mullvad.mullvadvpn.viewmodel.DeviceRevokedViewModel
-import org.junit.Before
-import org.junit.Rule
-import org.junit.Test
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.RegisterExtension
 
+@OptIn(ExperimentalTestApi::class)
 class DeviceRevokedScreenTest {
-    @get:Rule val composeTestRule = createComposeRule()
+    @JvmField @RegisterExtension val composeExtension = createEdgeToEdgeComposeExtension()
 
-    @MockK lateinit var mockedViewModel: DeviceRevokedViewModel
-
-    @Before
+    @BeforeEach
     fun setup() {
         MockKAnnotations.init(this)
-        every { mockedViewModel.onGoToLoginClicked() } just Runs
+    }
+
+    private fun ComposeContext.initScreen(
+        state: DeviceRevokedUiState,
+        onSettingsClicked: () -> Unit = {},
+        onGoToLoginClicked: () -> Unit = {},
+    ) {
+        setContentWithTheme {
+            DeviceRevokedScreen(
+                state = state,
+                onSettingsClicked = onSettingsClicked,
+                onGoToLoginClicked = onGoToLoginClicked,
+            )
+        }
     }
 
     @Test
-    fun testUnblockWarningShowingWhenSecured() {
-        // Arrange
-        every { mockedViewModel.uiState } returns MutableStateFlow(DeviceRevokedUiState.SECURED)
+    fun testUnblockWarningShowingWhenSecured() =
+        composeExtension.use {
+            // Arrange
+            val state = DeviceRevokedUiState.SECURED
 
-        // Act
-        composeTestRule.setContent { AppTheme { DeviceRevokedScreen(mockedViewModel) } }
+            // Act
+            initScreen(state)
 
-        // Assert
-        composeTestRule.onNodeWithText(UNBLOCK_WARNING).assertExists()
-    }
-
-    @Test
-    fun testUnblockWarningNotShowingWhenNotSecured() {
-        // Arrange
-        every { mockedViewModel.uiState } returns MutableStateFlow(DeviceRevokedUiState.UNSECURED)
-
-        // Act
-        composeTestRule.setContent { AppTheme { DeviceRevokedScreen(mockedViewModel) } }
-
-        // Assert
-        composeTestRule.onNodeWithText(UNBLOCK_WARNING).assertDoesNotExist()
-    }
+            // Assert
+            onNodeWithText(UNBLOCK_WARNING).assertExists()
+        }
 
     @Test
-    fun testGoToLogin() {
-        // Arrange
-        every { mockedViewModel.uiState } returns MutableStateFlow(DeviceRevokedUiState.UNSECURED)
-        composeTestRule.setContent { AppTheme { DeviceRevokedScreen(mockedViewModel) } }
+    fun testUnblockWarningNotShowingWhenNotSecured() =
+        composeExtension.use {
+            // Arrange
+            val state = DeviceRevokedUiState.UNSECURED
 
-        // Act
-        composeTestRule.onNodeWithText(GO_TO_LOGIN_BUTTON_TEXT).performClick()
+            // Act
+            initScreen(state)
 
-        // Assert
-        verify { mockedViewModel.onGoToLoginClicked() }
-    }
+            // Assert
+            onNodeWithText(UNBLOCK_WARNING).assertDoesNotExist()
+        }
+
+    @Test
+    fun testGoToLogin() =
+        composeExtension.use {
+            // Arrange
+            val state = DeviceRevokedUiState.UNSECURED
+            val mockOnGoToLoginClicked: () -> Unit = mockk(relaxed = true)
+            initScreen(state = state, onGoToLoginClicked = mockOnGoToLoginClicked)
+
+            // Act
+            onNodeWithText(GO_TO_LOGIN_BUTTON_TEXT).performClick()
+
+            // Assert
+            verify { mockOnGoToLoginClicked.invoke() }
+        }
 
     companion object {
         private const val GO_TO_LOGIN_BUTTON_TEXT = "Go to login"

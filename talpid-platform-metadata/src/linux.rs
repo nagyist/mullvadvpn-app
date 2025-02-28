@@ -68,30 +68,36 @@ fn read_os_release_file() -> Result<String, Option<String>> {
 }
 
 fn parse_lsb_release() -> Option<String> {
-    command_stdout_lossy("lsb_release", &["-ds"]).and_then(|output| {
-        if output.is_empty() {
-            None
-        } else {
-            Some(output)
-        }
-    })
+    command_stdout_lossy("lsb_release", &["-ds"])
+        .ok()
+        .and_then(|output| {
+            if output.is_empty() {
+                None
+            } else {
+                Some(output)
+            }
+        })
 }
 
 pub fn extra_metadata() -> impl Iterator<Item = (String, String)> {
-    [kernel_version, nm_version, wg_version, systemd_version]
-        .iter()
-        .filter_map(|f| f())
+    #[cfg(not(feature = "network-manager"))]
+    let version_cmds = [kernel_version, wg_version, systemd_version];
+    #[cfg(feature = "network-manager")]
+    let version_cmds = [kernel_version, nm_version, wg_version, systemd_version];
+
+    version_cmds.into_iter().filter_map(|f| f())
 }
 
 /// `uname -r` outputs a single line containing only the kernel version:
 /// > 5.9.15
 fn kernel_version() -> Option<(String, String)> {
-    let kernel = command_stdout_lossy("uname", &["-r"])?;
+    let kernel = command_stdout_lossy("uname", &["-r"]).ok()?;
     Some(("kernel".to_string(), kernel))
 }
 
 /// NetworkManager's version is returned as a numeric version string
 /// > 1.26.0
+#[cfg(feature = "network-manager")]
 fn nm_version() -> Option<(String, String)> {
     let nm = talpid_dbus::network_manager::NetworkManager::new().ok()?;
     Some(("nm".to_string(), nm.version_string().ok()?))
@@ -112,7 +118,7 @@ fn wg_version() -> Option<(String, String)> {
 /// > systemd 246 (246)
 /// > +PAM +AUDIT -SELINUX +IMA +APPARMOR +SMACK -SYSVINIT +UTMP +LIBCRYPTSETUP +GCRYPT -GNUTLS +ACL
 fn systemd_version() -> Option<(String, String)> {
-    let systemd_version_output = command_stdout_lossy("systemctl", &["--version"])?;
+    let systemd_version_output = command_stdout_lossy("systemctl", &["--version"]).ok()?;
     let version = systemd_version_output.lines().next()?.to_string();
     Some(("systemd".to_string(), version))
 }

@@ -1,4 +1,7 @@
-use super::API;
+//! This module keeps track of the last known good API IP address and reads and stores it on disk.
+
+use crate::{ApiEndpoint, DnsResolver};
+use async_trait::async_trait;
 use std::{io, net::SocketAddr, path::Path, sync::Arc};
 use tokio::{
     fs,
@@ -6,54 +9,70 @@ use tokio::{
     sync::Mutex,
 };
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to open the address cache file")]
-    Open(#[error(source)] io::Error),
+    #[error("Failed to open the address cache file")]
+    Open(#[source] io::Error),
 
-    #[error(display = "Failed to read the address cache file")]
-    Read(#[error(source)] io::Error),
+    #[error("Failed to read the address cache file")]
+    Read(#[source] io::Error),
 
-    #[error(display = "Failed to parse the address cache file")]
+    #[error("Failed to parse the address cache file")]
     Parse,
 
-    #[error(display = "Failed to update the address cache file")]
-    Write(#[error(source)] io::Error),
+    #[error("Failed to update the address cache file")]
+    Write(#[source] io::Error),
+}
+
+/// A DNS resolver which resolves using `AddressCache`.
+#[async_trait]
+impl DnsResolver for AddressCache {
+    async fn resolve(&self, host: String) -> Result<Vec<SocketAddr>, io::Error> {
+        self.resolve_hostname(&host)
+            .await
+            .map(|addr| vec![addr])
+            .ok_or(io::Error::other("host does not match API host"))
+    }
 }
 
 #[derive(Clone)]
 pub struct AddressCache {
+    hostname: String,
     inner: Arc<Mutex<AddressCacheInner>>,
     write_path: Option<Arc<Path>>,
 }
 
 impl AddressCache {
     /// Initialize cache using the hardcoded address, and write changes to `write_path`.
-    pub fn new(write_path: Option<Box<Path>>) -> Result<Self, Error> {
-        Self::new_inner(API.addr, write_path)
+    pub fn new(endpoint: &ApiEndpoint, write_path: Option<Box<Path>>) -> Self {
+        Self::new_inner(endpoint.address(), endpoint.host().to_owned(), write_path)
     }
 
     /// Initialize cache using `read_path`, and write changes to `write_path`.
-    pub async fn from_file(read_path: &Path, write_path: Option<Box<Path>>) -> Result<Self, Error> {
+    pub async fn from_file(
+        read_path: &Path,
+        write_path: Option<Box<Path>>,
+        hostname: String,
+    ) -> Result<Self, Error> {
         log::debug!("Loading API addresses from {}", read_path.display());
-        Self::new_inner(read_address_file(read_path).await?, write_path)
+        let address = read_address_file(read_path).await?;
+        Ok(Self::new_inner(address, hostname, write_path))
     }
 
-    fn new_inner(address: SocketAddr, write_path: Option<Box<Path>>) -> Result<Self, Error> {
+    fn new_inner(address: SocketAddr, hostname: String, write_path: Option<Box<Path>>) -> Self {
         let cache = AddressCacheInner::from_address(address);
         log::debug!("Using API address: {}", cache.address);
 
-        let address_cache = Self {
+        Self {
             inner: Arc::new(Mutex::new(cache)),
             write_path: write_path.map(Arc::from),
-        };
-        Ok(address_cache)
+            hostname,
+        }
     }
 
     /// Returns the address if the hostname equals `API.host`. Otherwise, returns `None`.
-    pub async fn resolve_hostname(&self, hostname: &str) -> Option<SocketAddr> {
-        if hostname.eq_ignore_ascii_case(&API.host) {
+    async fn resolve_hostname(&self, hostname: &str) -> Option<SocketAddr> {
+        if hostname.eq_ignore_ascii_case(&self.hostname) {
             Some(self.get_address().await)
         } else {
             None

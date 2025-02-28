@@ -1,5 +1,5 @@
 These are instructions on how to build the app on desktop platforms. See the
-[readme](./README.md#building-the-app) for help build building on other platforms.
+[readme](./README.md#building-the-app) for help building on other platforms.
 
 # Install toolchains and dependencies
 
@@ -9,9 +9,18 @@ on your platform please submit an issue or a pull request.
 ## All platforms
 
 - Get the latest **stable** Rust toolchain via [rustup.rs](https://rustup.rs/).
+  - Install default targets and components needed for desktop
+    ```bash
+    ./scripts/setup-rust desktop
+     ```
+  - (Optional) Run the following to install a git `post-checkout` hook that will automatically
+    run the `setup-rust` script when the Rust version specified in the `rust-toolchain.toml` file changes:
+    ```bash
+    .scripts/setup-rust install-hook
+    ```
 
 - You need Node.js and npm. You can find the exact versions in the `volta` section of
-  `gui/package.json`. The toolchain is managed by volta.
+  `desktop/package.json`. The toolchain is managed by volta.
 
   - Linux & macOS
 
@@ -23,11 +32,10 @@ on your platform please submit an issue or a pull request.
 
     Install the `msi` hosted here: https://github.com/volta-cli/volta
 
-- Install Go (ideally version `1.18`) by following the [official
-  instructions](https://golang.org/doc/install).  Newer versions may work
-  too.
+- Install Go (ideally version `1.21`) by following the [official instructions](https://golang.org/doc/install).
+  Newer versions may work too.
 
-- Install a protobuf compiler (version 3 and up), it can be installed on most major Linux distros
+- Install a protobuf compiler (version 3.15 and up), it can be installed on most major Linux distros
   via the package name `protobuf-compiler`, `protobuf` on macOS via Homebrew, and on Windows
   binaries are available on their GitHub [page](https://github.com/protocolbuffers/protobuf/releases)
   and they have to be put in `%PATH`. An additional package might also be required depending on
@@ -93,19 +101,22 @@ The host has to have the following installed:
 
 - Windows 10 (or Windows 11) SDK.
 
-- `msbuild.exe` available in `%PATH%`. If you installed Visual Studio Community edition, the
-  binary can be found under:
-  ```
-  C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64
-  ```
-
 - `bash` installed as well as a few base unix utilities, including `sed` and `tail`.
   You are recommended to use [Git for Windows].
 
-- `mingw` is required for CGo.
-  The latest [`mingw-w64`](https://github.com/niXman/mingw-builds-binaries/releases) build works
-  well. Specifically, you'll need one of the releases labeled `x86_64`, `win32`, and `msvcrt`,
-  such as <https://github.com/niXman/mingw-builds-binaries/releases/download/13.1.0-rt_v11-rev1/x86_64-13.1.0-release-win32-seh-msvcrt-rt_v11-rev1.7z>.
+- `zig` installed and available in `%PATH%`. 0.14 or later is recommended: https://ziglang.org/download/.
+
+- `msbuild.exe` available in `%PATH%`. If you installed Visual Studio Community edition, the
+  binary can be found under:
+
+  ```
+  C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\<arch>
+  ```
+
+  Where `<arch>` refers to the host architecture, either `amd64` or `arm64`.
+
+  The environment can also be set up in bash by sourcing `vcvars.sh`: `. ./scripts/vcvars.sh`. Note
+  that that script assumes that you're running VS 2022 Community.
 
 - The `x86` target is required for building some NSIS plugins:
 
@@ -114,6 +125,48 @@ The host has to have the following installed:
   ```
 
 [Git for Windows]: https://git-scm.com/download/win
+
+### Cross-compiling for ARM64
+
+By default, the app will build for the host platform. It is also possible to cross-compile the app
+for ARM64 on x64. This requires:
+
+- The ARM64 MSVC tools added to Visual Studio.
+
+- `clang` (either directly from llvm.org or as part of Visual Studio) on the `PATH`.
+
+- The `AArch64` target added to Rust:
+
+```bash
+rustup target add aarch64-pc-windows-msvc
+```
+
+### Compiling *on* Windows Arm
+
+In addition to the above requirements:
+
+- `x86_64-pc-windows-msvc` is required to build `talpid-openvpn-plugin`:
+
+  ```bash
+  rustup target add x86_64-pc-windows-msvc
+  ```
+
+- `clang` is required (can be found in the Visual Studio installer) in `PATH`.
+
+  `INCLUDE` also needs to include the correct headers for clang. This can be found by running
+  `vcvarsall.bat arm64` and typing `set INCLUDE`.
+
+  The environment can also be set up in bash by sourcing `vcvars.sh`: `. ./scripts/vcvars.sh`. Note
+  that that script assumes that you're running VS 2022 Community.
+
+- `grpc-tools` currently doesn't include ARM builds. The x64 binaries must be installed to build
+  the Electron app:
+
+  ```
+  pushd desktop/packages/mullvad-vpn
+  npm install --target_arch=x64 grpc-tools
+  popd
+  ```
 
 ## macOS
 
@@ -151,6 +204,15 @@ variable to `aarch64-unknown-linux-gnu`:
 TARGETS="aarch64-unknown-linux-gnu" ./build.sh
 ```
 
+### Windows
+
+To cross-compile for ARM64 from another host architecture, set the `TARGETS` environment
+variable to `aarch64-pc-windows-msvc`:
+
+```bash
+TARGETS="aarch64-pc-windows-msvc" ./build.sh
+```
+
 ## Notes on building on ARM64 Linux hosts
 
 Due to inability to build the management interface proto files on ARM64 (see
@@ -165,17 +227,21 @@ To build the management interface proto files there is a script (execute it on a
 ARM64 Linux):
 
 ```bash
-cd gui/scripts
-npm ci
-./build-proto.sh
+cd desktop
+npm ci -w mullvad-vpn
+npm run -w mullvad-vpn build-proto
 ```
 
-After that copy the files from `gui/src/main/management_interface/` and
-`gui/build/src/main/management_interface/` directories into a single directory, and set the value
-of `MANAGEMENT_INTERFACE_PROTO_BUILD_DIR` to that directory while running the main build.
+After that copy the files from the following directories into a single directory:
+```
+desktop/packages/mullvad-vpn/src/main/management_interface/
+desktop/packages/mullvad-vpn/build/src/main/management_interface/
+```
+Set the value of `MANAGEMENT_INTERFACE_PROTO_BUILD_DIR` to that directory while running the main
+build.
 
-When all is done run the main build. Assuming that you copied the proto files into `/tmp/management_interface_proto`
-directory, the build command will look as follows:
+When all is done, run the main build. Assuming that you copied the proto files into
+`/tmp/management_interface_proto` directory, the build command will look as follows:
 
 ```bash
 MANAGEMENT_INTERFACE_PROTO_BUILD_DIR=/tmp/management_interface_proto ./build.sh --dev-build
@@ -203,7 +269,7 @@ This section is for building the system service individually.
     ```
 
 1. Copy the OpenVPN binaries, and our plugin for it, to the directory we will
-    use as resource directory. If you want to use any other directory, you would need to copy
+    use as a resource directory. If you want to use any other directory, you would need to copy
     even more files.
     ```bash
     cp dist-assets/binaries/<platform>/openvpn[.exe] dist-assets/
@@ -225,28 +291,28 @@ This section is for building the system service individually.
     Leave out `sudo` on Windows. The daemon must run as root since it modifies the firewall and sets
     up virtual network interfaces etc.
 
-# Building and running the GUI app
+# Building and running the desktop app
 
-This section is for building the GUI app individually.
+This section is for building the desktop app individually.
 
-1. Go to the `gui` directory
+1. Go to the `desktop` directory
    ```bash
-   cd gui
+   cd desktop
    ```
 
 1. Install all the JavaScript dependencies by running:
     ```bash
-    npm install
+    npm install -w mullvad-vpn
     ```
 
-1. Start the GUI in development mode by running:
+1. Start the Electron app in development mode by running:
     ```bash
-    npm run develop
+    npm run -w mullvad-vpn develop
     ```
 
 If you change any javascript file while the development mode is running it will automatically
 transpile and reload the file so that the changes are visible almost immediately.
 
-Please note that the GUI needs a running daemon to connect to in order to work. See
+Please note that the Electron app needs a running daemon to connect to in order to work. See
 [Building and running mullvad-daemon](#building-and-running-mullvad-daemon) for instructions
-on how to do that before starting the GUI.
+on how to do that before starting the Electron app.

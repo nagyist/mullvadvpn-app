@@ -6,27 +6,44 @@ use std::io;
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, err_derive::Error)]
+/// Errors that can occur for a PF_ROUTE socket
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(display = "Failed to open routing socket")]
-    RoutingSocket(routing_socket::Error),
-    #[error(display = "Invalid message")]
-    InvalidMessage(data::Error),
-    #[error(display = "Failed to send routing message")]
-    Send(routing_socket::Error),
-    #[error(display = "Unexpected message type")]
+    /// Generic routing socket error
+    #[error("Routing socket error")]
+    RoutingSocket(#[source] routing_socket::Error),
+    /// Failed to parse route message
+    #[error("Invalid message")]
+    InvalidMessage(#[source] data::Error),
+    /// Failed to send route message
+    #[error("Failed to send routing message")]
+    Send(#[source] routing_socket::Error),
+    /// Received unexpected response to route message
+    #[error("Unexpected message type")]
     UnexpectedMessageType(RouteSocketMessage, MessageType),
-    #[error(display = "Route not found")]
+    /// Route not found
+    #[error("Route not found")]
     RouteNotFound,
-    #[error(display = "Destination unreachable")]
+    /// No route to destination
+    #[error("Destination unreachable")]
     Unreachable,
-    #[error(display = "Failed to delete a route")]
+    /// Failed to delete route
+    #[error("Failed to delete a route")]
     Deletion(RouteMessage),
 }
 
 /// Provides an interface for manipulating the routing table on macOS using a PF_ROUTE socket.
 pub struct RoutingTable {
     socket: routing_socket::RoutingSocket,
+}
+
+/// Result of successfully adding a route
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum AddResult {
+    /// A new route was created
+    Ok,
+    /// The route already exists
+    AlreadyExists,
 }
 
 impl RoutingTable {
@@ -38,23 +55,31 @@ impl RoutingTable {
 
     pub async fn next_message(&mut self) -> Result<RouteSocketMessage> {
         let mut buf = [0u8; 2048];
-        let bytes_read = self
-            .socket
-            .recv_msg(&mut buf)
-            .await
-            .map_err(Error::RoutingSocket)?;
+
+        let bytes_read = loop {
+            match self.socket.recv_msg(&mut buf).await {
+                Ok(bytes_read) => break bytes_read,
+                Err(error) if error.is_shutdown() => {
+                    log::debug!("Recreating shut down socket");
+                    self.socket =
+                        routing_socket::RoutingSocket::new().map_err(Error::RoutingSocket)?;
+                }
+                Err(error) => return Err(Error::RoutingSocket(error)),
+            }
+        };
+
         let msg_buf = &buf[0..bytes_read];
         data::RouteSocketMessage::parse_message(msg_buf).map_err(Error::InvalidMessage)
     }
 
-    pub async fn add_route(&mut self, message: &RouteMessage) -> Result<()> {
+    pub async fn add_route(&mut self, message: &RouteMessage) -> Result<AddResult> {
         if let Ok(destination) = message.destination_ip() {
             if Some(destination.ip()) == message.gateway_ip() {
                 // Workaround that allows us to reach a wg peer on our router.
                 // If we don't do this, adding the route fails due to errno 49
                 // ("Can't assign requested address").
                 log::warn!("Ignoring route because the destination equals its gateway");
-                return Ok(());
+                return Ok(AddResult::AlreadyExists);
             }
         }
 
@@ -63,11 +88,11 @@ impl RoutingTable {
             .await;
 
         match msg {
-            Ok(RouteSocketMessage::AddRoute(_route)) => Ok(()),
+            Ok(RouteSocketMessage::AddRoute(_route)) => Ok(AddResult::Ok),
             Err(Error::Send(routing_socket::Error::Write(err)))
                 if err.kind() == io::ErrorKind::AlreadyExists =>
             {
-                Ok(())
+                Ok(AddResult::AlreadyExists)
             }
             Ok(anything_else) => {
                 log::error!("Unexpected route message: {anything_else:?}");

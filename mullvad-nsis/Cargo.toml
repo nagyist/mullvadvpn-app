@@ -1,17 +1,21 @@
 [package]
 name = "mullvad-nsis"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
 description = "Helper library used by Mullvad NSIS plugins"
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
-crate_type = ["staticlib"]
+crate-type = ["staticlib"]
 
 [target.i686-pc-windows-msvc.dependencies]
 mullvad-paths = { path = "../mullvad-paths" }
+talpid-platform-metadata = { path = "../talpid-platform-metadata" }
 
 [target.i686-pc-windows-msvc.build-dependencies]
 cbindgen = { version = "0.24.3", default-features = false }

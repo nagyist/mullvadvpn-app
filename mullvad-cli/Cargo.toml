@@ -1,44 +1,46 @@
 [package]
 name = "mullvad-cli"
-version = "0.0.0"
-authors = ["Mullvad VPN"]
 description = "Manage the Mullvad VPN daemon via a convenient CLI"
-license = "GPL-3.0"
-edition = "2021"
-publish = false
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "mullvad"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0"
-base64 = "0.13"
-chrono = { version = "0.4.26", features = ["serde"] }
-clap = { version = "4.2.7", features = ["cargo", "derive"] }
-env_logger = "0.10.0"
-futures = "0.3"
-natord = "1.0.9"
-serde = "1.0"
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
 itertools = "0.10"
+natord = "1.0.9"
 
 mullvad-types = { path = "../mullvad-types", features = ["clap"] }
-mullvad-paths = { path = "../mullvad-paths" }
 mullvad-version = { path = "../mullvad-version" }
 talpid-types = { path = "../talpid-types" }
 
 mullvad-management-interface = { path = "../mullvad-management-interface" }
-tokio = { version = "1.8", features =  [ "rt-multi-thread" ] }
+tokio = { workspace = true, features =  ["macros", "rt-multi-thread", "fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
-clap_complete = { version = "4.2.1" }
+clap_complete = { version = "4.4.8" }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 mullvad-version = { path = "../mullvad-version" }
 
 [target.'cfg(windows)'.build-dependencies.windows-sys]
-version = "0.45.0"
+workspace = true
 features = [
     "Win32_System_SystemServices",
 ]
@@ -46,6 +48,6 @@ features = [
 [package.metadata.winres]
 ProductName = "Mullvad VPN"
 CompanyName = "Mullvad VPN AB"
-LegalCopyright = "(c) 2023 Mullvad VPN AB"
+LegalCopyright = "(c) 2025 Mullvad VPN AB"
 InternalName = "mullvad-cli"
 OriginalFilename = "mullvad.exe"

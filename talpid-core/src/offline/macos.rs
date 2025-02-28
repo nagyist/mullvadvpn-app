@@ -2,60 +2,77 @@
 //! that the app gets stuck in an offline state, blocking all internet access and preventing the
 //! user from connecting to a relay.
 //!
-//! Currently, this functionality is implemented by watching for changes to the default route
-//! in [`RouteManager`] using a `PF_ROUTE` socket. If there is no default route for neither IPv4 nor
-//! IPv6, the host is considered to be offline.
-use futures::{channel::mpsc::UnboundedSender, StreamExt};
+//! See [RouteManagerHandle::default_route_listener].
+//!
+//! This offline monitor synthesizes an offline state between network switches and before coming
+//! online from an offline state. This is done to work around issues with DNS being blocked due
+//! to macOS's connectivity check. In the offline state, a DNS server on localhost prevents the
+//! connectivity check from being blocked.
+use futures::{
+    channel::mpsc::UnboundedSender,
+    future::{Fuse, FutureExt},
+    select, StreamExt,
+};
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use talpid_routing::{DefaultRouteEvent, RouteManagerHandle};
+use talpid_types::net::Connectivity;
 
-/// How long to wait before announcing changes to the offline state
-const DEBOUNCE_INTERVAL: Duration = Duration::from_secs(2);
+const SYNTHETIC_OFFLINE_DURATION: Duration = Duration::from_secs(1);
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to initialize route monitor")]
-    StartMonitorError(#[error(source)] talpid_routing::Error),
+    #[error("Failed to initialize route monitor")]
+    StartMonitorError(#[from] talpid_routing::Error),
 }
 
 pub struct MonitorHandle {
-    state: Arc<Mutex<ConnectivityState>>,
-    _notify_tx: Arc<UnboundedSender<bool>>,
-}
-
-struct ConnectivityState {
-    v4_connectivity: bool,
-    v6_connectivity: bool,
-}
-
-impl ConnectivityState {
-    fn get_connectivity(&self) -> bool {
-        self.v4_connectivity || self.v6_connectivity
-    }
+    state: Arc<Mutex<ConnectivityInner>>,
+    _notify_tx: Arc<UnboundedSender<Connectivity>>,
 }
 
 impl MonitorHandle {
-    /// Host is considered to be offline if macOS doesn't assign a non-tunnel default route
+    /// Return whether the host is offline
     #[allow(clippy::unused_async)]
-    pub async fn host_is_offline(&self) -> bool {
+    pub async fn connectivity(&self) -> Connectivity {
         let state = self.state.lock().unwrap();
-        !state.get_connectivity()
+        state.into_connectivity()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ConnectivityInner {
+    /// Whether IPv4 connectivity seems to be available on the host.
+    ipv4: bool,
+    /// Whether IPv6 connectivity seems to be available on the host.
+    ipv6: bool,
+}
+
+impl ConnectivityInner {
+    fn into_connectivity(self) -> Connectivity {
+        Connectivity::Status {
+            ipv4: self.ipv4,
+            ipv6: self.ipv6,
+        }
+    }
+
+    fn is_online(&self) -> bool {
+        self.into_connectivity().is_online()
     }
 }
 
 pub async fn spawn_monitor(
-    notify_tx: UnboundedSender<bool>,
-    route_manager_handle: RouteManagerHandle,
+    notify_tx: UnboundedSender<Connectivity>,
+    route_manager: RouteManagerHandle,
 ) -> Result<MonitorHandle, Error> {
     let notify_tx = Arc::new(notify_tx);
 
-    let (v4_connectivity, v6_connectivity) = match route_manager_handle.get_default_routes().await {
+    // note: begin observing before initializing the state
+    let route_listener = route_manager.default_route_listener().await?;
+
+    let (ipv4, ipv6) = match route_manager.get_default_routes().await {
         Ok((v4_route, v6_route)) => (v4_route.is_some(), v6_route.is_some()),
         Err(error) => {
             log::warn!("Failed to initialize offline monitor: {error}");
@@ -65,85 +82,84 @@ pub async fn spawn_monitor(
         }
     };
 
-    let state = ConnectivityState {
-        v4_connectivity,
-        v6_connectivity,
-    };
-    let initial_connectivity = state.get_connectivity();
+    let state = ConnectivityInner { ipv4, ipv6 };
+    let mut real_state = state;
+
     let state = Arc::new(Mutex::new(state));
 
-    let mut route_listener = route_manager_handle.default_route_listener().await?;
     let weak_state = Arc::downgrade(&state);
     let weak_notify_tx = Arc::downgrade(&notify_tx);
 
     // Detect changes to the default route
     tokio::spawn(async move {
-        let mut state_update_handle: Option<tokio::task::JoinHandle<()>> = None;
-        let prev_notified_state = Arc::new(AtomicBool::new(initial_connectivity));
+        let mut timeout = Fuse::terminated();
+        let mut route_listener = route_listener.fuse();
 
-        while let Some(event) = route_listener.next().await {
-            let state = match weak_state.upgrade() {
-                Some(state) => state,
-                None => break,
-            };
+        loop {
+            talpid_types::detect_flood!();
 
-            let mut state = state.lock().unwrap();
-
-            log::trace!("Default route event: {event:?}");
-
-            let previous_connectivity = state.get_connectivity();
-
-            match event {
-                DefaultRouteEvent::AddedOrChangedV4 => {
-                    state.v4_connectivity = true;
-                }
-                DefaultRouteEvent::AddedOrChangedV6 => {
-                    state.v6_connectivity = true;
-                }
-                DefaultRouteEvent::RemovedV4 => {
-                    state.v4_connectivity = false;
-                }
-                DefaultRouteEvent::RemovedV6 => {
-                    state.v6_connectivity = false;
-                }
-            }
-
-            let new_connectivity = state.get_connectivity();
-            if previous_connectivity != new_connectivity {
-                if let Some(update_state) = state_update_handle.take() {
-                    update_state.abort();
-                }
-
-                let prev_notified = prev_notified_state.clone();
-
-                let notify_copy = weak_notify_tx.clone();
-                let update_task = tokio::spawn(async move {
-                    let notify_tx = match notify_copy.upgrade() {
-                        Some(tx) => tx,
-                        None => return,
+            select! {
+                _ = timeout => {
+                    // Update shared state
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
                     };
 
-                    // Debounce event updates
-                    tokio::time::sleep(DEBOUNCE_INTERVAL).await;
-
-                    if prev_notified.swap(new_connectivity, Ordering::AcqRel) == new_connectivity {
-                        // We don't care about network changes here
-                        return;
+                    let mut state = state.lock().unwrap();
+                    if real_state.is_online() {
+                        log::info!("Connectivity changed: Connected");
+                        let Some(tx) = weak_notify_tx.upgrade() else {
+                            break;
+                        };
+                        let _ = tx.unbounded_send(real_state.into_connectivity());
                     }
 
-                    log::info!(
-                        "Connectivity changed: {}",
-                        if new_connectivity {
-                            "Connected"
-                        } else {
-                            "Offline"
+                    *state = real_state;
+                }
+
+                route_event = route_listener.next() => {
+                    let Some(event) = route_event else {
+                        break;
+                    };
+
+                    // Update real state
+                    match event {
+                        DefaultRouteEvent::AddedOrChangedV4 => {
+                            real_state.ipv4 = true;
                         }
-                    );
+                        DefaultRouteEvent::AddedOrChangedV6 => {
+                            real_state.ipv6 = true;
+                        }
+                        DefaultRouteEvent::RemovedV4 => {
+                            real_state.ipv4 = false;
+                        }
+                        DefaultRouteEvent::RemovedV6 => {
+                            real_state.ipv6 = false;
+                        }
+                    }
 
-                    let _ = notify_tx.unbounded_send(!new_connectivity);
-                });
+                    // Synthesize offline state
+                    // Update shared state
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
+                    };
+                    let mut state = state.lock().unwrap();
+                    let previous_connectivity = *state;
+                    state.ipv4 = false;
+                    state.ipv6 = false;
 
-                state_update_handle = Some(update_task);
+                    if previous_connectivity.is_online() {
+                        let Some(tx) = weak_notify_tx.upgrade() else {
+                            break;
+                        };
+                        let _ = tx.unbounded_send(state.into_connectivity());
+                        log::info!("Connectivity changed: Offline");
+                    }
+
+                    if real_state.is_online() {
+                        timeout = Box::pin(tokio::time::sleep(SYNTHETIC_OFFLINE_DURATION)).fuse();
+                    }
+                }
             }
         }
 

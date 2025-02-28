@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name" translatable="false">Mullvad VPN</string>
+    <string name="voucher_hint" translatable="false">XXXX-XXXX-XXXX-XXXX</string>
+    <string name="account_url" translatable="false">https://mullvad.net/account</string>
+    <string name="download_url" translatable="false">https://mullvad.net/download/vpn/android</string>
+    <string name="market_uri" translatable="false">market://details?id=%s</string>
+    <string name="faqs_and_guides_url" translatable="false">https://mullvad.net/help/tag/mullvad-app/</string>
+    <string name="privacy_policy_url" translatable="false">https://mullvad.net/help/privacy-policy/</string>
+    <string name="changelog_url" translatable="false">https://github.com/mullvad/mullvadvpn-app/blob/main/android/CHANGELOG.md</string>
+    <string name="lockdown_url" translatable="false">https://mullvad.net/l/android-lockdown</string>
+    <string name="split_tunneling" translatable="false">Split tunneling</string>
+    <string name="wireguard" translatable="false">WireGuard</string>
+    <string name="socks5_remote">SOCKS5</string>
+    <string name="shadowsocks">Shadowsocks</string>
+    <string name="local_network_sharing_ip_ranges">
+        <![CDATA[<ul><li>10.0.0.0/8</li><li>172.16.0.0/12</li><li>192.168.0.0/16</li><li>169.254.0.0/16</li><li>fe80::/10</li><li>fc00::/7</li></ul>]]>
+    </string>
+    <string name="daita">DAITA</string>
+    <string name="daita_full">Defence against AI-guided Traffic Analysis</string>
+</resources>

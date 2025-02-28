@@ -1,5 +1,4 @@
 use crate::types::{conversions::arg_from_str, proto, FromProtobufTypeError};
-use mullvad_types::relay_constraints::Constraint;
 use std::net::SocketAddr;
 
 impl From<talpid_types::net::TunnelEndpoint> for proto::TunnelEndpoint {
@@ -18,8 +17,12 @@ impl From<talpid_types::net::TunnelEndpoint> for proto::TunnelEndpoint {
                 address: proxy_ep.endpoint.address.to_string(),
                 protocol: i32::from(proto::TransportProtocol::from(proxy_ep.endpoint.protocol)),
                 proxy_type: match proxy_ep.proxy_type {
-                    net::proxy::ProxyType::Shadowsocks => i32::from(proto::ProxyType::Shadowsocks),
-                    net::proxy::ProxyType::Custom => i32::from(proto::ProxyType::Custom),
+                    net::proxy::ProxyType::Shadowsocks => {
+                        i32::from(proto::proxy_endpoint::ProxyType::Shadowsocks)
+                    }
+                    net::proxy::ProxyType::Custom => {
+                        i32::from(proto::proxy_endpoint::ProxyType::Custom)
+                    }
                 },
             }),
             obfuscation: endpoint.obfuscation.map(|obfuscation_endpoint| {
@@ -30,7 +33,12 @@ impl From<talpid_types::net::TunnelEndpoint> for proto::TunnelEndpoint {
                         obfuscation_endpoint.endpoint.protocol,
                     )),
                     obfuscation_type: match obfuscation_endpoint.obfuscation_type {
-                        net::ObfuscationType::Udp2Tcp => i32::from(proto::ObfuscationType::Udp2tcp),
+                        net::ObfuscationType::Udp2Tcp => {
+                            i32::from(proto::obfuscation_endpoint::ObfuscationType::Udp2tcp)
+                        }
+                        net::ObfuscationType::Shadowsocks => {
+                            i32::from(proto::obfuscation_endpoint::ObfuscationType::Shadowsocks)
+                        }
                     },
                 }
             }),
@@ -41,6 +49,10 @@ impl From<talpid_types::net::TunnelEndpoint> for proto::TunnelEndpoint {
             tunnel_metadata: endpoint
                 .tunnel_interface
                 .map(|tunnel_interface| proto::TunnelMetadata { tunnel_interface }),
+            #[cfg(daita)]
+            daita: endpoint.daita,
+            #[cfg(not(daita))]
+            daita: false,
         }
     }
 }
@@ -69,12 +81,16 @@ impl TryFrom<proto::TunnelEndpoint> for talpid_types::net::TunnelEndpoint {
                             )?,
                             protocol: try_transport_protocol_from_i32(proxy_ep.protocol)?,
                         },
-                        proxy_type: match proto::ProxyType::from_i32(proxy_ep.proxy_type) {
-                            Some(proto::ProxyType::Shadowsocks) => {
+                        proxy_type: match proto::proxy_endpoint::ProxyType::try_from(
+                            proxy_ep.proxy_type,
+                        ) {
+                            Ok(proto::proxy_endpoint::ProxyType::Shadowsocks) => {
                                 talpid_net::proxy::ProxyType::Shadowsocks
                             }
-                            Some(proto::ProxyType::Custom) => talpid_net::proxy::ProxyType::Custom,
-                            None => {
+                            Ok(proto::proxy_endpoint::ProxyType::Custom) => {
+                                talpid_net::proxy::ProxyType::Custom
+                            }
+                            Err(_) => {
                                 return Err(FromProtobufTypeError::InvalidArgument(
                                     "unknown proxy type",
                                 ))
@@ -97,18 +113,22 @@ impl TryFrom<proto::TunnelEndpoint> for talpid_types::net::TunnelEndpoint {
                             ),
                             protocol: try_transport_protocol_from_i32(obfs_ep.protocol)?,
                         },
-                        obfuscation_type: match proto::ObfuscationType::from_i32(
-                            obfs_ep.obfuscation_type,
-                        ) {
-                            Some(proto::ObfuscationType::Udp2tcp) => {
-                                talpid_net::ObfuscationType::Udp2Tcp
-                            }
-                            None => {
-                                return Err(FromProtobufTypeError::InvalidArgument(
-                                    "unknown obfuscation type",
-                                ))
-                            }
-                        },
+                        obfuscation_type:
+                            match proto::obfuscation_endpoint::ObfuscationType::try_from(
+                                obfs_ep.obfuscation_type,
+                            ) {
+                                Ok(proto::obfuscation_endpoint::ObfuscationType::Udp2tcp) => {
+                                    talpid_net::ObfuscationType::Udp2Tcp
+                                }
+                                Ok(proto::obfuscation_endpoint::ObfuscationType::Shadowsocks) => {
+                                    talpid_net::ObfuscationType::Shadowsocks
+                                }
+                                Err(_) => {
+                                    return Err(FromProtobufTypeError::InvalidArgument(
+                                        "unknown obfuscation type",
+                                    ))
+                                }
+                            },
                     })
                 })
                 .transpose()?,
@@ -124,6 +144,8 @@ impl TryFrom<proto::TunnelEndpoint> for talpid_types::net::TunnelEndpoint {
             tunnel_interface: endpoint
                 .tunnel_metadata
                 .map(|tunnel_metadata| tunnel_metadata.tunnel_interface),
+            #[cfg(daita)]
+            daita: endpoint.daita,
         })
     }
 }
@@ -155,21 +177,11 @@ impl From<proto::TransportProtocol> for talpid_types::net::TransportProtocol {
     }
 }
 
-impl TryFrom<proto::TunnelTypeConstraint> for Constraint<talpid_types::net::TunnelType> {
-    type Error = FromProtobufTypeError;
-
-    fn try_from(
-        tunnel_type: proto::TunnelTypeConstraint,
-    ) -> Result<Constraint<talpid_types::net::TunnelType>, Self::Error> {
-        let tunnel_type = try_tunnel_type_from_i32(tunnel_type.tunnel_type)?;
-        Ok(Constraint::Only(tunnel_type))
-    }
-}
-
-impl From<proto::IpVersion> for proto::IpVersionConstraint {
+impl From<proto::IpVersion> for talpid_types::net::IpVersion {
     fn from(version: proto::IpVersion) -> Self {
-        Self {
-            protocol: i32::from(version),
+        match version {
+            proto::IpVersion::V4 => talpid_types::net::IpVersion::V4,
+            proto::IpVersion::V6 => talpid_types::net::IpVersion::V6,
         }
     }
 }
@@ -177,10 +189,10 @@ impl From<proto::IpVersion> for proto::IpVersionConstraint {
 pub fn try_tunnel_type_from_i32(
     tunnel_type: i32,
 ) -> Result<talpid_types::net::TunnelType, FromProtobufTypeError> {
-    match proto::TunnelType::from_i32(tunnel_type) {
-        Some(proto::TunnelType::Openvpn) => Ok(talpid_types::net::TunnelType::OpenVpn),
-        Some(proto::TunnelType::Wireguard) => Ok(talpid_types::net::TunnelType::Wireguard),
-        None => Err(FromProtobufTypeError::InvalidArgument(
+    match proto::TunnelType::try_from(tunnel_type) {
+        Ok(proto::TunnelType::Openvpn) => Ok(talpid_types::net::TunnelType::OpenVpn),
+        Ok(proto::TunnelType::Wireguard) => Ok(talpid_types::net::TunnelType::Wireguard),
+        Err(_) => Err(FromProtobufTypeError::InvalidArgument(
             "invalid tunnel protocol",
         )),
     }
@@ -189,9 +201,177 @@ pub fn try_tunnel_type_from_i32(
 pub fn try_transport_protocol_from_i32(
     protocol: i32,
 ) -> Result<talpid_types::net::TransportProtocol, FromProtobufTypeError> {
-    Ok(proto::TransportProtocol::from_i32(protocol)
-        .ok_or(FromProtobufTypeError::InvalidArgument(
-            "invalid transport protocol",
-        ))?
+    Ok(proto::TransportProtocol::try_from(protocol)
+        .map_err(|_| FromProtobufTypeError::InvalidArgument("invalid transport protocol"))?
         .into())
+}
+
+mod proxy {
+    use std::net::Ipv4Addr;
+
+    use crate::types::{proto, FromProtobufTypeError};
+    use talpid_types::net::proxy::{
+        CustomProxy, Shadowsocks, Socks5Local, Socks5Remote, SocksAuth,
+    };
+
+    impl TryFrom<proto::CustomProxy> for CustomProxy {
+        type Error = FromProtobufTypeError;
+
+        fn try_from(value: proto::CustomProxy) -> Result<Self, Self::Error> {
+            Ok(match value.proxy_method {
+                Some(proto::custom_proxy::ProxyMethod::Socks5local(local)) => {
+                    CustomProxy::Socks5Local(Socks5Local::try_from(local)?)
+                }
+                Some(proto::custom_proxy::ProxyMethod::Socks5remote(remote)) => {
+                    CustomProxy::Socks5Remote(Socks5Remote::try_from(remote)?)
+                }
+                Some(proto::custom_proxy::ProxyMethod::Shadowsocks(shadowsocks)) => {
+                    CustomProxy::Shadowsocks(Shadowsocks::try_from(shadowsocks)?)
+                }
+                None => {
+                    return Err(FromProtobufTypeError::InvalidArgument(
+                        "CustomProxy missing proxy_method field",
+                    ));
+                }
+            })
+        }
+    }
+
+    impl TryFrom<proto::Socks5Local> for Socks5Local {
+        type Error = FromProtobufTypeError;
+
+        fn try_from(value: proto::Socks5Local) -> Result<Self, Self::Error> {
+            use crate::types::conversions::net::try_transport_protocol_from_i32;
+            let remote_ip = value.remote_ip.parse::<Ipv4Addr>().map_err(|_| {
+                FromProtobufTypeError::InvalidArgument(
+                    "Could not parse Socks5 (local) message from protobuf",
+                )
+            })?;
+            Ok(Socks5Local::new_with_transport_protocol(
+                (remote_ip, value.remote_port as u16),
+                value.local_port as u16,
+                try_transport_protocol_from_i32(value.remote_transport_protocol)?,
+            ))
+        }
+    }
+
+    impl TryFrom<proto::Socks5Remote> for Socks5Remote {
+        type Error = FromProtobufTypeError;
+
+        fn try_from(value: proto::Socks5Remote) -> Result<Self, Self::Error> {
+            let ip = value.ip.parse::<Ipv4Addr>().map_err(|_| {
+                FromProtobufTypeError::InvalidArgument(
+                    "Could not parse Socks5 (remote) message from protobuf",
+                )
+            })?;
+            let port = value.port as u16;
+            let socks = match value.auth {
+                Some(credentials) => {
+                    let auth = SocksAuth::try_from(credentials)?;
+                    Socks5Remote::new_with_authentication((ip, port), auth)
+                }
+                None => Socks5Remote::new((ip, port)),
+            };
+
+            Ok(socks)
+        }
+    }
+
+    impl TryFrom<proto::Shadowsocks> for Shadowsocks {
+        type Error = FromProtobufTypeError;
+
+        fn try_from(value: proto::Shadowsocks) -> Result<Self, Self::Error> {
+            let ip = value.ip.parse::<Ipv4Addr>().map_err(|_| {
+                FromProtobufTypeError::InvalidArgument(
+                    "Could not parse Socks5 (remote) message from protobuf",
+                )
+            })?;
+
+            Ok(Shadowsocks::new(
+                (ip, value.port as u16),
+                value.cipher,
+                value.password,
+            ))
+        }
+    }
+
+    impl From<CustomProxy> for proto::CustomProxy {
+        fn from(value: CustomProxy) -> Self {
+            proto::CustomProxy {
+                proxy_method: Some(match value {
+                    CustomProxy::Shadowsocks(config) => {
+                        proto::custom_proxy::ProxyMethod::Shadowsocks(proto::Shadowsocks::from(
+                            config,
+                        ))
+                    }
+                    CustomProxy::Socks5Local(config) => {
+                        proto::custom_proxy::ProxyMethod::Socks5local(proto::Socks5Local::from(
+                            config,
+                        ))
+                    }
+                    CustomProxy::Socks5Remote(config) => {
+                        proto::custom_proxy::ProxyMethod::Socks5remote(proto::Socks5Remote::from(
+                            config,
+                        ))
+                    }
+                }),
+            }
+        }
+    }
+
+    impl From<Shadowsocks> for proto::Shadowsocks {
+        fn from(value: Shadowsocks) -> Self {
+            proto::Shadowsocks {
+                ip: value.endpoint.ip().to_string(),
+                port: value.endpoint.port() as u32,
+                password: value.password,
+                cipher: value.cipher,
+            }
+        }
+    }
+
+    impl From<Socks5Local> for proto::Socks5Local {
+        fn from(value: Socks5Local) -> Self {
+            proto::Socks5Local {
+                remote_ip: value.remote_endpoint.address.ip().to_string(),
+                remote_port: value.remote_endpoint.address.port() as u32,
+                remote_transport_protocol: i32::from(proto::TransportProtocol::from(
+                    value.remote_endpoint.protocol,
+                )),
+                local_port: value.local_port as u32,
+            }
+        }
+    }
+
+    impl From<Socks5Remote> for proto::Socks5Remote {
+        fn from(value: Socks5Remote) -> Self {
+            proto::Socks5Remote {
+                ip: value.endpoint.ip().to_string(),
+                port: value.endpoint.port() as u32,
+                auth: value.auth.map(proto::SocksAuth::from),
+            }
+        }
+    }
+
+    impl From<SocksAuth> for proto::SocksAuth {
+        fn from(value: SocksAuth) -> Self {
+            proto::SocksAuth {
+                username: value.username().to_string(),
+                password: value.password().to_string(),
+            }
+        }
+    }
+
+    impl TryFrom<proto::SocksAuth> for SocksAuth {
+        type Error = FromProtobufTypeError;
+
+        fn try_from(value: proto::SocksAuth) -> Result<Self, Self::Error> {
+            SocksAuth::new(value.username, value.password).map_err(|_| {
+                FromProtobufTypeError::InvalidArgument(
+                    "Failed to parse Socks5 with authentication. \
+                     Make sure the credentials are valid.",
+                )
+            })
+        }
+    }
 }

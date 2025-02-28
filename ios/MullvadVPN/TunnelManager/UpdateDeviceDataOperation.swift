@@ -3,26 +3,27 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 13/05/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
-import class WireGuardKitTypes.PublicKey
+import WireGuardKitTypes
 
-class UpdateDeviceDataOperation: ResultOperation<StoredDeviceData> {
+class UpdateDeviceDataOperation: ResultOperation<StoredDeviceData>, @unchecked Sendable {
     private let interactor: TunnelInteractor
-    private let devicesProxy: REST.DevicesProxy
+    private let devicesProxy: DeviceHandling
 
     private var task: Cancellable?
 
     init(
         dispatchQueue: DispatchQueue,
         interactor: TunnelInteractor,
-        devicesProxy: REST.DevicesProxy
+        devicesProxy: DeviceHandling
     ) {
         self.interactor = interactor
         self.devicesProxy = devicesProxy
@@ -41,7 +42,7 @@ class UpdateDeviceDataOperation: ResultOperation<StoredDeviceData> {
             identifier: deviceData.identifier,
             retryStrategy: .default,
             completion: { [weak self] result in
-                self?.dispatchQueue.async {
+                self?.dispatchQueue.async { [weak self] in
                     self?.didReceiveDeviceResponse(result: result)
                 }
             }

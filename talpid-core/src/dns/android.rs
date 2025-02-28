@@ -1,8 +1,8 @@
-use std::net::IpAddr;
+use crate::dns::ResolvedDnsConfig;
 
 /// Stub error type for DNS errors on Android.
-#[derive(Debug, err_derive::Error)]
-#[error(display = "Unknown Android DNS error")]
+#[derive(Debug, thiserror::Error)]
+#[error("Unknown Android DNS error")]
 pub struct Error;
 
 pub struct DnsMonitor;
@@ -14,7 +14,7 @@ impl super::DnsMonitorT for DnsMonitor {
         Ok(DnsMonitor)
     }
 
-    fn set(&mut self, _interface: &str, _servers: &[IpAddr]) -> Result<(), Self::Error> {
+    fn set(&mut self, _interface: &str, _servers: ResolvedDnsConfig) -> Result<(), Self::Error> {
         Ok(())
     }
 

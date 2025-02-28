@@ -1,15 +1,16 @@
 package net.mullvad.mullvadvpn.applist
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import io.mockk.verifyAll
-import net.mullvad.mullvadvpn.assertLists
-import org.junit.After
-import org.junit.Test
+import net.mullvad.mullvadvpn.lib.common.test.assertLists
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Test
 
 class ApplicationsProviderTest {
     private val mockedPackageManager = mockk<PackageManager>()
@@ -17,13 +18,14 @@ class ApplicationsProviderTest {
     private val testSubject = ApplicationsProvider(mockedPackageManager, selfPackageName)
     private val internet = Manifest.permission.INTERNET
 
-    @After
+    @AfterEach
     fun tearDown() {
         unmockkAll()
     }
 
+    @SuppressLint("UseCheckPermission")
     @Test
-    fun test_get_apps() {
+    fun `fetch all apps should work`() {
         val launchWithInternetPackageName = "launch_with_internet_package_name"
         val launchWithoutInternetPackageName = "launch_without_internet_package_name"
         val nonLaunchWithInternetPackageName = "non_launch_with_internet_package_name"
@@ -39,7 +41,7 @@ class ApplicationsProviderTest {
                 createApplicationInfo(
                     launchWithInternetPackageName,
                     launch = true,
-                    internet = true
+                    internet = true,
                 ),
                 createApplicationInfo(launchWithoutInternetPackageName, launch = true),
                 createApplicationInfo(nonLaunchWithInternetPackageName, internet = true),
@@ -47,10 +49,10 @@ class ApplicationsProviderTest {
                 createApplicationInfo(
                     leanbackLaunchWithInternetPackageName,
                     leanback = true,
-                    internet = true
+                    internet = true,
                 ),
                 createApplicationInfo(leanbackLaunchWithoutInternetPackageName, leanback = true),
-                createApplicationInfo(selfPackageName, internet = true, launch = true)
+                createApplicationInfo(selfPackageName, internet = true, launch = true),
             )
 
         val result = testSubject.getAppsList()
@@ -61,13 +63,13 @@ class ApplicationsProviderTest {
                     nonLaunchWithInternetPackageName,
                     0,
                     nonLaunchWithInternetPackageName,
-                    true
+                    true,
                 ),
                 AppData(
                     leanbackLaunchWithInternetPackageName,
                     0,
-                    leanbackLaunchWithInternetPackageName
-                )
+                    leanbackLaunchWithInternetPackageName,
+                ),
             )
 
         assertLists(expected, result)
@@ -75,6 +77,7 @@ class ApplicationsProviderTest {
         verifyAll {
             mockedPackageManager.getInstalledApplications(PackageManager.GET_META_DATA)
 
+            // Ensure checkPermission was invoked on all packages
             listOf(
                     launchWithInternetPackageName,
                     launchWithoutInternetPackageName,
@@ -82,7 +85,7 @@ class ApplicationsProviderTest {
                     nonLaunchWithoutInternetPackageName,
                     leanbackLaunchWithInternetPackageName,
                     leanbackLaunchWithoutInternetPackageName,
-                    selfPackageName
+                    selfPackageName,
                 )
                 .forEach { packageName ->
                     mockedPackageManager.checkPermission(internet, packageName)
@@ -91,16 +94,13 @@ class ApplicationsProviderTest {
             listOf(
                     launchWithInternetPackageName,
                     nonLaunchWithInternetPackageName,
-                    leanbackLaunchWithInternetPackageName
+                    leanbackLaunchWithInternetPackageName,
                 )
                 .forEach { packageName ->
                     mockedPackageManager.getLaunchIntentForPackage(packageName)
                 }
 
-            listOf(
-                    nonLaunchWithInternetPackageName,
-                    leanbackLaunchWithInternetPackageName,
-                )
+            listOf(nonLaunchWithInternetPackageName, leanbackLaunchWithInternetPackageName)
                 .forEach { packageName ->
                     mockedPackageManager.getLeanbackLaunchIntentForPackage(packageName)
                 }
@@ -112,7 +112,7 @@ class ApplicationsProviderTest {
         launch: Boolean = false,
         leanback: Boolean = false,
         internet: Boolean = false,
-        systemApp: Boolean = false
+        systemApp: Boolean = false,
     ): ApplicationInfo {
         val mockApplicationInfo = mockk<ApplicationInfo>()
 

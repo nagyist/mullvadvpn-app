@@ -3,16 +3,17 @@
 //  PacketTunnel
 //
 //  Created by pronebird on 20/04/2023.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
-import class WireGuardKitTypes.PrivateKey
-import class WireGuardKitTypes.PublicKey
+import PacketTunnelCore
+import WireGuardKitTypes
 
 /**
  An operation that is responsible for performing account and device diagnostics and key rotation from within packet
@@ -26,7 +27,7 @@ import class WireGuardKitTypes.PublicKey
  Other times, packet tunnel runs this operation with `rotateImmediatelyOnKeyMismatch` set to `false`, in which
  case it respects the 24 hour interval between key rotation retry attempts.
  */
-final class DeviceCheckOperation: ResultOperation<DeviceCheck> {
+final class DeviceCheckOperation: ResultOperation<DeviceCheck>, @unchecked Sendable {
     private let logger = Logger(label: "DeviceCheckOperation")
 
     private let remoteService: DeviceCheckRemoteServiceProtocol
@@ -40,7 +41,7 @@ final class DeviceCheckOperation: ResultOperation<DeviceCheck> {
         remoteSevice: DeviceCheckRemoteServiceProtocol,
         deviceStateAccessor: DeviceStateAccessorProtocol,
         rotateImmediatelyOnKeyMismatch: Bool,
-        completionHandler: @escaping CompletionHandler
+        completionHandler: CompletionHandler? = nil
     ) {
         self.remoteService = remoteSevice
         self.deviceStateAccessor = deviceStateAccessor
@@ -126,8 +127,8 @@ final class DeviceCheckOperation: ResultOperation<DeviceCheck> {
         accountNumber: String, deviceIdentifier: String,
         completion: @escaping (Result<Account, Error>, Result<Device, Error>) -> Void
     ) {
-        var accountResult: Result<Account, Error> = .failure(OperationError.cancelled)
-        var deviceResult: Result<Device, Error> = .failure(OperationError.cancelled)
+        nonisolated(unsafe) var accountResult: Result<Account, Error> = .failure(OperationError.cancelled)
+        nonisolated(unsafe) var deviceResult: Result<Device, Error> = .failure(OperationError.cancelled)
 
         let dispatchGroup = DispatchGroup()
 
@@ -277,14 +278,14 @@ final class DeviceCheckOperation: ResultOperation<DeviceCheck> {
 }
 
 /// An error used internally by `DeviceCheckOperation`.
-private enum DeviceCheckError: LocalizedError, Equatable {
+public enum DeviceCheckError: LocalizedError, Equatable {
     /// Device is no longer logged in.
     case invalidDeviceState
 
     /// Main process has likely performed key rotation at the same time when packet tunnel was doing so.
     case keyRotationRace
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidDeviceState:
             return "Cannot complete device check because device is no longer logged in."

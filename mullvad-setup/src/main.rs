@@ -1,21 +1,16 @@
 use clap::Parser;
-use mullvad_api::{self, proxy::ApiConnectionMode, DEVICE_NOT_FOUND};
+use mullvad_api::{proxy::ApiConnectionMode, ApiEndpoint, DEVICE_NOT_FOUND};
 use mullvad_management_interface::MullvadProxyClient;
-use mullvad_types::version::ParsedAppVersion;
-use std::{path::PathBuf, process, str::FromStr, time::Duration};
-use talpid_core::{
-    firewall::{self, Firewall},
-    future_retry::{constant_interval, retry_future_n},
-};
+use mullvad_version::Version;
+use std::{path::PathBuf, process, str::FromStr, sync::LazyLock, time::Duration};
+use talpid_core::firewall::{self, Firewall};
+use talpid_future::retry::{retry_future, ConstantInterval};
 use talpid_types::ErrorExt;
 
-lazy_static::lazy_static! {
-    static ref APP_VERSION: ParsedAppVersion = ParsedAppVersion::from_str(mullvad_version::VERSION).unwrap();
-    static ref IS_DEV_BUILD: bool = APP_VERSION.is_dev();
-}
+static APP_VERSION: LazyLock<Version> =
+    LazyLock::new(|| Version::from_str(mullvad_version::VERSION).unwrap());
 
-const KEY_RETRY_INTERVAL: Duration = Duration::ZERO;
-const KEY_RETRY_MAX_RETRIES: usize = 4;
+const DEVICE_REMOVAL_STRATEGY: ConstantInterval = ConstantInterval::new(Duration::ZERO, Some(5));
 
 #[repr(i32)]
 enum ExitStatus {
@@ -34,40 +29,39 @@ impl From<Error> for ExitStatus {
     }
 }
 
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to connect to RPC client")]
-    RpcConnectionError(#[error(source)] mullvad_management_interface::Error),
+    #[error("Failed to connect to RPC client")]
+    RpcConnectionError(#[source] mullvad_management_interface::Error),
 
-    #[error(display = "RPC call failed")]
-    DaemonRpcError(#[error(source)] mullvad_management_interface::Error),
+    #[error("RPC call failed")]
+    DaemonRpcError(#[source] mullvad_management_interface::Error),
 
-    #[error(display = "This command cannot be run if the daemon is active")]
+    #[error("This command cannot be run if the daemon is active")]
     DaemonIsRunning,
 
-    #[error(display = "Firewall error")]
-    FirewallError(#[error(source)] firewall::Error),
+    #[error("Firewall error")]
+    FirewallError(#[source] firewall::Error),
 
-    #[error(display = "Failed to initialize mullvad RPC runtime")]
-    RpcInitializationError(#[error(source)] mullvad_api::Error),
+    #[error("Failed to initialize mullvad RPC runtime")]
+    RpcInitializationError(#[source] mullvad_api::Error),
 
-    #[error(display = "Failed to remove device from account")]
-    RemoveDeviceError(#[error(source)] mullvad_api::rest::Error),
+    #[error("Failed to remove device from account")]
+    RemoveDeviceError(#[source] mullvad_api::rest::Error),
 
-    #[error(display = "Failed to obtain settings directory path")]
-    SettingsPathError(#[error(source)] mullvad_paths::Error),
+    #[error("Failed to obtain settings directory path")]
+    SettingsPathError(#[source] mullvad_paths::Error),
 
-    #[error(display = "Failed to obtain cache directory path")]
-    CachePathError(#[error(source)] mullvad_paths::Error),
+    #[error("Failed to obtain cache directory path")]
+    CachePathError(#[source] mullvad_paths::Error),
 
-    #[error(display = "Failed to read the device cache")]
-    ReadDeviceCacheError(#[error(source)] mullvad_daemon::device::Error),
+    #[error("Failed to read the device cache")]
+    ReadDeviceCacheError(#[source] mullvad_daemon::device::Error),
 
-    #[error(display = "Failed to write the device cache")]
-    WriteDeviceCacheError(#[error(source)] mullvad_daemon::device::Error),
+    #[error("Failed to write the device cache")]
+    WriteDeviceCacheError(#[source] mullvad_daemon::device::Error),
 
-    #[error(display = "Cannot parse the version string")]
+    #[error("Cannot parse the version string")]
     ParseVersionStringError,
 }
 
@@ -119,9 +113,9 @@ async fn main() {
 
 fn is_older_version(old_version: &str) -> Result<ExitStatus, Error> {
     let parsed_version =
-        ParsedAppVersion::from_str(old_version).map_err(|_| Error::ParseVersionStringError)?;
+        Version::from_str(old_version).map_err(|_| Error::ParseVersionStringError)?;
 
-    Ok(if parsed_version < *APP_VERSION {
+    Ok(if *APP_VERSION > parsed_version {
         ExitStatus::Ok
     } else {
         ExitStatus::VersionNotOlder
@@ -157,29 +151,23 @@ async fn remove_device() -> Result<(), Error> {
         .await
         .map_err(Error::ReadDeviceCacheError)?;
     if let Some(device) = state.into_device() {
-        let api_runtime = mullvad_api::Runtime::with_cache(&cache_path, false)
-            .await
-            .map_err(Error::RpcInitializationError)?;
+        let api_runtime =
+            mullvad_api::Runtime::with_cache(&ApiEndpoint::from_env_vars(), &cache_path, false)
+                .await
+                .map_err(Error::RpcInitializationError)?;
 
+        let connection_mode = ApiConnectionMode::try_from_cache(&cache_path).await;
         let proxy = mullvad_api::DevicesProxy::new(
-            api_runtime
-                .mullvad_rest_handle(
-                    ApiConnectionMode::try_from_cache(&cache_path)
-                        .await
-                        .into_repeat(),
-                    |_| async { true },
-                )
-                .await,
+            api_runtime.mullvad_rest_handle(connection_mode.into_provider()),
         );
 
-        let device_removal = retry_future_n(
-            move || proxy.remove(device.account_token.clone(), device.device.id.clone()),
+        let device_removal = retry_future(
+            move || proxy.remove(device.account_number.clone(), device.device.id.clone()),
             move |result| match result {
                 Err(error) => error.is_network_error(),
                 _ => false,
             },
-            constant_interval(KEY_RETRY_INTERVAL),
-            KEY_RETRY_MAX_RETRIES,
+            DEVICE_REMOVAL_STRATEGY,
         )
         .await;
 

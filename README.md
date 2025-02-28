@@ -8,16 +8,16 @@ For more information about the service, please visit our website,
 
 This repository contains all the source code for the
 desktop and mobile versions of the app. For desktop this includes the system service/daemon
-([`mullvad-daemon`](mullvad-daemon/)), a graphical user interface ([GUI](gui/)) and a
-command line interface ([CLI](mullvad-cli/)). The Android app uses the same backing
-system service for the tunnel and security but has a dedicated frontend in [android/](android/).
-iOS consists of a completely standalone implementation that resides in [ios/](ios/).
+([`mullvad-daemon`](mullvad-daemon/)), a graphical user interface ([GUI](desktop/)) and a command
+line interface ([CLI](mullvad-cli/)). The Android app uses the same backing system service for the
+tunnel and security but has a dedicated frontend in [android/](android/). iOS consists of a
+completely standalone implementation that resides in [ios/](ios/).
 
 ## Releases
 
 There are built and signed releases for macOS, Windows, Linux and Android available on
 [our website](https://mullvad.net/download/) and on
-[Github](https://github.com/mullvad/mullvadvpn-app/releases/). The Android app is also available
+[GitHub](https://github.com/mullvad/mullvadvpn-app/releases/). The Android app is also available
 on [Google Play] and [F-Droid] and the iOS version on [App Store].
 
 [Google Play]: https://play.google.com/store/apps/details?id=net.mullvad.mullvadvpn
@@ -39,9 +39,9 @@ security.
 | macOS       | The three latest major releases |
 | Linux (Ubuntu)| The two latest LTS releases and the latest non-LTS releases |
 | Linux (Fedora) | The versions that are not yet [EOL](https://fedoraproject.org/wiki/End_of_life) |
-| Linux (Debian) | 11 and newer    |
+| Linux (Debian) | 12 and newer    |
 | Android     | 8 and newer        |
-| iOS         | 13 and newer       |
+| iOS         | 15.0 and newer     |
 
 On Linux we test using the Gnome desktop environment. The app should, and probably does work
 in other DEs, but we don't regularly test those.
@@ -55,17 +55,21 @@ the current state of the latest code in git, not necessarily any existing releas
 |-------------------------------|:-------:|:-----:|:-----:|:-------:|:---:|
 | OpenVPN                       |    ✓    |   ✓   |   ✓   |         |     |
 | WireGuard                     |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
-| Quantum-resistant tunnels     |    ✓    |   ✓   |   ✓   |    ✓    |     |
-| WireGuard multihop            |    ✓    |   ✓   |   ✓   |         |     |
-| WireGuard over TCP            |    ✓    |   ✓   |   ✓   |    ✓    |     |
+| Quantum-resistant tunnels     |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
+| [DAITA]                       |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
+| WireGuard multihop            |    ✓    |   ✓   |   ✓   |         |  ✓  |
+| WireGuard over TCP            |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
+| WireGuard over Shadowsocks    |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
 | OpenVPN over Shadowsocks      |    ✓    |   ✓   |   ✓   |         |     |
-| Split tunneling               |    ✓    |   ✓   |       |    ✓    |     |
+| Split tunneling               |    ✓    |   ✓   |   ✓   |    ✓    |     |
 | Custom DNS server             |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
 | Content blockers (Ads etc)    |    ✓    |   ✓   |   ✓   |    ✓    |  ✓  |
 | Optional local network access |    ✓    |   ✓   |   ✓   |    ✓    |  ✓\* |
 | [Externally audited](./audits)|    ✓    |   ✓   |   ✓   |    ✓    |  ✓ |
 
 \* The local network is always accessible on iOS with the current implementation
+
+[DAITA]: https://mullvad.net/en/blog/introducing-defense-against-ai-guided-traffic-analysis-daita
 
 ## Security and anonymity
 
@@ -87,6 +91,12 @@ git clone https://github.com/mullvad/mullvadvpn-app.git
 cd mullvadvpn-app
 git submodule update --init
 ```
+
+On Android, Windows, Linux and macOS you also want to checkout the wireguard-go submodule:
+```bash
+git submodule update --init wireguard-go-rs/libwg/wireguard-go
+```
+Further details on why this is necessary can be found in the [wireguard-go-rs crate](./wireguard-go-rs/README.md).
 
 We sign every commit on the `main` branch as well as our release tags. If you would like to verify
 your checkout, you can find our developer keys on [Mullvad's Open Source page].
@@ -126,11 +136,19 @@ See [this](Release.md) for instructions on how to make a new release.
     * Set to `"pass"` to add logging to rules allowing packets.
     * Set to `"drop"` to add logging to rules blocking packets.
 
-* `TALPID_FIREWALL_DONT_SET_SRC_VALID_MARK` - Forces the daemon to not set `src_valid_mark` config
-    on Linux. The kernel config option is set because otherwise strict reverse path filtering may
-    prevent relay traffic from reaching the daemon. If `rp_filter` is set to `1` on the interface
+* `TALPID_FIREWALL_DONT_SET_SRC_VALID_MARK` - Set this variable to `1` to stop the daemon from
+    setting the `net.ipv4.conf.all.src_valid_mark` kernel parameter to `1` on Linux when a tunnel
+    is established.
+    The kernel config parameter is set by default, because otherwise strict reverse path filtering
+    may prevent relay traffic from reaching the daemon. If `rp_filter` is set to `1` on the interface
     that will be receiving relay traffic, and `src_valid_mark` is not set to `1`, the daemon will
     not be able to receive relay traffic.
+
+* `TALPID_FIREWALL_DONT_SET_ARP_IGNORE` - Set this variable to `1` to stop the daemon from
+    setting the `net.ipv4.conf.all.arp_ignore` kernel parameter to `2` on Linux when a tunnel
+    is established.
+    The kernel config parameter is set by default, because otherwise an attacker who can send ARP
+    requests to the device running Mullvad can figure out the in-tunnel IP.
 
 * `TALPID_DNS_MODULE` - Allows changing the method that will be used for DNS configuration.
   By default this is automatically detected, but you can set it to one of the options below to
@@ -158,6 +176,13 @@ See [this](Release.md) for instructions on how to make a new release.
 * `MULLVAD_MANAGEMENT_SOCKET_GROUP` - On Linux and macOS, this restricts access to the management
   interface UDS socket to users in the specified group. This means that only users in that group can
   use the CLI and GUI. By default, everyone has access to the socket.
+
+* `MULLVAD_BACKTRACE_ON_FAULT` - When enabled, if the daemon encounters a fault (e.g. `SIGSEGV`),
+  it will log a backtrace to stdout, and to `daemon.log`. By default, this is disabled in
+  release-builds and enabled in debug-builds. Set variable to `1` or `0` to explicitly enable or
+  disable this feature. Logging the backtrace cause heap allocation. Allocation is not signal safe,
+  but here it runs in the signal handler. This in technically undefined behavior and therefore
+  disabled by default. This usually works, but enable at your own risk.
 
 ### Development builds only
 
@@ -203,10 +228,10 @@ sudo systemctl restart mullvad-daemon
 
 #### macOS
 
-Use `launchctl`:
+Use `plutil`:
 
 ```bash
-sudo launchctl setenv TALPID_DISABLE_OFFLINE_MONITOR 1
+sudo plutil -replace EnvironmentVariables -json '{"TALPID_DISABLE_OFFLINE_MONITOR": "1"}' /Library/LaunchDaemons/net.mullvad.daemon.plist
 ```
 
 For the change to take effect, restart the daemon:
@@ -216,15 +241,15 @@ launchctl unload -w /Library/LaunchDaemons/net.mullvad.daemon.plist
 launchctl load -w /Library/LaunchDaemons/net.mullvad.daemon.plist
 ```
 
-## Environment variables used by the GUI frontend
+## Environment variables used by the desktop frontend
 
 * `MULLVAD_PATH` - Allows changing the path to the folder with the `mullvad-problem-report` tool
    when running in development mode. Defaults to: `<repo>/target/debug/`.
-* `MULLVAD_DISABLE_UPDATE_NOTIFICATION` - If set to `1`, GUI notification will be disabled when
+* `MULLVAD_DISABLE_UPDATE_NOTIFICATION` - If set to `1`, notification will be disabled when
    an update is available.
 
 
-## Command line tools for Electron GUI app development
+## Command line tools for Electron app development
 
 - `$ npm run develop` - develop app with live-reload enabled
 - `$ npm run lint` - lint code
@@ -248,8 +273,8 @@ If you're using GNOME, try installing one of these GNOME Shell extensions:
 
 ## Repository structure
 
-### Electron GUI app and electron-builder packaging assets
-- **gui/**
+### Electron app and electron-builder packaging assets
+- **desktop/packages/mullvad-vpn/**
   - **assets/** - Graphical assets and stylesheets
   - **src/**
     - **main/**
@@ -258,7 +283,6 @@ If you're using GNOME, try installing one of these GNOME Shell extensions:
       - **app.tsx** - Entry file for the renderer process
       - **routes.tsx** - Routes configurator
       - **transitions.ts** - Transition rules between views
-    - **config.json** - App color definitions and URLs to external resources
   - **tasks/** - Gulp tasks used to build app and watch for changes during development
     - **distribution.js** - Configuration for `electron-builder`
   - **test/** - Electron GUI tests
@@ -332,7 +356,7 @@ The settings directory can be changed by setting the `MULLVAD_SETTINGS_DIR` envi
 | Linux | `/etc/mullvad-vpn/` |
 | macOS | `/etc/mullvad-vpn/` |
 | Windows | `%LOCALAPPDATA%\Mullvad VPN\` |
-| Android | `/data/data/net.mullvad.mullvadvpn/` |
+| Android | [`getFilesDir()`](https://developer.android.com/reference/android/content/Context#getFilesDir()) |
 
 #### Logs
 
@@ -343,7 +367,7 @@ The log directory can be changed by setting the `MULLVAD_LOG_DIR` environment va
 | Linux | `/var/log/mullvad-vpn/` + systemd |
 | macOS | `/var/log/mullvad-vpn/` |
 | Windows | `C:\ProgramData\Mullvad VPN\` |
-| Android | `/data/data/net.mullvad.mullvadvpn/` |
+| Android | [`getFilesDir()`](https://developer.android.com/reference/android/content/Context#getFilesDir()) |
 
 #### Cache
 
@@ -354,7 +378,7 @@ The cache directory can be changed by setting the `MULLVAD_CACHE_DIR` environmen
 | Linux | `/var/cache/mullvad-vpn/` |
 | macOS | `/Library/Caches/mullvad-vpn/` |
 | Windows | `C:\ProgramData\Mullvad VPN\cache` |
-| Android | `/data/data/net.mullvad.mullvadvpn/cache` |
+| Android | [`getCacheDir()`](https://developer.android.com/reference/android/content/Context#getCacheDir())  |
 
 #### RPC address file
 
@@ -366,12 +390,12 @@ environment variable.
 | Linux | `/var/run/mullvad-vpn` |
 | macOS | `/var/run/mullvad-vpn` |
 | Windows | `//./pipe/Mullvad VPN` |
-| Android | `/data/data/net.mullvad.mullvadvpn/rpc-socket` |
+| Android | [`getNoBackupFilesDir()`](https://developer.android.com/reference/android/content/ContextWrapper#getNoBackupFilesDir()) |
 
-### GUI
+### Desktop Electron app
 
-The GUI has a specific settings file that is configured for each user. The path is set in the
-`gui/packages/desktop/main/gui-settings.ts` file.
+The desktop Electron app has a specific settings file that is configured for each user. The path is
+set in the `desktop/packages/mullvad-vpn/src/main/gui-settings.ts` file.
 
 | Platform | Path |
 |----------|------|
@@ -387,7 +411,7 @@ See [graphics README](graphics/README.md) for information about icons.
 ## Locales and translations
 
 Instructions for how to handle locales and translations are found
-[here](./gui/locales/README.md).
+[here](./desktop/packages/mullvad-vpn/locales/README.md).
 
 For instructions specific to the Android app, see [here](./android/README.md).
 
@@ -398,7 +422,7 @@ more about them in the [audits readme](./audits/README.md).
 
 # License
 
-Copyright (C) 2022  Mullvad VPN AB
+Copyright (C) 2025  Mullvad VPN AB
 
 This program is free software: you can redistribute it and/or modify it under the terms of the
 GNU General Public License as published by the Free Software Foundation, either version 3 of

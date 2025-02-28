@@ -6,18 +6,15 @@ on:
       - .github/workflows/translations-converter.yml
       - android/translations-converter/**
   workflow_dispatch:
+
+permissions: {}
+
 jobs:
   check-translations:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1.0.6
-        with:
-          toolchain: stable
-          default: true
+        uses: actions/checkout@v4
 
       - name: Build and test translations converter tool
         working-directory: android/translations-converter

@@ -1,14 +1,16 @@
-use futures::Stream;
-use hyper::client::connect::Connected;
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
-    fmt, io,
+    io,
     net::SocketAddr,
     path::Path,
     pin::Pin,
     task::{self, Poll},
 };
-use talpid_types::{net::openvpn::ShadowsocksProxySettings, ErrorExt};
+use talpid_types::{
+    net::{proxy, Endpoint, TransportProtocol},
+    ErrorExt,
+};
 use tokio::{
     fs,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
@@ -16,7 +18,42 @@ use tokio::{
 
 const CURRENT_CONFIG_FILENAME: &str = "api-endpoint.json";
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub trait ConnectionModeProvider: Send {
+    /// Initial connection mode
+    fn initial(&self) -> ApiConnectionMode;
+
+    /// Request a new connection mode from the provider
+    fn rotate(&self) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Receive changes to the connection mode, announced by the provider
+    fn receive(&mut self) -> impl std::future::Future<Output = Option<ApiConnectionMode>> + Send;
+}
+
+pub struct StaticConnectionModeProvider {
+    mode: ApiConnectionMode,
+}
+
+impl StaticConnectionModeProvider {
+    pub fn new(mode: ApiConnectionMode) -> Self {
+        Self { mode }
+    }
+}
+
+impl ConnectionModeProvider for StaticConnectionModeProvider {
+    fn initial(&self) -> ApiConnectionMode {
+        self.mode.clone()
+    }
+
+    fn rotate(&self) -> impl std::future::Future<Output = ()> + Send {
+        futures::future::ready(())
+    }
+
+    fn receive(&mut self) -> impl std::future::Future<Output = Option<ApiConnectionMode>> + Send {
+        futures::future::pending()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum ApiConnectionMode {
     /// Connect directly to the target.
     Direct,
@@ -24,26 +61,46 @@ pub enum ApiConnectionMode {
     Proxied(ProxyConfig),
 }
 
-impl fmt::Display for ApiConnectionMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub enum ProxyConfig {
+    Shadowsocks(proxy::Shadowsocks),
+    Socks5Local(proxy::Socks5Local),
+    Socks5Remote(proxy::Socks5Remote),
+    EncryptedDnsProxy(mullvad_encrypted_dns_proxy::config::ProxyConfig),
+}
+
+impl ProxyConfig {
+    /// Returns the remote endpoint describing how to reach the proxy.
+    fn get_endpoint(&self) -> Endpoint {
         match self {
-            ApiConnectionMode::Direct => write!(f, "unproxied"),
-            ApiConnectionMode::Proxied(settings) => settings.fmt(f),
+            ProxyConfig::Shadowsocks(shadowsocks) => {
+                Endpoint::from_socket_address(shadowsocks.endpoint, TransportProtocol::Tcp)
+            }
+            ProxyConfig::Socks5Local(local) => local.remote_endpoint,
+            ProxyConfig::Socks5Remote(remote) => {
+                Endpoint::from_socket_address(remote.endpoint, TransportProtocol::Tcp)
+            }
+            ProxyConfig::EncryptedDnsProxy(proxy) => {
+                let addr = SocketAddr::V4(proxy.addr);
+                Endpoint::from_socket_address(addr, TransportProtocol::Tcp)
+            }
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum ProxyConfig {
-    Shadowsocks(ShadowsocksProxySettings),
+impl From<proxy::CustomProxy> for ProxyConfig {
+    fn from(value: proxy::CustomProxy) -> Self {
+        match value {
+            proxy::CustomProxy::Shadowsocks(shadowsocks) => ProxyConfig::Shadowsocks(shadowsocks),
+            proxy::CustomProxy::Socks5Local(socks) => ProxyConfig::Socks5Local(socks),
+            proxy::CustomProxy::Socks5Remote(socks) => ProxyConfig::Socks5Remote(socks),
+        }
+    }
 }
 
-impl fmt::Display for ProxyConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
-            // TODO: Do not hardcode TCP
-            ProxyConfig::Shadowsocks(ss) => write!(f, "Shadowsocks {}/TCP", ss.peer),
-        }
+impl From<mullvad_encrypted_dns_proxy::config::ProxyConfig> for ProxyConfig {
+    fn from(value: mullvad_encrypted_dns_proxy::config::ProxyConfig) -> Self {
+        ProxyConfig::EncryptedDnsProxy(value)
     }
 }
 
@@ -107,11 +164,12 @@ impl ApiConnectionMode {
         }
     }
 
-    /// Returns the remote address, or `None` for `ApiConnectionMode::Direct`.
-    pub fn get_endpoint(&self) -> Option<SocketAddr> {
+    /// Returns the remote endpoint required to reach the API, or `None` for
+    /// `ApiConnectionMode::Direct`.
+    pub fn get_endpoint(&self) -> Option<Endpoint> {
         match self {
-            ApiConnectionMode::Proxied(ProxyConfig::Shadowsocks(ss)) => Some(ss.peer),
             ApiConnectionMode::Direct => None,
+            ApiConnectionMode::Proxied(proxy_config) => Some(proxy_config.get_endpoint()),
         }
     }
 
@@ -119,14 +177,12 @@ impl ApiConnectionMode {
         *self != ApiConnectionMode::Direct
     }
 
-    /// Convenience function that returns a stream that repeats
-    /// this config forever.
-    pub fn into_repeat(self) -> impl Stream<Item = ApiConnectionMode> {
-        futures::stream::repeat(self)
+    pub fn into_provider(self) -> StaticConnectionModeProvider {
+        StaticConnectionModeProvider::new(self)
     }
 }
 
-/// Implements `hyper::client::connect::Connection` by wrapping a type.
+/// Implements `Connection` by wrapping a type.
 pub struct ConnectionDecorator<T: AsyncRead + AsyncWrite>(pub T);
 
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for ConnectionDecorator<T> {
@@ -157,26 +213,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ConnectionDecorator<T> {
     }
 }
 
-impl<T: AsyncRead + AsyncWrite> hyper::client::connect::Connection for ConnectionDecorator<T> {
+impl<T: AsyncRead + AsyncWrite> Connection for ConnectionDecorator<T> {
     fn connected(&self) -> Connected {
         Connected::new()
     }
 }
 
-trait Connection: AsyncRead + AsyncWrite + Unpin + hyper::client::connect::Connection + Send {}
+trait ConnectionMullvad: AsyncRead + AsyncWrite + Unpin + Connection + Send {}
 
-impl<T: AsyncRead + AsyncWrite + Unpin + hyper::client::connect::Connection + Send> Connection
-    for T
-{
-}
+impl<T: AsyncRead + AsyncWrite + Unpin + Connection + Send> ConnectionMullvad for T {}
 
 /// Stream that represents a Mullvad API connection
-pub struct ApiConnection(Box<dyn Connection>);
+pub struct ApiConnection(Box<dyn ConnectionMullvad>);
 
 impl ApiConnection {
-    pub fn new<
-        T: AsyncRead + AsyncWrite + Unpin + hyper::client::connect::Connection + Send + 'static,
-    >(
+    pub fn new<T: AsyncRead + AsyncWrite + Unpin + Connection + Send + 'static>(
         conn: Box<T>,
     ) -> Self {
         Self(conn)
@@ -211,7 +262,7 @@ impl AsyncWrite for ApiConnection {
     }
 }
 
-impl hyper::client::connect::Connection for ApiConnection {
+impl Connection for ApiConnection {
     fn connected(&self) -> Connected {
         self.0.connected()
     }

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by Jon Petersson on 2023-05-05.
-//  Copyright © 2023 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -29,7 +29,7 @@ class SettingsInputCell: SelectableSettingsCell {
         toolbarDoneButton = UIBarButtonItem(
             title: NSLocalizedString(
                 "INPUT_CELL_TOOLBAR_BUTTON_DONE",
-                tableName: "Preferences",
+                tableName: "VPNSettings",
                 value: "Done",
                 comment: ""
             ),
@@ -83,7 +83,7 @@ class SettingsInputCell: SelectableSettingsCell {
         textField.delegate = self
         textField.keyboardType = .numberPad
         textField.returnKeyType = .done
-        textField.textMargins = UIMetrics.settingsInputCellTextFieldLayoutMargins
+        textField.textMargins = UIMetrics.SettingsCell.inputCellTextFieldLayoutMargins
         textField.addTarget(self, action: #selector(textFieldDidChange), for: .editingChanged)
 
         UITextField.SearchTextFieldAppearance.inactive.apply(to: textField)

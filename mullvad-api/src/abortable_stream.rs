@@ -1,8 +1,8 @@
 //! Wrapper around a stream to make it abortable. This allows in-flight requests to be cancelled
 //! immediately instead of after the socket times out.
 
-use futures::channel::oneshot;
-use hyper::client::connect::{Connected, Connection};
+use futures::{channel::oneshot, future::Fuse, FutureExt};
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use std::{
     future::Future,
     io,
@@ -12,8 +12,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-#[derive(err_derive::Error, Debug)]
-#[error(display = "Stream is closed")]
+#[derive(thiserror::Error, Debug)]
+#[error("Stream is closed")]
 pub struct Aborted(());
 
 #[derive(Clone, Debug)]
@@ -41,7 +41,7 @@ impl AbortableStreamHandle {
 
 pub struct AbortableStream<S: Unpin> {
     stream: S,
-    shutdown_rx: oneshot::Receiver<()>,
+    shutdown_rx: Fuse<oneshot::Receiver<()>>,
 }
 
 impl<S> AbortableStream<S>
@@ -56,7 +56,7 @@ where
         (
             Self {
                 stream,
-                shutdown_rx: rx,
+                shutdown_rx: rx.fuse(),
             },
             stream_handle,
         )

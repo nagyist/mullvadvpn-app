@@ -2,18 +2,19 @@
 
 use crate::rest;
 
-use hyper::{header, Method, StatusCode};
+use hyper::{header, StatusCode};
 use mullvad_types::{location, relay_list};
 use talpid_types::net::wireguard;
 
 use std::{
     collections::BTreeMap,
     future::Future,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops::RangeInclusive,
     time::Duration,
 };
 
-/// Fetches relay list from https://api.mullvad.net/app/v1/relays
+/// Fetches relay list from <https://api.mullvad.net/app/v1/relays>
 #[derive(Clone)]
 pub struct RelayListProxy {
     handle: rest::MullvadRestHandle,
@@ -31,24 +32,22 @@ impl RelayListProxy {
     pub fn relay_list(
         &self,
         etag: Option<String>,
-    ) -> impl Future<Output = Result<Option<relay_list::RelayList>, rest::Error>> {
+    ) -> impl Future<Output = Result<Option<relay_list::RelayList>, rest::Error>> + use<> {
         let service = self.handle.service.clone();
-        let request = self.handle.factory.request("app/v1/relays", Method::GET);
+        let request = self.handle.factory.get("app/v1/relays");
 
         async move {
-            let mut request = request?;
-            request.set_timeout(RELAY_LIST_TIMEOUT);
+            let mut request = request?
+                .timeout(RELAY_LIST_TIMEOUT)
+                .expected_status(&[StatusCode::NOT_MODIFIED, StatusCode::OK]);
 
             if let Some(ref tag) = etag {
-                request.add_header(header::IF_NONE_MATCH, tag)?;
+                request = request.header(header::IF_NONE_MATCH, tag)?;
             }
 
             let response = service.request(request).await?;
             if etag.is_some() && response.status() == StatusCode::NOT_MODIFIED {
                 return Ok(None);
-            }
-            if response.status() != StatusCode::OK {
-                return rest::handle_error_response(response).await;
             }
 
             let etag = response
@@ -62,11 +61,8 @@ impl RelayListProxy {
                     }
                 });
 
-            Ok(Some(
-                rest::deserialize_body::<ServerRelayList>(response)
-                    .await?
-                    .into_relay_list(etag),
-            ))
+            let relay_list: ServerRelayList = response.deserialize().await?;
+            Ok(Some(relay_list.into_relay_list(etag)))
         }
     }
 }
@@ -158,13 +154,15 @@ fn into_mullvad_relay(
         hostname: relay.hostname,
         ipv4_addr_in: relay.ipv4_addr_in,
         ipv6_addr_in: relay.ipv6_addr_in,
+        overridden_ipv4: false,
+        overridden_ipv6: false,
         include_in_country: relay.include_in_country,
         active: relay.active,
         owned: relay.owned,
         provider: relay.provider,
         weight: relay.weight,
         endpoint_data,
-        location: Some(location),
+        location,
     }
 }
 
@@ -249,18 +247,35 @@ struct Wireguard {
     port_ranges: Vec<(u16, u16)>,
     ipv4_gateway: Ipv4Addr,
     ipv6_gateway: Ipv6Addr,
+    /// Shadowsocks port ranges available on all WireGuard relays
+    #[serde(default)]
+    shadowsocks_port_ranges: Vec<(u16, u16)>,
     relays: Vec<WireGuardRelay>,
 }
 
 impl From<&Wireguard> for relay_list::WireguardEndpointData {
     fn from(wg: &Wireguard) -> Self {
         Self {
-            port_ranges: wg.port_ranges.clone(),
+            port_ranges: inclusive_range_from_pair_set(wg.port_ranges.clone()).collect(),
             ipv4_gateway: wg.ipv4_gateway,
             ipv6_gateway: wg.ipv6_gateway,
+            shadowsocks_port_ranges: inclusive_range_from_pair_set(
+                wg.shadowsocks_port_ranges.clone(),
+            )
+            .collect(),
             udp2tcp_ports: vec![],
         }
     }
+}
+
+fn inclusive_range_from_pair_set<T>(
+    set: impl IntoIterator<Item = (T, T)>,
+) -> impl Iterator<Item = RangeInclusive<T>> {
+    set.into_iter().map(inclusive_range_from_pair)
+}
+
+fn inclusive_range_from_pair<T>(pair: (T, T)) -> RangeInclusive<T> {
+    RangeInclusive::new(pair.0, pair.1)
 }
 
 impl Wireguard {
@@ -308,6 +323,10 @@ struct WireGuardRelay {
     #[serde(flatten)]
     relay: Relay,
     public_key: wireguard::PublicKey,
+    #[serde(default)]
+    daita: bool,
+    #[serde(default)]
+    shadowsocks_extra_addr_in: Vec<IpAddr>,
 }
 
 impl WireGuardRelay {
@@ -317,6 +336,8 @@ impl WireGuardRelay {
             location,
             relay_list::RelayEndpointData::Wireguard(relay_list::WireguardRelayEndpointData {
                 public_key: self.public_key,
+                daita: self.daita,
+                shadowsocks_extra_addr_in: self.shadowsocks_extra_addr_in,
             }),
         )
     }

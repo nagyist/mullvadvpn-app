@@ -3,17 +3,17 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 20/05/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadLogging
 import MullvadREST
+import MullvadSettings
 import MullvadTypes
 import Operations
-import RelayCache
 import UIKit
 
-class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHandler {
+class SceneDelegate: UIResponder, UIWindowSceneDelegate, @preconcurrency SettingsMigrationUIHandler {
     private let logger = Logger(label: "SceneDelegate")
 
     var window: UIWindow?
@@ -27,7 +27,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHand
     private var tunnelObserver: TunnelObserver?
 
     private var appDelegate: AppDelegate {
+        // swiftlint:disable:next force_cast
         UIApplication.shared.delegate as! AppDelegate
+    }
+
+    private var accessMethodRepository: AccessMethodRepositoryProtocol {
+        appDelegate.accessMethodRepository
     }
 
     private var tunnelManager: TunnelManager {
@@ -41,7 +46,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHand
             didLoadConfiguration: { [weak self] _ in
                 self?.configureScene()
             },
-            didUpdateDeviceState: { [weak self] _, deviceState, previousDeviceState in
+            didUpdateDeviceState: { [weak self] _, deviceState, _ in
                 self?.deviceStateDidChange(deviceState)
             }
         )
@@ -65,7 +70,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHand
             storePaymentManager: appDelegate.storePaymentManager,
             relayCacheTracker: appDelegate.relayCacheTracker,
             apiProxy: appDelegate.apiProxy,
-            devicesProxy: appDelegate.devicesProxy
+            devicesProxy: appDelegate.devicesProxy,
+            accountsProxy: appDelegate.accountsProxy,
+            outgoingConnectionService: OutgoingConnectionService(
+                outgoingConnectionProxy: OutgoingConnectionProxy(
+                    urlSession: REST.makeURLSession(addressCache: appDelegate.addressCache),
+                    hostname: ApplicationConfiguration.hostName
+                )
+            ),
+            appPreferences: appDelegate.appPreferences,
+            accessMethodRepository: accessMethodRepository,
+            transportProvider: appDelegate.configuredTransportProvider,
+            ipOverrideRepository: appDelegate.ipOverrideRepository
         )
 
         appCoordinator?.onShowSettings = { [weak self] in
@@ -184,28 +200,33 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHand
     // MARK: - SettingsMigrationUIHandler
 
     func showMigrationError(_ error: Error, completionHandler: @escaping () -> Void) {
-        let alertController = CustomAlertViewController(
+        guard let appCoordinator else {
+            completionHandler()
+            return
+        }
+
+        let presentation = AlertPresentation(
+            id: "settings-migration-error-alert",
             title: NSLocalizedString(
                 "ALERT_TITLE",
                 tableName: "SettingsMigrationUI",
                 value: "Settings migration error",
                 comment: ""
             ),
-            message: Self.migrationErrorReason(error)
-        )
-        alertController.addAction(
-            title: NSLocalizedString("Got it!", tableName: "SettingsMigrationUI", comment: ""),
-            style: .default,
-            handler: {
-                completionHandler()
-            }
+            message: Self.migrationErrorReason(error),
+            buttons: [
+                AlertAction(
+                    title: NSLocalizedString("Got it!", tableName: "SettingsMigrationUI", comment: ""),
+                    style: .default,
+                    handler: {
+                        completionHandler()
+                    }
+                ),
+            ]
         )
 
-        if let rootViewController = window?.rootViewController {
-            rootViewController.present(alertController, animated: true)
-        } else {
-            completionHandler()
-        }
+        let presenter = AlertPresenter(context: appCoordinator)
+        presenter.showAlert(presentation: presentation, animated: true)
     }
 
     private static func migrationErrorReason(_ error: Error) -> String {
@@ -214,18 +235,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate, SettingsMigrationUIHand
                 "NEWER_STORED_SETTINGS_ERROR",
                 tableName: "SettingsMigrationUI",
                 value: """
-                The version of settings stored on device is from a newer app than is currently \
-                running. Settings will be reset to defaults and device logged out.
-                """,
-                comment: ""
-            )
-        } else if let error = error as? SettingsMigrationError,
-                  error.underlyingError is REST.Error {
-            return NSLocalizedString(
-                "NETWORK_ERROR",
-                tableName: "SettingsMigrationUI",
-                value: """
-                Network error occurred. Settings will be reset to defaults and device logged out.
+                The version of settings stored on device is unrecognized.\
+                Settings will be reset to defaults and the device will be logged out.
                 """,
                 comment: ""
             )

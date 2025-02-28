@@ -1,7 +1,4 @@
-#![deny(rust_2018_idioms)]
-
-use lazy_static::lazy_static;
-use mullvad_api::proxy::ApiConnectionMode;
+use mullvad_api::{proxy::ApiConnectionMode, ApiEndpoint};
 use regex::Regex;
 use std::{
     borrow::Cow,
@@ -11,6 +8,7 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 use talpid_types::ErrorExt;
 
@@ -46,63 +44,64 @@ macro_rules! write_line {
 
 /// These are critical errors that can happen when using the tool, that stops
 /// it from working. Meaning it will print the error and exit.
-#[derive(err_derive::Error, Debug)]
-#[error(no_from)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to write the problem report to {}", path)]
+    #[error("Failed to write the problem report to {path}")]
     WriteReportError {
         path: String,
-        #[error(source)]
+        #[source]
         source: io::Error,
     },
 
-    #[error(display = "Failed to read the problem report at {}", path)]
+    #[error("Failed to read the problem report at {path}")]
     ReadProblemReportError {
         path: String,
-        #[error(source)]
+        #[source]
         source: io::Error,
     },
 
-    #[error(display = "Unable to create REST client")]
-    CreateRpcClientError(#[error(source)] mullvad_api::Error),
+    #[error("Unable to create REST client")]
+    CreateRpcClientError(#[source] mullvad_api::Error),
 
-    #[error(display = "Failed to send problem report")]
-    SendProblemReportError(#[error(source)] mullvad_api::rest::Error),
+    #[error("Failed to send problem report")]
+    SendProblemReportError(#[source] mullvad_api::rest::Error),
 
-    #[error(display = "Failed to send problem report {} times", MAX_SEND_ATTEMPTS)]
+    #[error("Failed to send problem report {} times", MAX_SEND_ATTEMPTS)]
     SendFailedTooManyTimes,
 
-    #[error(display = "Unable to spawn Tokio runtime")]
-    CreateRuntime(#[error(source)] io::Error),
+    #[error("Unable to spawn Tokio runtime")]
+    CreateRuntime(#[source] io::Error),
 
-    #[error(display = "Unable to find cache directory")]
-    ObtainCacheDirectory(#[error(source)] mullvad_paths::Error),
+    #[cfg(not(target_os = "android"))]
+    #[error("Unable to find cache directory")]
+    ObtainCacheDirectory(#[source] mullvad_paths::Error),
 }
 
 /// These are errors that can happen during problem report collection.
 /// They are not critical, but they will be added inside the problem report,
 /// instead of whatever content was supposed to be there.
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum LogError {
-    #[error(display = "Unable to get log directory")]
-    GetLogDir(#[error(source)] mullvad_paths::Error),
+    #[cfg(not(target_os = "android"))]
+    #[error("Unable to get log directory")]
+    GetLogDir(#[source] mullvad_paths::Error),
 
-    #[error(display = "Failed to list the files in the log directory: {}", path)]
+    #[error("Failed to list the files in the log directory: {path}")]
     ListLogDir {
         path: String,
-        #[error(source)]
+        #[source]
         source: io::Error,
     },
 
-    #[error(display = "Error reading the contents of log file: {}", path)]
+    #[error("Error reading the contents of log file: {path}")]
     ReadLogError { path: String },
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[error(display = "No home directory for current user")]
+    #[error("No home directory for current user")]
     NoHomeDir,
 
     #[cfg(target_os = "windows")]
-    #[error(display = "Missing %LOCALAPPDATA% environment variable")]
+    #[error("Missing %LOCALAPPDATA% environment variable")]
     NoLocalAppDataDir,
 }
 
@@ -213,7 +212,7 @@ fn frontend_log_dir() -> Option<Result<PathBuf, LogError>> {
     #[cfg(target_os = "linux")]
     {
         Some(
-            dirs_next::home_dir()
+            dirs::home_dir()
                 .ok_or(LogError::NoHomeDir)
                 .map(|home_dir| home_dir.join(".config/Mullvad VPN/logs")),
         )
@@ -221,7 +220,7 @@ fn frontend_log_dir() -> Option<Result<PathBuf, LogError>> {
     #[cfg(target_os = "macos")]
     {
         Some(
-            dirs_next::home_dir()
+            dirs::home_dir()
                 .ok_or(LogError::NoHomeDir)
                 .map(|home_dir| home_dir.join("Library/Logs/Mullvad VPN")),
         )
@@ -262,6 +261,7 @@ pub fn send_problem_report(
     user_message: &str,
     report_path: &Path,
     cache_dir: &Path,
+    endpoint: ApiEndpoint,
 ) -> Result<(), Error> {
     let report_content = normalize_newlines(
         read_file_lossy(report_path, REPORT_MAX_SIZE).map_err(|source| {
@@ -282,6 +282,7 @@ pub fn send_problem_report(
         user_message,
         &report_content,
         cache_dir,
+        &endpoint,
     ))
 }
 
@@ -290,9 +291,11 @@ async fn send_problem_report_inner(
     user_message: &str,
     report_content: &str,
     cache_dir: &Path,
+    endpoint: &ApiEndpoint,
 ) -> Result<(), Error> {
     let metadata = ProblemReport::parse_metadata(report_content).unwrap_or_else(metadata::collect);
     let api_runtime = mullvad_api::Runtime::with_cache(
+        endpoint,
         cache_dir,
         false,
         #[cfg(target_os = "android")]
@@ -301,15 +304,9 @@ async fn send_problem_report_inner(
     .await
     .map_err(Error::CreateRpcClientError)?;
 
+    let connection_mode = ApiConnectionMode::try_from_cache(cache_dir).await;
     let api_client = mullvad_api::ProblemReportProxy::new(
-        api_runtime
-            .mullvad_rest_handle(
-                ApiConnectionMode::try_from_cache(cache_dir)
-                    .await
-                    .into_repeat(),
-                |_| async { true },
-            )
-            .await,
+        api_runtime.mullvad_rest_handle(connection_mode.into_provider()),
     );
 
     for _attempt in 0..MAX_SEND_ATTEMPTS {
@@ -413,40 +410,34 @@ impl ProblemReport {
     }
 
     fn redact_account_number(input: &str) -> Cow<'_, str> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new("\\d{16}").unwrap();
-        }
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("\\d{16}").unwrap());
         RE.replace_all(input, "[REDACTED ACCOUNT NUMBER]")
     }
 
     fn redact_home_dir(input: &str) -> Cow<'_, str> {
-        redact_home_dir_inner(input, dirs_next::home_dir())
+        redact_home_dir_inner(input, dirs::home_dir())
     }
 
     fn redact_network_info(input: &str) -> Cow<'_, str> {
-        lazy_static! {
-            static ref RE: Regex = {
-                let boundary = "[^0-9a-zA-Z.:]";
-                let combined_pattern = format!(
-                    "(?P<start>^|{})(?:{}|{}|{})",
-                    boundary,
-                    build_ipv4_regex(),
-                    build_ipv6_regex(),
-                    build_mac_regex(),
-                );
-                Regex::new(&combined_pattern).unwrap()
-            };
-        }
+        static RE: LazyLock<Regex> = LazyLock::new(|| {
+            let boundary = "[^0-9a-zA-Z.:]";
+            let combined_pattern = format!(
+                "(?P<start>^|{})(?:{}|{}|{})",
+                boundary,
+                build_ipv4_regex(),
+                build_ipv6_regex(),
+                build_mac_regex(),
+            );
+            Regex::new(&combined_pattern).unwrap()
+        });
         RE.replace_all(input, "$start[REDACTED]")
     }
 
     fn redact_guids(input: &str) -> Cow<'_, str> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(
-                r#"(?i)\{?[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}\}?"#
-            )
-            .unwrap();
-        }
+        static RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\{?[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}\}?")
+                .unwrap()
+        });
         RE.replace_all(input, "[REDACTED]")
     }
 

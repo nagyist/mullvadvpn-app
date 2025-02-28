@@ -6,68 +6,72 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
-import net.mullvad.mullvadvpn.model.CustomDnsOptions
-import net.mullvad.mullvadvpn.model.DefaultDnsOptions
-import net.mullvad.mullvadvpn.model.DnsOptions
-import net.mullvad.mullvadvpn.model.DnsState
-import net.mullvad.mullvadvpn.model.ObfuscationSettings
-import net.mullvad.mullvadvpn.model.QuantumResistantState
-import net.mullvad.mullvadvpn.model.Settings
-import net.mullvad.mullvadvpn.ui.serviceconnection.ServiceConnectionManager
-import net.mullvad.mullvadvpn.ui.serviceconnection.customDns
-import net.mullvad.mullvadvpn.ui.serviceconnection.settingsListener
-import net.mullvad.mullvadvpn.util.callbackFlowFromNotifier
-import net.mullvad.mullvadvpn.util.flatMapReadyConnectionOrDefault
+import net.mullvad.mullvadvpn.lib.daemon.grpc.ManagementService
+import net.mullvad.mullvadvpn.lib.model.Constraint
+import net.mullvad.mullvadvpn.lib.model.CustomDnsOptions
+import net.mullvad.mullvadvpn.lib.model.DefaultDnsOptions
+import net.mullvad.mullvadvpn.lib.model.DnsOptions
+import net.mullvad.mullvadvpn.lib.model.DnsState
+import net.mullvad.mullvadvpn.lib.model.Mtu
+import net.mullvad.mullvadvpn.lib.model.ObfuscationMode
+import net.mullvad.mullvadvpn.lib.model.Port
+import net.mullvad.mullvadvpn.lib.model.QuantumResistantState
+import net.mullvad.mullvadvpn.lib.model.Settings
 
+@Suppress("TooManyFunctions")
 class SettingsRepository(
-    private val serviceConnectionManager: ServiceConnectionManager,
-    dispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val managementService: ManagementService,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     val settingsUpdates: StateFlow<Settings?> =
-        serviceConnectionManager.connectionState
-            .flatMapReadyConnectionOrDefault(flowOf()) { state ->
-                callbackFlowFromNotifier(state.container.settingsListener.settingsNotifier)
-            }
-            .onStart { serviceConnectionManager.settingsListener()?.settingsNotifier?.latestEvent }
-            .stateIn(CoroutineScope(dispatcher), SharingStarted.WhileSubscribed(), null)
+        managementService.settings.stateIn(
+            CoroutineScope(dispatcher),
+            SharingStarted.WhileSubscribed(),
+            null,
+        )
 
-    fun setDnsOptions(
+    suspend fun setDnsOptions(
         isCustomDnsEnabled: Boolean,
         dnsList: List<InetAddress>,
-        contentBlockersOptions: DefaultDnsOptions
-    ) {
-        serviceConnectionManager
-            .customDns()
-            ?.setDnsOptions(
-                dnsOptions =
-                    DnsOptions(
-                        state = if (isCustomDnsEnabled) DnsState.Custom else DnsState.Default,
-                        customOptions = CustomDnsOptions(ArrayList(dnsList)),
-                        defaultOptions = contentBlockersOptions
-                    )
+        contentBlockersOptions: DefaultDnsOptions,
+    ) =
+        managementService.setDnsOptions(
+            DnsOptions(
+                state = if (isCustomDnsEnabled) DnsState.Custom else DnsState.Default,
+                customOptions = CustomDnsOptions(ArrayList(dnsList)),
+                defaultOptions = contentBlockersOptions,
             )
-    }
+        )
 
-    fun setWireguardMtu(value: Int?) {
-        serviceConnectionManager.settingsListener()?.wireguardMtu = value
-    }
+    suspend fun setDnsState(state: DnsState) = managementService.setDnsState(state)
 
-    fun setWireguardQuantumResistant(value: QuantumResistantState) {
-        serviceConnectionManager.settingsListener()?.wireguardQuantumResistant = value
-    }
+    suspend fun deleteCustomDns(index: Int) = managementService.deleteCustomDns(index)
 
-    fun setObfuscationOptions(value: ObfuscationSettings) {
-        serviceConnectionManager.settingsListener()?.obfuscationSettings = value
-    }
+    suspend fun setCustomDns(index: Int, address: InetAddress) =
+        managementService.setCustomDns(index, address)
 
-    fun setAutoConnect(isEnabled: Boolean) {
-        serviceConnectionManager.settingsListener()?.autoConnect = isEnabled
-    }
+    suspend fun addCustomDns(address: InetAddress) = managementService.addCustomDns(address)
 
-    fun setLocalNetworkSharing(isEnabled: Boolean) {
-        serviceConnectionManager.settingsListener()?.allowLan = isEnabled
-    }
+    suspend fun setCustomUdp2TcpObfuscationPort(constraint: Constraint<Port>) =
+        managementService.setUdp2TcpObfuscationPort(constraint)
+
+    suspend fun setCustomShadowsocksObfuscationPort(constraint: Constraint<Port>) =
+        managementService.setShadowsocksObfuscationPort(constraint)
+
+    suspend fun setWireguardMtu(mtu: Mtu) = managementService.setWireguardMtu(mtu.value)
+
+    suspend fun resetWireguardMtu() = managementService.resetWireguardMtu()
+
+    suspend fun setWireguardQuantumResistant(value: QuantumResistantState) =
+        managementService.setWireguardQuantumResistant(value)
+
+    suspend fun setObfuscation(value: ObfuscationMode) = managementService.setObfuscation(value)
+
+    suspend fun setLocalNetworkSharing(isEnabled: Boolean) =
+        managementService.setAllowLan(isEnabled)
+
+    suspend fun setDaitaEnabled(enabled: Boolean) = managementService.setDaitaEnabled(enabled)
+
+    suspend fun setDaitaDirectOnly(enabled: Boolean) = managementService.setDaitaDirectOnly(enabled)
 }

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 28/04/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -23,25 +23,33 @@ class TermsOfServiceContentView: UIView {
             comment: ""
         )
         titleLabel.lineBreakMode = .byWordWrapping
-        if #available(iOS 14.0, *) {
-            // See: https://stackoverflow.com/q/46200027/351305
-            titleLabel.lineBreakStrategy = []
-        }
+        titleLabel.lineBreakStrategy = []
         return titleLabel
     }()
 
     let bodyLabel: UILabel = {
         let bodyLabel = UILabel()
+
+        let message = NSMutableAttributedString(string: NSLocalizedString(
+            "PRIVACY_NOTICE_BODY",
+            tableName: "TermsOfService",
+            value: """
+            You have a right to privacy. That’s why we never store activity logs, don’t ask for personal \
+            information, and encourage anonymous payments.
+            In some situations, as outlined in our privacy policy, we might process personal data that you \
+            choose to send, for example if you email us.
+            We strongly believe in retaining as little data as possible because we want you to remain anonymous.
+            """,
+            comment: ""
+        ))
+        message.apply(paragraphStyle: .alert)
+
+        bodyLabel.attributedText = message
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
         bodyLabel.font = UIFont.systemFont(ofSize: 18)
         bodyLabel.textColor = .white
         bodyLabel.numberOfLines = 0
-        bodyLabel.text = NSLocalizedString(
-            "PRIVACY_NOTICE_BODY",
-            tableName: "TermsOfService",
-            value: "You have a right to privacy. That’s why we never store activity logs, don’t ask for personal information, and encourage anonymous payments.\n\nIn some situations, as outlined in our privacy policy, we might process personal data that you choose to send, for example if you email us.\n\nWe strongly believe in retaining as little data as possible because we want you to remain anonymous.",
-            comment: ""
-        )
+
         return bodyLabel
     }()
 
@@ -61,7 +69,7 @@ class TermsOfServiceContentView: UIView {
     let agreeButton: AppButton = {
         let button = AppButton(style: .default)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.accessibilityIdentifier = "AgreeButton"
+        button.setAccessibilityIdentifier(.agreeButton)
         button.setTitle(NSLocalizedString(
             "CONTINUE_BUTTON_TITLE",
             tableName: "TermsOfService",
@@ -94,6 +102,8 @@ class TermsOfServiceContentView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+
+        self.setAccessibilityIdentifier(.termsOfServiceView)
 
         addSubviews()
     }

@@ -1,8 +1,11 @@
 use std::str::FromStr;
 
+mod access_method;
 mod account;
+mod custom_list;
 mod custom_tunnel;
 mod device;
+mod features;
 mod location;
 mod net;
 pub mod relay_constraints;
@@ -14,9 +17,9 @@ mod states;
 mod version;
 mod wireguard;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum FromProtobufTypeError {
-    #[error(display = "Invalid argument for type conversion: {}", _0)]
+    #[error("Invalid argument for type conversion: {0}")]
     InvalidArgument(&'static str),
 }
 
@@ -41,14 +44,6 @@ fn bytes_to_wg_key<'a>(
     error_msg: &'static str,
 ) -> Result<&'a [u8; 32], FromProtobufTypeError> {
     <&[u8; 32]>::try_from(bytes).map_err(|_| FromProtobufTypeError::InvalidArgument(error_msg))
-}
-
-/// Returns `Option<String>`, where an empty string represents `None`.
-fn option_from_proto_string(s: String) -> Option<String> {
-    match s {
-        s if s.is_empty() => None,
-        s => Some(s),
-    }
 }
 
 fn arg_from_str<T: FromStr<Err = E>, E>(

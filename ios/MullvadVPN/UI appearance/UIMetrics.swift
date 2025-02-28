@@ -3,12 +3,26 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 10/03/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
+import MullvadTypes
+import SwiftUI
 import UIKit
 
 enum UIMetrics {
+    enum TableView {
+        /// Height for separators between cells and/or sections.
+        static let separatorHeight: CGFloat = 0.33
+        /// Spacing used between distinct sections of views
+        static let sectionSpacing: CGFloat = 24
+        /// Common layout margins for row views presentation
+        /// Similar to `SettingsCell.layoutMargins` however maintains equal horizontal spacing
+        static let rowViewLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 24)
+        /// Common cell indentation width
+        static let cellIndentationWidth: CGFloat = 16
+    }
+
     enum CustomAlert {
         /// Layout margins for container (main view) in `CustomAlertViewController`
         static let containerMargins = NSDirectionalEdgeInsets(
@@ -18,8 +32,11 @@ enum UIMetrics {
             trailing: 16
         )
 
-        /// Spacing between views in container (main view) in `CustomAlertViewController`
+        /// Spacing between view containers in `CustomAlertViewController`
         static let containerSpacing: CGFloat = 16
+
+        /// Spacing between view containers in `CustomAlertViewController`
+        static let interContainerSpacing: CGFloat = 4
     }
 
     enum DimmingView {
@@ -29,46 +46,71 @@ enum UIMetrics {
     }
 
     enum FormSheetTransition {
-        static let duration: TimeInterval = 0.5
-        static let delay: TimeInterval = .zero
+        static let duration: Duration = .milliseconds(500)
+        static let delay: Duration = .zero
         static let animationOptions: UIView.AnimationOptions = [.curveEaseInOut]
     }
 
-    enum RedeemVoucher {
-        static let cornerRadius = 8.0
-        static let preferredContentSize = CGSize(width: 292, height: 263)
+    enum AccessMethodActionSheetTransition {
+        static let duration: Duration = .milliseconds(250)
+        static let animationOptions: UIView.AnimationOptions = [.curveEaseInOut]
     }
-}
 
-extension UIMetrics {
-    /// Common layout margins for content presentation
-    static let contentLayoutMargins = NSDirectionalEdgeInsets(top: 24, leading: 24, bottom: 24, trailing: 24)
+    enum SettingsRedeemVoucher {
+        static let cornerRadius: CGFloat = 8
+        static let preferredContentSize = CGSize(width: 280, height: 260)
+        static let contentLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16)
+        static let successfulRedeemMargins = NSDirectionalEdgeInsets(top: 16, leading: 8, bottom: 16, trailing: 8)
+    }
 
-    /// Common content margins for content presentation
-    static let contentInsets = UIEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+    enum AccountDeletion {
+        static let preferredContentSize = CGSize(width: 480, height: 640)
+    }
 
-    /// Common layout margins for row views presentation
-    /// Similar to `settingsCellLayoutMargins` however maintains equal horizontal spacing
-    static let rowViewLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 24)
+    enum Button {
+        static let barButtonSize: CGFloat = 44
+        static let minimumTappableAreaSize = CGSize(width: 44, height: 44)
+    }
 
-    /// Common layout margins for settings cell presentation
-    static let settingsCellLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 12)
+    enum SettingsCell {
+        static let textFieldContentInsets = UIEdgeInsets(top: 8, left: 24, bottom: 8, right: 24)
+        static let textFieldNonEditingContentInsetLeft: CGFloat = 40
+        static let layoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 12)
+        static let inputCellTextFieldLayoutMargins = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        static let selectableSettingsCellLeftViewSpacing: CGFloat = 12
+        static let checkableSettingsCellLeftViewSpacing: CGFloat = 20
 
-    /// Common layout margins for text field in settings input cell presentation
-    static let settingsInputCellTextFieldLayoutMargins = UIEdgeInsets(
-        top: 0,
-        left: 8,
-        bottom: 0,
-        right: 8
-    )
+        /// Cell layout margins used in table views that use inset style.
+        static let insetLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 24)
 
-    /// Common layout margins for location cell presentation
-    static let selectLocationCellLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 28, bottom: 16, trailing: 12)
+        static let apiAccessLayoutMargins = NSDirectionalEdgeInsets(top: 8, leading: 24, bottom: 24, trailing: 24)
+        static let apiAccessInsetLayoutMargins = NSDirectionalEdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
+        static let settingsValidationErrorLayoutMargins = NSDirectionalEdgeInsets(
+            top: 8,
+            leading: 16,
+            bottom: 8,
+            trailing: 16
+        )
+        static let apiAccessCellHeight: CGFloat = 44
+        static let customListsCellHeight: CGFloat = 44
+        static let apiAccessSwitchCellTrailingMargin: CGFloat = apiAccessInsetLayoutMargins.trailing - 4
+        static let apiAccessPickerListContentInsetTop: CGFloat = 16
+        static let verticalDividerHeight: CGFloat = 22
+        static let detailsButtonSize: CGFloat = 60
+        static let infoButtonLeadingMargin: CGFloat = 8
+    }
 
-    /// Common cell indentation width
-    static let cellIndentationWidth: CGFloat = 16
+    enum SettingsInfoView {
+        static let layoutMargins = EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 24)
+    }
 
-    /// Group of constants related to in-app notifications banner.
+    enum SettingsRowView {
+        static let height: CGFloat = 44
+        static let cornerRadius: CGFloat = 10
+        static let layoutMargins = EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+        static let footerLayoutMargins = EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16)
+    }
+
     enum InAppBannerNotification {
         /// Layout margins for contents presented within the banner.
         static let layoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 24)
@@ -77,14 +119,41 @@ extension UIMetrics {
         static let indicatorSize = CGSize(width: 12, height: 12)
     }
 
+    enum DisconnectSplitButton {
+        static let secondaryButton = CGSize(width: 42, height: 42)
+    }
+
+    enum FilterView {
+        static let interChipViewSpacing: CGFloat = 8
+        static let chipViewCornerRadius: CGFloat = 8
+        static let chipViewLayoutMargins = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
+        static let chipViewLabelSpacing: CGFloat = 7
+    }
+
+    enum ConnectionPanelView {
+        static let inRowHeight: CGFloat = 22
+        static let outRowHeight: CGFloat = 44
+    }
+
+    enum MainButton {
+        static let cornerRadius: CGFloat = 4
+    }
+
+    enum FeatureIndicators {
+        static let chipViewHorisontalPadding: CGFloat = 8
+        static let chipViewTrailingMargin: CGFloat = 6
+    }
+}
+
+extension UIMetrics {
     /// Spacing used in stack views of buttons
     static let interButtonSpacing: CGFloat = 16
 
-    /// Spacing used between distinct sections of views
-    static let sectionSpacing: CGFloat = 24
-
     /// Text field margins
     static let textFieldMargins = UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+
+    /// Text view margins
+    static let textViewMargins = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
 
     /// Corner radius used for controls such as buttons and text fields
     static let controlCornerRadius: CGFloat = 4
@@ -106,4 +175,29 @@ extension UIMetrics {
 
     /// Height of brand name. Width is automatically produced based on aspect ratio.
     static let headerBarBrandNameHeight: CGFloat = 18
+
+    /// Various paddings used throughout the app to visually separate elements in StackViews
+    static let padding4: CGFloat = 4
+    static let padding8: CGFloat = 8
+    static let padding10: CGFloat = 10
+    static let padding16: CGFloat = 16
+    static let padding24: CGFloat = 24
+    static let padding32: CGFloat = 32
+    static let padding40: CGFloat = 40
+    static let padding48: CGFloat = 48
+
+    /// Preferred content size for controllers presented using formsheet modal presentation style.
+    static let preferredFormSheetContentSize = CGSize(width: 480, height: 640)
+
+    /// Common layout margins for content presentation
+    static let contentLayoutMargins = contentInsets.toDirectionalInsets
+
+    /// Common content margins for content presentation
+    static let contentInsets = UIEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+
+    /// Common layout margins for location cell presentation
+    static let locationCellLayoutMargins = NSDirectionalEdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 12)
+
+    /// Layout margins used by content heading displayed below the large navigation title.
+    static let contentHeadingLayoutMargins = NSDirectionalEdgeInsets(top: 8, leading: 24, bottom: 24, trailing: 24)
 }

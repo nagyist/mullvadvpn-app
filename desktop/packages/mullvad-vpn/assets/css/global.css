@@ -1,0 +1,42 @@
+* {
+  box-sizing: border-box;
+}
+
+:focus {
+  outline: 0;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+  height: 100%;
+  width: 100%;
+}
+
+img {
+  -webkit-user-drag: none;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  height: 100%;
+  width: 100%;
+  display: flex;
+}
+
+#app {
+  height: 100%;
+  width: 100%;
+  display: flex;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 1ms !important;
+  }
+
+  .map-zoomable-group {
+    transition-duration: 0ms !important;
+  }
+}

@@ -35,8 +35,11 @@ case ${1-:""} in
 esac
 full_container_name="$REGISTRY_HOST/$REGISTRY_ORG/$container_name"
 
+RUST_VERSION=$(rg -o "channel = \"(.*)\"" -r '$1' "$REPO_DIR/rust-toolchain.toml")
+
 log_header "Building $full_container_name tagged as '$tag' and 'latest'"
 podman build -f "$containerfile_path" "$container_context_dir" --no-cache \
+    --build-arg="RUST_VERSION=$RUST_VERSION" \
     -t "$full_container_name:$tag" \
     -t "$full_container_name:latest"
 
@@ -53,7 +56,7 @@ trap 'delete_tmp_signature_dir' EXIT
 
 log_header "Pushing $full_container_name:latest"
 podman push "$full_container_name:latest" \
-    --sign-by $CONTAINER_SIGNING_KEY_FINGERPRINT \
+    --sign-by "$CONTAINER_SIGNING_KEY_FINGERPRINT" \
     --digestfile "$tmp_signature_dir/digest_latest"
 
 digest=$(cat "$tmp_signature_dir/digest_latest")
@@ -68,7 +71,7 @@ cp "$signature_dir/signature-1" "$tmp_signature_dir/signature-2"
 
 log_header "Pushing $full_container_name:$tag"
 podman push "$full_container_name:$tag" \
-    --sign-by $CONTAINER_SIGNING_KEY_FINGERPRINT \
+    --sign-by "$CONTAINER_SIGNING_KEY_FINGERPRINT" \
     --digestfile "$tmp_signature_dir/digest_$tag"
 
 if ! cmp -s "$tmp_signature_dir/digest_latest" "$tmp_signature_dir/digest_$tag"; then

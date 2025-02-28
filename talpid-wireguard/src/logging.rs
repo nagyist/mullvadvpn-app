@@ -1,32 +1,31 @@
 use parking_lot::Mutex;
-use std::{collections::HashMap, fmt, fs, io::Write, path::Path};
+use std::{collections::HashMap, fmt, fs, io::Write, path::Path, sync::LazyLock};
 
-lazy_static::lazy_static! {
-    static ref LOG_MUTEX: Mutex<HashMap<u32, fs::File>> = Mutex::new(HashMap::new());
+static LOG_MUTEX: LazyLock<Mutex<LogState>> = LazyLock::new(|| Mutex::new(LogState::default()));
+
+#[derive(Default)]
+struct LogState {
+    map: HashMap<u64, fs::File>,
+    next_ordinal: u64,
 }
-
-static mut LOG_CONTEXT_NEXT_ORDINAL: u32 = 0;
 
 /// Errors encountered when initializing logging
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to move or create a log file.
-    #[error(display = "Failed to setup a logging file")]
-    PrepareLogFileError(#[error(source)] std::io::Error),
+    #[error("Failed to setup a logging file")]
+    PrepareLogFileError(#[from] std::io::Error),
 }
 
-pub fn initialize_logging(log_path: Option<&Path>) -> Result<u32, Error> {
+pub fn initialize_logging(log_path: Option<&Path>) -> Result<u64, Error> {
     let log_file = create_log_file(log_path)?;
 
-    let log_context_ordinal = unsafe {
-        let mut map = LOG_MUTEX.lock();
-        let ordinal = LOG_CONTEXT_NEXT_ORDINAL;
-        LOG_CONTEXT_NEXT_ORDINAL += 1;
-        map.insert(ordinal, log_file);
-        ordinal
-    };
+    let mut state = LOG_MUTEX.lock();
+    let ordinal = state.next_ordinal;
+    state.next_ordinal += 1;
+    state.map.insert(ordinal, log_file);
 
-    Ok(log_context_ordinal)
+    Ok(ordinal)
 }
 
 #[cfg(target_os = "windows")]
@@ -40,15 +39,17 @@ fn create_log_file(log_path: Option<&Path>) -> Result<fs::File, Error> {
         .map_err(Error::PrepareLogFileError)
 }
 
-pub fn clean_up_logging(ordinal: u32) {
-    let mut map = LOG_MUTEX.lock();
-    map.remove(&ordinal);
+pub fn clean_up_logging(ordinal: u64) {
+    let mut state = LOG_MUTEX.lock();
+    state.map.remove(&ordinal);
 }
 
-#[allow(dead_code)]
 pub enum LogLevel {
+    #[cfg_attr(windows, allow(dead_code))]
     Verbose,
+    #[cfg_attr(wireguard_go, allow(dead_code))]
     Info,
+    #[cfg_attr(wireguard_go, allow(dead_code))]
     Warning,
     Error,
 }
@@ -70,10 +71,9 @@ impl AsRef<str> for LogLevel {
     }
 }
 
-#[cfg(windows)]
-pub fn log(context: u32, level: LogLevel, tag: &str, msg: &str) {
-    let mut map = LOG_MUTEX.lock();
-    if let Some(logfile) = map.get_mut(&{ context }) {
+pub fn log(context: u64, level: LogLevel, tag: &str, msg: &str) {
+    let mut state = LOG_MUTEX.lock();
+    if let Some(logfile) = state.map.get_mut(&context) {
         log_inner(logfile, level, tag, msg);
     }
 }
@@ -88,38 +88,3 @@ fn log_inner(logfile: &mut fs::File, level: LogLevel, tag: &str, msg: &str) {
         msg,
     );
 }
-
-// Callback that receives messages from WireGuard
-pub unsafe extern "system" fn wg_go_logging_callback(
-    level: WgLogLevel,
-    msg: *const libc::c_char,
-    context: *mut libc::c_void,
-) {
-    let mut map = LOG_MUTEX.lock();
-    if let Some(logfile) = map.get_mut(&(context as u32)) {
-        let managed_msg = if !msg.is_null() {
-            #[cfg(not(target_os = "windows"))]
-            let m = std::ffi::CStr::from_ptr(msg).to_string_lossy().to_string();
-            #[cfg(target_os = "windows")]
-            let m = std::ffi::CStr::from_ptr(msg)
-                .to_string_lossy()
-                .to_string()
-                .replace('\n', "\r\n");
-            m
-        } else {
-            "Logging message from WireGuard is NULL".to_string()
-        };
-
-        let level = match level {
-            WG_GO_LOG_VERBOSE => LogLevel::Verbose,
-            _ => LogLevel::Error,
-        };
-        log_inner(logfile, level, "wireguard-go", &managed_msg);
-    }
-}
-
-pub type WgLogLevel = u32;
-// wireguard-go supports log levels 0 through 3 with 3 being the most verbose
-// const WG_GO_LOG_SILENT: WgLogLevel = 0;
-// const WG_GO_LOG_ERROR: WgLogLevel = 1;
-const WG_GO_LOG_VERBOSE: WgLogLevel = 2;

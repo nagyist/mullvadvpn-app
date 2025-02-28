@@ -3,7 +3,7 @@
 //  OSLogHandler
 //
 //  Created by pronebird on 16/08/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -22,7 +22,7 @@ public struct OSLogHandler: LogHandler {
         let category: String
     }
 
-    private static var osLogRegistry: [RegistryKey: OSLog] = [:]
+    nonisolated(unsafe) private static var osLogRegistry: [RegistryKey: OSLog] = [:]
     private static let registryLock = NSLock()
 
     private static func getOSLog(subsystem: String, category: String) -> OSLog {
@@ -53,6 +53,7 @@ public struct OSLogHandler: LogHandler {
         }
     }
 
+    // swiftlint:disable:next function_parameter_count
     public func log(
         level: Logging.Logger.Level,
         message: Logging.Logger.Message,
@@ -63,7 +64,7 @@ public struct OSLogHandler: LogHandler {
         line: UInt
     ) {
         let mergedMetadata = self.metadata
-            .merging(metadata ?? [:]) { lhs, rhs -> Logging.Logger.MetadataValue in
+            .merging(metadata ?? [:]) { _, rhs -> Logging.Logger.MetadataValue in
                 rhs
             }
         let prettyMetadata = Self.formatMetadata(mergedMetadata)

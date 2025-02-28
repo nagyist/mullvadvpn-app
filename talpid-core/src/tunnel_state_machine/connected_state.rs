@@ -1,40 +1,30 @@
+use futures::channel::{mpsc, oneshot};
+use futures::stream::Fuse;
+use futures::StreamExt;
+
+use talpid_types::net::{AllowedClients, AllowedEndpoint, TunnelParameters};
+use talpid_types::tunnel::{ErrorStateCause, FirewallPolicyError};
+use talpid_types::{BoxedError, ErrorExt};
+
+#[cfg(target_os = "macos")]
+use crate::dns::DnsConfig;
+use crate::dns::ResolvedDnsConfig;
+use crate::firewall::FirewallPolicy;
+#[cfg(target_os = "macos")]
+use crate::resolver::LOCAL_DNS_RESOLVER;
+#[cfg(windows)]
+use crate::tunnel::TunnelMonitor;
+use crate::tunnel::{TunnelEvent, TunnelMetadata};
+
+use super::connecting_state::TunnelCloseEvent;
 use super::{
     AfterDisconnect, ConnectingState, DisconnectingState, ErrorState, EventConsequence,
     EventResult, SharedTunnelStateValues, TunnelCommand, TunnelCommandReceiver, TunnelState,
-    TunnelStateTransition, TunnelStateWrapper,
+    TunnelStateTransition,
 };
-use crate::{
-    firewall::FirewallPolicy,
-    tunnel::{TunnelEvent, TunnelMetadata},
-};
-use cfg_if::cfg_if;
-use futures::{
-    channel::{mpsc, oneshot},
-    stream::Fuse,
-    StreamExt,
-};
-use std::net::IpAddr;
-use talpid_types::{
-    net::TunnelParameters,
-    tunnel::{ErrorStateCause, FirewallPolicyError},
-    BoxedError, ErrorExt,
-};
-
-#[cfg(windows)]
-use crate::tunnel::TunnelMonitor;
-
-use super::connecting_state::TunnelCloseEvent;
 
 pub(crate) type TunnelEventsReceiver =
     Fuse<mpsc::UnboundedReceiver<(TunnelEvent, oneshot::Sender<()>)>>;
-
-pub struct ConnectedStateBootstrap {
-    pub metadata: TunnelMetadata,
-    pub tunnel_events: TunnelEventsReceiver,
-    pub tunnel_parameters: TunnelParameters,
-    pub tunnel_close_event: TunnelCloseEvent,
-    pub tunnel_close_tx: oneshot::Sender<()>,
-}
 
 /// The tunnel is up and working.
 pub struct ConnectedState {
@@ -46,13 +36,47 @@ pub struct ConnectedState {
 }
 
 impl ConnectedState {
-    fn from(bootstrap: ConnectedStateBootstrap) -> Self {
-        ConnectedState {
-            metadata: bootstrap.metadata,
-            tunnel_events: bootstrap.tunnel_events,
-            tunnel_parameters: bootstrap.tunnel_parameters,
-            tunnel_close_event: bootstrap.tunnel_close_event,
-            tunnel_close_tx: bootstrap.tunnel_close_tx,
+    #[cfg_attr(target_os = "android", allow(unused_variables))]
+    pub(super) fn enter(
+        shared_values: &mut SharedTunnelStateValues,
+        metadata: TunnelMetadata,
+        tunnel_events: TunnelEventsReceiver,
+        tunnel_parameters: TunnelParameters,
+        tunnel_close_event: TunnelCloseEvent,
+        tunnel_close_tx: oneshot::Sender<()>,
+    ) -> (Box<dyn TunnelState>, TunnelStateTransition) {
+        let connected_state = ConnectedState {
+            metadata,
+            tunnel_events,
+            tunnel_parameters,
+            tunnel_close_event,
+            tunnel_close_tx,
+        };
+
+        let tunnel_interface = Some(connected_state.metadata.interface.clone());
+        let tunnel_endpoint = talpid_types::net::TunnelEndpoint {
+            tunnel_interface,
+            ..connected_state.tunnel_parameters.get_tunnel_endpoint()
+        };
+
+        if let Err(error) = connected_state.set_firewall_policy(shared_values) {
+            DisconnectingState::enter(
+                connected_state.tunnel_close_tx,
+                connected_state.tunnel_close_event,
+                AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
+            )
+        } else if let Err(error) = connected_state.set_dns(shared_values) {
+            log::error!("{}", error.display_chain_with_msg("Failed to set DNS"));
+            DisconnectingState::enter(
+                connected_state.tunnel_close_tx,
+                connected_state.tunnel_close_event,
+                AfterDisconnect::Block(ErrorStateCause::SetDnsError),
+            )
+        } else {
+            (
+                Box::new(connected_state),
+                TunnelStateTransition::Connected(tunnel_endpoint),
+            )
         }
     }
 
@@ -81,72 +105,117 @@ impl ConnectedState {
             })
     }
 
-    #[allow(unused_variables)]
-    fn get_dns_servers(&self, shared_values: &SharedTunnelStateValues) -> Vec<IpAddr> {
-        #[cfg(not(target_os = "android"))]
-        if let Some(ref servers) = shared_values.dns_servers {
-            servers.clone()
-        } else {
-            let mut dns_ips = vec![self.metadata.ipv4_gateway.into()];
-            if let Some(ipv6_gateway) = self.metadata.ipv6_gateway {
-                dns_ips.push(ipv6_gateway.into());
-            };
-            dns_ips
-        }
-        #[cfg(target_os = "android")]
-        {
-            let mut dns_ips = vec![];
-            dns_ips.push(self.metadata.ipv4_gateway.into());
-            if let Some(ipv6_gateway) = self.metadata.ipv6_gateway {
-                dns_ips.push(ipv6_gateway.into());
-            };
-            dns_ips
-        }
-    }
-
     fn get_firewall_policy(&self, shared_values: &SharedTunnelStateValues) -> FirewallPolicy {
+        let endpoint = self.tunnel_parameters.get_next_hop_endpoint();
+
+        #[cfg(target_os = "windows")]
+        let clients = AllowedClients::from(
+            TunnelMonitor::get_relay_client(&shared_values.resource_dir, &self.tunnel_parameters)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+
+        #[cfg(not(target_os = "windows"))]
+        let clients = if self
+            .tunnel_parameters
+            .get_openvpn_local_proxy_settings()
+            .is_some()
+        {
+            AllowedClients::All
+        } else {
+            AllowedClients::Root
+        };
+
+        let peer_endpoint = AllowedEndpoint { endpoint, clients };
+
+        #[cfg(target_os = "macos")]
+        let redirect_interface = shared_values
+            .runtime
+            .block_on(shared_values.split_tunnel.interface());
+
         FirewallPolicy::Connected {
-            peer_endpoint: self.tunnel_parameters.get_next_hop_endpoint(),
+            peer_endpoint,
             tunnel: self.metadata.clone(),
             allow_lan: shared_values.allow_lan,
             #[cfg(not(target_os = "android"))]
-            dns_servers: self.get_dns_servers(shared_values),
-            #[cfg(windows)]
-            relay_client: TunnelMonitor::get_relay_client(
-                &shared_values.resource_dir,
-                &self.tunnel_parameters,
-            ),
+            dns_config: Self::resolve_dns(&self.metadata, shared_values),
+            #[cfg(target_os = "macos")]
+            redirect_interface,
+            #[cfg(target_os = "macos")]
+            dns_redirect_port: shared_values.filtering_resolver.listening_port(),
         }
     }
 
+    fn resolve_dns(
+        metadata: &TunnelMetadata,
+        shared_values: &SharedTunnelStateValues,
+    ) -> ResolvedDnsConfig {
+        shared_values.dns_config.resolve(
+            &metadata.gateways(),
+            #[cfg(target_os = "macos")]
+            53,
+        )
+    }
+
     fn set_dns(&self, shared_values: &mut SharedTunnelStateValues) -> Result<(), BoxedError> {
-        let dns_ips = self.get_dns_servers(shared_values);
+        let dns_config: ResolvedDnsConfig = Self::resolve_dns(&self.metadata, shared_values);
 
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let dns_ips = dns_ips
-            .into_iter()
-            .filter(|ip| {
-                !crate::firewall::is_local_address(ip)
-                    || IpAddr::V4(self.metadata.ipv4_gateway) == *ip
-                    || self.metadata.ipv6_gateway.map(IpAddr::V6) == Some(*ip)
-            })
-            .collect::<Vec<_>>();
-
+        #[cfg(not(target_os = "macos"))]
         shared_values
             .dns_monitor
-            .set(&self.metadata.interface, &dns_ips)
+            .set(&self.metadata.interface, dns_config)
             .map_err(BoxedError::new)?;
+
+        // On macOS, configure only the local DNS resolver
+        #[cfg(target_os = "macos")]
+        // We do not want to forward DNS queries to *our* local resolver if we do not run a local
+        // DNS resolver *or* if the DNS config points to a loopback address.
+        if dns_config.is_loopback() || !*LOCAL_DNS_RESOLVER {
+            log::debug!("Not enabling local DNS resolver");
+            shared_values
+                .dns_monitor
+                .set(&self.metadata.interface, dns_config)
+                .map_err(BoxedError::new)?;
+        } else {
+            log::debug!("Enabling local DNS resolver");
+            // Tell local DNS resolver to start forwarding DNS queries to whatever `dns_config`
+            // specifies as DNS.
+            shared_values.runtime.block_on(
+                shared_values
+                    .filtering_resolver
+                    .enable_forward(dns_config.addresses().collect()),
+            );
+            // Set system DNS to our local DNS resolver
+            let system_dns = DnsConfig::default().resolve(
+                &[std::net::Ipv4Addr::LOCALHOST.into()],
+                shared_values.filtering_resolver.listening_port(),
+            );
+            shared_values
+                .dns_monitor
+                .set("lo", system_dns)
+                .map_err(BoxedError::new)?;
+        }
 
         Ok(())
     }
 
     fn reset_dns(shared_values: &mut SharedTunnelStateValues) {
+        #[cfg(not(target_os = "macos"))]
         if let Err(error) = shared_values.dns_monitor.reset_before_interface_removal() {
             log::error!("{}", error.display_chain_with_msg("Unable to reset DNS"));
         }
+
+        // On macOS, configure only the local DNS resolver
+        #[cfg(target_os = "macos")]
+        shared_values
+            .runtime
+            .block_on(shared_values.filtering_resolver.disable_forward());
     }
 
-    fn reset_routes(shared_values: &mut SharedTunnelStateValues) {
+    fn reset_routes(
+        #[cfg(target_os = "windows")] shared_values: &SharedTunnelStateValues,
+        #[cfg(not(target_os = "windows"))] shared_values: &mut SharedTunnelStateValues,
+    ) {
         if let Err(error) = shared_values.route_manager.clear_routes() {
             log::error!("{}", error.display_chain_with_msg("Failed to clear routes"));
         }
@@ -171,90 +240,103 @@ impl ConnectedState {
         Self::reset_routes(shared_values);
 
         EventConsequence::NewState(DisconnectingState::enter(
-            shared_values,
-            (
-                self.tunnel_close_tx,
-                self.tunnel_close_event,
-                after_disconnect,
-            ),
+            self.tunnel_close_tx,
+            self.tunnel_close_event,
+            after_disconnect,
         ))
     }
 
     fn handle_commands(
-        self,
+        self: Box<Self>,
         command: Option<TunnelCommand>,
         shared_values: &mut SharedTunnelStateValues,
     ) -> EventConsequence {
         use self::EventConsequence::*;
 
         match command {
-            Some(TunnelCommand::AllowLan(allow_lan)) => {
-                if let Err(error_cause) = shared_values.set_allow_lan(allow_lan) {
-                    self.disconnect(shared_values, AfterDisconnect::Block(error_cause))
-                } else {
-                    match self.set_firewall_policy(shared_values) {
-                        Ok(()) => {
-                            cfg_if! {
-                                if #[cfg(target_os = "android")] {
-                                    self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
-                                } else {
-                                    SameState(self.into())
-                                }
-                            }
-                        }
-                        Err(error) => self.disconnect(
-                            shared_values,
-                            AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
-                        ),
+            Some(TunnelCommand::AllowLan(allow_lan, complete_tx)) => {
+                let consequence = if shared_values.set_allow_lan(allow_lan) {
+                    #[cfg(target_os = "android")]
+                    {
+                        self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
                     }
-                }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        match self.set_firewall_policy(shared_values) {
+                            Ok(()) => SameState(self),
+                            Err(error) => self.disconnect(
+                                shared_values,
+                                AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(
+                                    error,
+                                )),
+                            ),
+                        }
+                    }
+                } else {
+                    SameState(self)
+                };
+
+                let _ = complete_tx.send(());
+                consequence
             }
+            #[cfg(not(target_os = "android"))]
             Some(TunnelCommand::AllowEndpoint(endpoint, tx)) => {
                 shared_values.allowed_endpoint = endpoint;
                 let _ = tx.send(());
-                SameState(self.into())
+                SameState(self)
             }
-            Some(TunnelCommand::Dns(servers)) => match shared_values.set_dns_servers(servers) {
-                Ok(true) => {
-                    if let Err(error) = self.set_firewall_policy(shared_values) {
-                        return self.disconnect(
-                            shared_values,
-                            AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
-                        );
+            Some(TunnelCommand::Dns(servers, complete_tx)) => {
+                let consequence = if shared_values.set_dns_config(servers) {
+                    #[cfg(target_os = "android")]
+                    {
+                        self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
                     }
-
-                    match self.set_dns(shared_values) {
-                        #[cfg(target_os = "android")]
-                        Ok(()) => self.disconnect(shared_values, AfterDisconnect::Reconnect(0)),
-                        #[cfg(not(target_os = "android"))]
-                        Ok(()) => SameState(self.into()),
-                        Err(error) => {
-                            log::error!("{}", error.display_chain_with_msg("Failed to set DNS"));
-                            self.disconnect(
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        if let Err(error) = self.set_firewall_policy(shared_values) {
+                            return self.disconnect(
                                 shared_values,
-                                AfterDisconnect::Block(ErrorStateCause::SetDnsError),
-                            )
+                                AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(
+                                    error,
+                                )),
+                            );
+                        }
+
+                        match self.set_dns(shared_values) {
+                            Ok(()) => SameState(self),
+                            Err(error) => {
+                                log::error!(
+                                    "{}",
+                                    error.display_chain_with_msg("Failed to set DNS")
+                                );
+                                self.disconnect(
+                                    shared_values,
+                                    AfterDisconnect::Block(ErrorStateCause::SetDnsError),
+                                )
+                            }
                         }
                     }
-                }
-                Ok(false) => SameState(self.into()),
-                Err(error_cause) => {
-                    self.disconnect(shared_values, AfterDisconnect::Block(error_cause))
-                }
-            },
-            Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected)) => {
-                shared_values.block_when_disconnected = block_when_disconnected;
-                SameState(self.into())
+                } else {
+                    SameState(self)
+                };
+                let _ = complete_tx.send(());
+                consequence
             }
-            Some(TunnelCommand::IsOffline(is_offline)) => {
-                shared_values.is_offline = is_offline;
-                if is_offline {
+            #[cfg(not(target_os = "android"))]
+            Some(TunnelCommand::BlockWhenDisconnected(block_when_disconnected, complete_tx)) => {
+                shared_values.block_when_disconnected = block_when_disconnected;
+                let _ = complete_tx.send(());
+                SameState(self)
+            }
+            Some(TunnelCommand::Connectivity(connectivity)) => {
+                shared_values.connectivity = connectivity;
+                if connectivity.is_offline() {
                     self.disconnect(
                         shared_values,
                         AfterDisconnect::Block(ErrorStateCause::IsOffline),
                     )
                 } else {
-                    SameState(self.into())
+                    SameState(self)
                 }
             }
             Some(TunnelCommand::Connect) => {
@@ -269,18 +351,53 @@ impl ConnectedState {
             #[cfg(target_os = "android")]
             Some(TunnelCommand::BypassSocket(fd, done_tx)) => {
                 shared_values.bypass_socket(fd, done_tx);
-                SameState(self.into())
+                SameState(self)
             }
             #[cfg(windows)]
             Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
-                shared_values.split_tunnel.set_paths(&paths, result_tx);
-                SameState(self.into())
+                shared_values.exclude_paths(paths, result_tx);
+                SameState(self)
+            }
+            #[cfg(target_os = "android")]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                if shared_values.set_excluded_paths(paths) {
+                    let _ = result_tx.send(Ok(()));
+                    self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
+                } else {
+                    let _ = result_tx.send(Ok(()));
+                    SameState(self)
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Some(TunnelCommand::SetExcludedApps(result_tx, paths)) => {
+                match shared_values.set_exclude_paths(paths) {
+                    Ok(interface_changed) => {
+                        let _ = result_tx.send(Ok(()));
+
+                        if interface_changed {
+                            if let Err(error) = self.set_firewall_policy(shared_values) {
+                                return self.disconnect(
+                                    shared_values,
+                                    AfterDisconnect::Block(
+                                        ErrorStateCause::SetFirewallPolicyError(error),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let cause = ErrorStateCause::from(&error);
+                        let _ = result_tx.send(Err(error));
+                        return self.disconnect(shared_values, AfterDisconnect::Block(cause));
+                    }
+                }
+                SameState(self)
             }
         }
     }
 
     fn handle_tunnel_events(
-        self,
+        self: Box<Self>,
         event: Option<(TunnelEvent, oneshot::Sender<()>)>,
         shared_values: &mut SharedTunnelStateValues,
     ) -> EventConsequence {
@@ -290,7 +407,7 @@ impl ConnectedState {
             Some((TunnelEvent::Down, _)) | None => {
                 self.disconnect(shared_values, AfterDisconnect::Reconnect(0))
             }
-            Some(_) => SameState(self.into()),
+            Some(_) => SameState(self),
         }
     }
 
@@ -315,49 +432,8 @@ impl ConnectedState {
 }
 
 impl TunnelState for ConnectedState {
-    type Bootstrap = ConnectedStateBootstrap;
-
-    #[cfg_attr(target_os = "android", allow(unused_variables))]
-    fn enter(
-        shared_values: &mut SharedTunnelStateValues,
-        bootstrap: Self::Bootstrap,
-    ) -> (TunnelStateWrapper, TunnelStateTransition) {
-        let connected_state = ConnectedState::from(bootstrap);
-        let tunnel_interface = Some(connected_state.metadata.interface.clone());
-        let tunnel_endpoint = talpid_types::net::TunnelEndpoint {
-            tunnel_interface,
-            ..connected_state.tunnel_parameters.get_tunnel_endpoint()
-        };
-
-        if let Err(error) = connected_state.set_firewall_policy(shared_values) {
-            DisconnectingState::enter(
-                shared_values,
-                (
-                    connected_state.tunnel_close_tx,
-                    connected_state.tunnel_close_event,
-                    AfterDisconnect::Block(ErrorStateCause::SetFirewallPolicyError(error)),
-                ),
-            )
-        } else if let Err(error) = connected_state.set_dns(shared_values) {
-            log::error!("{}", error.display_chain_with_msg("Failed to set DNS"));
-            DisconnectingState::enter(
-                shared_values,
-                (
-                    connected_state.tunnel_close_tx,
-                    connected_state.tunnel_close_event,
-                    AfterDisconnect::Block(ErrorStateCause::SetDnsError),
-                ),
-            )
-        } else {
-            (
-                TunnelStateWrapper::from(connected_state),
-                TunnelStateTransition::Connected(tunnel_endpoint),
-            )
-        }
-    }
-
     fn handle_event(
-        mut self,
+        mut self: Box<Self>,
         runtime: &tokio::runtime::Handle,
         commands: &mut TunnelCommandReceiver,
         shared_values: &mut SharedTunnelStateValues,

@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 20/03/2019.
-//  Copyright © 2019 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import UIKit
@@ -31,18 +31,21 @@ extension UIColor {
 
     enum TextField {
         static let placeholderTextColor = UIColor(red: 0.16, green: 0.30, blue: 0.45, alpha: 0.40)
+        static let inactivePlaceholderTextColor = UIColor(white: 1.0, alpha: 0.4)
         static let textColor = UIColor(red: 0.16, green: 0.30, blue: 0.45, alpha: 1.0)
+        static let inactiveTextColor = UIColor.white
         static let backgroundColor = UIColor.white
+        static let inactiveBackgroundColor = UIColor(white: 1.0, alpha: 0.1)
         static let invalidInputTextColor = UIColor.dangerColor
     }
 
     enum SearchTextField {
         static let placeholderTextColor = TextField.placeholderTextColor
-        static let inactivePlaceholderTextColor = UIColor(white: 1.0, alpha: 0.4)
+        static let inactivePlaceholderTextColor = TextField.inactivePlaceholderTextColor
         static let textColor = TextField.textColor
-        static let inactiveTextColor = UIColor.white
+        static let inactiveTextColor = TextField.inactiveTextColor
         static let backgroundColor = TextField.backgroundColor
-        static let inactiveBackgroundColor = UIColor(white: 1.0, alpha: 0.1)
+        static let inactiveBackgroundColor = TextField.inactiveBackgroundColor
         static let leftViewTintColor = UIColor.primaryColor
         static let inactiveLeftViewTintColor = UIColor.white
     }
@@ -50,7 +53,7 @@ extension UIColor {
     enum AppButton {
         static let normalTitleColor = UIColor.white
         static let highlightedTitleColor = UIColor.lightGray
-        static let disabledTitleColor = UIColor.lightGray
+        static let disabledTitleColor = UIColor.white.withAlphaComponent(0.2)
     }
 
     enum Switch {
@@ -72,34 +75,49 @@ extension UIColor {
 
     // Navigation bars
     enum NavigationBar {
-        static let backButtonIndicatorColor = UIColor(white: 1.0, alpha: 0.4)
-        static let backButtonTitleColor = UIColor(white: 1.0, alpha: 0.6)
+        static let buttonColor = UIColor(white: 1.0, alpha: 0.8)
+        static let backButtonTitleColor = UIColor.white
         static let titleColor = UIColor.white
+        static let promptColor = UIColor.white
+    }
+
+    // Heading displayed below the navigation bar.
+    enum ContentHeading {
+        static let textColor = UIColor(white: 1.0, alpha: 0.6)
+        static let linkColor = UIColor.white
     }
 
     // Cells
     enum Cell {
-        static let backgroundColor = primaryColor
-        static let disabledBackgroundColor = backgroundColor.darkened(by: 0.3)!
+        enum Background {
+            static let indentationLevelZero = UIColor(red: 0.14, green: 0.25, blue: 0.38, alpha: 1.0)
+            static let indentationLevelOne = UIColor(red: 0.12, green: 0.23, blue: 0.34, alpha: 1.0)
+            static let indentationLevelTwo = UIColor(red: 0.11, green: 0.20, blue: 0.31, alpha: 1.0)
+            static let indentationLevelThree = UIColor(red: 0.11, green: 0.19, blue: 0.29, alpha: 1.0)
 
-        static let selectedBackgroundColor = successColor
-        static let disabledSelectedBackgroundColor = selectedBackgroundColor.darkened(by: 0.3)!
-
-        static let selectedAltBackgroundColor = backgroundColor.darkened(by: 0.2)!
+            static let normal = indentationLevelZero
+            static let disabled = normal.darkened(by: 0.1)!
+            static let selected = successColor
+            static let disabledSelected = selected.darkened(by: 0.3)!
+            static let selectedAlt = normal.darkened(by: 0.1)!
+        }
 
         static let titleTextColor = UIColor.white
         static let detailTextColor = UIColor(white: 1.0, alpha: 0.8)
 
         static let disclosureIndicatorColor = UIColor(white: 1.0, alpha: 0.8)
+        static let textFieldTextColor = UIColor.white
+        static let textFieldPlaceholderColor = UIColor(white: 1.0, alpha: 0.6)
+
+        static let validationErrorBorderColor = UIColor.dangerColor
     }
 
-    enum SubCell {
-        static let backgroundColor = UIColor(red: 0.15, green: 0.23, blue: 0.33, alpha: 1.0)
+    enum TableSection {
+        static let headerTextColor = UIColor(white: 1.0, alpha: 0.8)
+        static let footerTextColor = UIColor(white: 1.0, alpha: 0.6)
     }
 
-    enum SubSubCell {
-        static let backgroundColor = UIColor(red: 0.13, green: 0.20, blue: 0.30, alpha: 1.0)
-    }
+    enum SettingsCellBackground {}
 
     enum HeaderBar {
         static let defaultBackgroundColor = primaryColor
@@ -121,10 +139,22 @@ extension UIColor {
         static let actionButtonColor = UIColor(white: 1.0, alpha: 0.8)
     }
 
+    enum SegmentedControl {
+        static let backgroundColor = UIColor(red: 0.14, green: 0.25, blue: 0.38, alpha: 1.0)
+        static let selectedColor = successColor
+    }
+
+    enum AlertController {
+        static let tintColor = UIColor(red: 0.0, green: 0.59, blue: 1.0, alpha: 1)
+    }
+
     // Common colors
     static let primaryColor = UIColor(red: 0.16, green: 0.30, blue: 0.45, alpha: 1.0)
     static let secondaryColor = UIColor(red: 0.10, green: 0.18, blue: 0.27, alpha: 1.0)
     static let dangerColor = UIColor(red: 0.89, green: 0.25, blue: 0.22, alpha: 1.0)
     static let warningColor = UIColor(red: 1.0, green: 0.84, blue: 0.14, alpha: 1.0)
     static let successColor = UIColor(red: 0.27, green: 0.68, blue: 0.30, alpha: 1.0)
+
+    static let primaryTextColor = UIColor.white
+    static let secondaryTextColor = UIColor(white: 1.0, alpha: 0.8)
 }

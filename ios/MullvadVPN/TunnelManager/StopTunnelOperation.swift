@@ -3,14 +3,15 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 15/12/2021.
-//  Copyright © 2021 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 import Operations
 
-class StopTunnelOperation: ResultOperation<Void> {
+class StopTunnelOperation: ResultOperation<Void>, @unchecked Sendable {
     private let interactor: TunnelInteractor
+    var isOnDemandEnabled = false
 
     init(
         dispatchQueue: DispatchQueue,
@@ -35,28 +36,32 @@ class StopTunnelOperation: ResultOperation<Void> {
 
             finish(result: .success(()))
 
-        case .connected, .connecting, .reconnecting, .waitingForConnectivity(.noConnection):
-            guard let tunnel = interactor.tunnel else {
-                finish(result: .failure(UnsetTunnelError()))
-                return
-            }
-
-            // Disable on-demand when stopping the tunnel to prevent it from coming back up
-            tunnel.isOnDemandEnabled = false
-
-            tunnel.saveToPreferences { error in
-                self.dispatchQueue.async {
-                    if let error {
-                        self.finish(result: .failure(error))
-                    } else {
-                        tunnel.stop()
-                        self.finish(result: .success(()))
-                    }
-                }
-            }
+        case .connected, .connecting, .reconnecting, .waitingForConnectivity(.noConnection), .error,
+             .negotiatingEphemeralPeer:
+            doShutDownTunnel()
 
         case .disconnected, .disconnecting, .pendingReconnect, .waitingForConnectivity(.noNetwork):
             finish(result: .success(()))
+        }
+    }
+
+    private func doShutDownTunnel() {
+        guard let tunnel = interactor.tunnel else {
+            finish(result: .failure(UnsetTunnelError()))
+            return
+        }
+
+        tunnel.isOnDemandEnabled = isOnDemandEnabled
+
+        tunnel.saveToPreferences { error in
+            self.dispatchQueue.async {
+                if let error {
+                    self.finish(result: .failure(error))
+                } else {
+                    tunnel.stop()
+                    self.finish(result: .success(()))
+                }
+            }
         }
     }
 }

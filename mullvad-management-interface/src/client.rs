@@ -1,31 +1,48 @@
 //! Client that returns and takes mullvad types as arguments instead of prost-generated types
 
 use crate::types;
+#[cfg(not(target_os = "android"))]
 use futures::{Stream, StreamExt};
+#[cfg(all(daita, not(target_os = "android")))]
+use mullvad_types::wireguard::DaitaSettings;
 use mullvad_types::{
-    account::{AccountData, AccountToken, VoucherSubmission},
-    device::{Device, DeviceEvent, DeviceId, DeviceState, RemoveDeviceEvent},
-    location::GeoIpLocation,
-    relay_constraints::{BridgeSettings, BridgeState, ObfuscationSettings, RelaySettingsUpdate},
+    access_method::AccessMethodSetting,
+    device::{DeviceEvent, RemoveDeviceEvent},
     relay_list::RelayList,
-    settings::{DnsOptions, Settings},
+    settings::Settings,
     states::TunnelState,
     version::AppVersionInfo,
+};
+
+#[cfg(not(target_os = "android"))]
+use mullvad_types::{
+    access_method::{self, AccessMethod},
+    account::{AccountData, AccountNumber, VoucherSubmission},
+    custom_list::{CustomList, Id},
+    device::{Device, DeviceId, DeviceState},
+    features::FeatureIndicators,
+    relay_constraints::{
+        BridgeSettings, BridgeState, ObfuscationSettings, RelayOverride, RelaySettings,
+    },
+    settings::DnsOptions,
     wireguard::{PublicKey, QuantumResistantState, RotationInterval},
 };
-#[cfg(target_os = "windows")]
-use std::path::Path;
+#[cfg(not(target_os = "android"))]
+use std::{path::Path, str::FromStr};
 #[cfg(target_os = "windows")]
 use talpid_types::split_tunnel::ExcludedProcess;
+#[cfg(not(target_os = "android"))]
 use tonic::{Code, Status};
 
 type Error = super::Error;
 
 pub type Result<T> = std::result::Result<T, super::Error>;
 
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Clone)]
 pub struct MullvadProxyClient(crate::ManagementServiceClient);
 
+#[derive(Debug)]
 pub enum DaemonEvent {
     TunnelState(TunnelState),
     Settings(Settings),
@@ -33,6 +50,7 @@ pub enum DaemonEvent {
     AppVersionInfo(AppVersionInfo),
     Device(DeviceEvent),
     RemoveDevice(RemoveDeviceEvent),
+    NewAccessMethod(AccessMethodSetting),
 }
 
 impl TryFrom<types::daemon_event::Event> for DaemonEvent {
@@ -58,14 +76,24 @@ impl TryFrom<types::daemon_event::Event> for DaemonEvent {
             types::daemon_event::Event::RemoveDevice(event) => RemoveDeviceEvent::try_from(event)
                 .map(DaemonEvent::RemoveDevice)
                 .map_err(Error::InvalidResponse),
+            types::daemon_event::Event::NewAccessMethod(event) => {
+                AccessMethodSetting::try_from(event)
+                    .map(DaemonEvent::NewAccessMethod)
+                    .map_err(Error::InvalidResponse)
+            }
         }
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl MullvadProxyClient {
     pub async fn new() -> Result<Self> {
         #[allow(deprecated)]
         super::new_rpc_client().await.map(Self)
+    }
+
+    pub fn from_rpc_client(client: crate::ManagementServiceClient) -> Self {
+        Self(client)
     }
 
     pub async fn connect_tunnel(&mut self) -> Result<bool> {
@@ -105,7 +133,9 @@ impl MullvadProxyClient {
         TunnelState::try_from(state).map_err(Error::InvalidResponse)
     }
 
-    pub async fn events_listen(&mut self) -> Result<impl Stream<Item = Result<DaemonEvent>>> {
+    pub async fn events_listen<'a>(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<DaemonEvent>> + 'a> {
         let listener = self
             .0
             .events_listen(())
@@ -122,8 +152,22 @@ impl MullvadProxyClient {
         }))
     }
 
+    /// DEPRECATED: Prefer to use `prepare_restart_v2`.
     pub async fn prepare_restart(&mut self) -> Result<()> {
         self.0.prepare_restart(()).await.map_err(Error::Rpc)?;
+        Ok(())
+    }
+
+    /// Tell the daemon to get ready for a restart by securing a user, i.e. putting firewall rules
+    /// in place.
+    ///
+    /// - `shutdown`: Whether the daemon should shutdown immediately after its prepare-for-restart
+    ///   routine.
+    pub async fn prepare_restart_v2(&mut self, shutdown: bool) -> Result<()> {
+        self.0
+            .prepare_restart_v2(shutdown)
+            .await
+            .map_err(Error::Rpc)?;
         Ok(())
     }
 
@@ -161,6 +205,66 @@ impl MullvadProxyClient {
         mullvad_types::relay_list::RelayList::try_from(list).map_err(Error::InvalidResponse)
     }
 
+    pub async fn get_api_access_methods(&mut self) -> Result<Vec<AccessMethodSetting>> {
+        let access_method_settings = self
+            .0
+            .get_settings(())
+            .await
+            .map_err(Error::Rpc)?
+            .into_inner()
+            .api_access_methods
+            .ok_or(Error::ApiAccessMethodSettingsNotFound)
+            .and_then(|access_method_settings| {
+                access_method::Settings::try_from(access_method_settings)
+                    .map_err(Error::InvalidResponse)
+            })?;
+
+        Ok(access_method_settings.iter().cloned().collect())
+    }
+
+    pub async fn get_api_access_method(
+        &mut self,
+        id: &access_method::Id,
+    ) -> Result<AccessMethodSetting> {
+        self.get_api_access_methods()
+            .await?
+            .into_iter()
+            .find(|api_access_method| api_access_method.get_id() == *id)
+            .ok_or(Error::ApiAccessMethodNotFound)
+    }
+
+    pub async fn get_current_api_access_method(&mut self) -> Result<AccessMethodSetting> {
+        self.0
+            .get_current_api_access_method(())
+            .await
+            .map_err(Error::Rpc)
+            .map(tonic::Response::into_inner)
+            .and_then(|access_method| {
+                AccessMethodSetting::try_from(access_method).map_err(Error::InvalidResponse)
+            })
+    }
+
+    pub async fn test_api_access_method(&mut self, id: access_method::Id) -> Result<bool> {
+        let result = self
+            .0
+            .test_api_access_method_by_id(types::Uuid::from(id))
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(result.into_inner())
+    }
+
+    pub async fn test_custom_api_access_method(
+        &mut self,
+        config: talpid_types::net::proxy::CustomProxy,
+    ) -> Result<bool> {
+        let result = self
+            .0
+            .test_custom_api_access_method(types::CustomProxy::from(config))
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(result.into_inner())
+    }
+
     pub async fn update_relay_locations(&mut self) -> Result<()> {
         self.0
             .update_relay_locations(())
@@ -169,23 +273,13 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    pub async fn update_relay_settings(&mut self, update: RelaySettingsUpdate) -> Result<()> {
-        let update = types::RelaySettingsUpdate::from(update);
+    pub async fn set_relay_settings(&mut self, update: RelaySettings) -> Result<()> {
+        let update = types::RelaySettings::from(update);
         self.0
-            .update_relay_settings(update)
+            .set_relay_settings(update)
             .await
             .map_err(Error::Rpc)?;
         Ok(())
-    }
-
-    pub async fn get_current_location(&mut self) -> Result<GeoIpLocation> {
-        let location = self
-            .0
-            .get_current_location(())
-            .await
-            .map_err(map_location_error)?
-            .into_inner();
-        GeoIpLocation::try_from(location).map_err(Error::InvalidResponse)
     }
 
     pub async fn set_bridge_settings(&mut self, settings: BridgeSettings) -> Result<()> {
@@ -220,6 +314,11 @@ impl MullvadProxyClient {
             .map_err(Error::Rpc)?
             .into_inner();
         Settings::try_from(settings).map_err(Error::InvalidResponse)
+    }
+
+    pub async fn reset_settings(&mut self) -> Result<()> {
+        self.0.reset_settings(()).await.map_err(Error::Rpc)?;
+        Ok(())
     }
 
     pub async fn set_allow_lan(&mut self, state: bool) -> Result<()> {
@@ -281,13 +380,55 @@ impl MullvadProxyClient {
         Ok(())
     }
 
+    #[cfg(daita)]
+    pub async fn set_enable_daita(&mut self, value: bool) -> Result<()> {
+        self.0.set_enable_daita(value).await.map_err(Error::Rpc)?;
+        Ok(())
+    }
+
+    #[cfg(daita)]
+    pub async fn set_daita_direct_only(&mut self, value: bool) -> Result<()> {
+        self.0
+            .set_daita_direct_only(value)
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(())
+    }
+
+    #[cfg(daita)]
+    pub async fn set_daita_settings(&mut self, settings: DaitaSettings) -> Result<()> {
+        let settings = types::DaitaSettings::from(settings);
+        self.0
+            .set_daita_settings(settings)
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(())
+    }
+
     pub async fn set_dns_options(&mut self, options: DnsOptions) -> Result<()> {
         let options = types::DnsOptions::from(&options);
         self.0.set_dns_options(options).await.map_err(Error::Rpc)?;
         Ok(())
     }
 
-    pub async fn create_new_account(&mut self) -> Result<AccountToken> {
+    pub async fn set_relay_override(&mut self, relay_override: RelayOverride) -> Result<()> {
+        let r#override = types::RelayOverride::from(relay_override);
+        self.0
+            .set_relay_override(r#override)
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(())
+    }
+
+    pub async fn clear_all_relay_overrides(&mut self) -> Result<()> {
+        self.0
+            .clear_all_relay_overrides(())
+            .await
+            .map_err(Error::Rpc)?;
+        Ok(())
+    }
+
+    pub async fn create_new_account(&mut self) -> Result<AccountNumber> {
         Ok(self
             .0
             .create_new_account(())
@@ -296,7 +437,7 @@ impl MullvadProxyClient {
             .into_inner())
     }
 
-    pub async fn login_account(&mut self, account: AccountToken) -> Result<()> {
+    pub async fn login_account(&mut self, account: AccountNumber) -> Result<()> {
         self.0
             .login_account(account)
             .await
@@ -309,7 +450,7 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    pub async fn get_account_data(&mut self, account: AccountToken) -> Result<AccountData> {
+    pub async fn get_account_data(&mut self, account: AccountNumber) -> Result<AccountData> {
         let data = self
             .0
             .get_account_data(account)
@@ -319,14 +460,14 @@ impl MullvadProxyClient {
         AccountData::try_from(data).map_err(Error::InvalidResponse)
     }
 
-    pub async fn get_account_history(&mut self) -> Result<Option<AccountToken>> {
+    pub async fn get_account_history(&mut self) -> Result<Option<AccountNumber>> {
         let history = self
             .0
             .get_account_history(())
             .await
             .map_err(Error::Rpc)?
             .into_inner();
-        Ok(history.token)
+        Ok(history.number)
     }
 
     pub async fn clear_account_history(&mut self) -> Result<()> {
@@ -365,7 +506,7 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    pub async fn list_devices(&mut self, account: AccountToken) -> Result<Vec<Device>> {
+    pub async fn list_devices(&mut self, account: AccountNumber) -> Result<Vec<Device>> {
         let list = self
             .0
             .list_devices(account)
@@ -380,12 +521,12 @@ impl MullvadProxyClient {
 
     pub async fn remove_device(
         &mut self,
-        account: AccountToken,
+        account: AccountNumber,
         device_id: DeviceId,
     ) -> Result<()> {
         self.0
             .remove_device(types::DeviceRemoval {
-                account_token: account,
+                account_number: account,
                 device_id,
             })
             .await
@@ -429,7 +570,99 @@ impl MullvadProxyClient {
         PublicKey::try_from(key).map_err(Error::InvalidResponse)
     }
 
-    #[cfg(target_os = "linux")]
+    pub async fn create_custom_list(&mut self, name: String) -> Result<Id> {
+        let id = self
+            .0
+            .create_custom_list(name)
+            .await
+            .map_err(map_custom_list_error)?
+            .into_inner();
+        Id::from_str(&id).map_err(|_| Error::CustomListListNotFound)
+    }
+
+    pub async fn delete_custom_list(&mut self, id: String) -> Result<()> {
+        self.0
+            .delete_custom_list(id)
+            .await
+            .map_err(map_custom_list_error)?;
+        Ok(())
+    }
+
+    pub async fn update_custom_list(&mut self, custom_list: CustomList) -> Result<()> {
+        self.0
+            .update_custom_list(types::CustomList::from(custom_list))
+            .await
+            .map_err(map_custom_list_error)?;
+        Ok(())
+    }
+
+    /// Remove all custom lists.
+    pub async fn clear_custom_lists(&mut self) -> Result<()> {
+        self.0
+            .clear_custom_lists(())
+            .await
+            .map_err(map_custom_list_error)?;
+        Ok(())
+    }
+
+    pub async fn add_access_method(
+        &mut self,
+        name: String,
+        enabled: bool,
+        access_method: AccessMethod,
+    ) -> Result<()> {
+        let request = types::NewAccessMethodSetting {
+            name,
+            enabled,
+            access_method: Some(types::AccessMethod::from(access_method)),
+        };
+        self.0
+            .add_api_access_method(request)
+            .await
+            .map_err(Error::Rpc)
+            .map(drop)
+    }
+
+    pub async fn remove_access_method(
+        &mut self,
+        api_access_method: access_method::Id,
+    ) -> Result<()> {
+        self.0
+            .remove_api_access_method(types::Uuid::from(api_access_method))
+            .await
+            .map_err(Error::Rpc)
+            .map(drop)
+    }
+
+    pub async fn update_access_method(
+        &mut self,
+        access_method_update: AccessMethodSetting,
+    ) -> Result<()> {
+        self.0
+            .update_api_access_method(types::AccessMethodSetting::from(access_method_update))
+            .await
+            .map_err(Error::Rpc)
+            .map(drop)
+    }
+
+    /// Remove all custom API access methods.
+    pub async fn clear_custom_access_methods(&mut self) -> Result<()> {
+        self.0
+            .clear_custom_api_access_methods(())
+            .await
+            .map_err(Error::Rpc)
+            .map(drop)
+    }
+
+    /// Set the [`AccessMethod`] which `AccessModeSelector` should pick.
+    pub async fn set_access_method(&mut self, api_access_method: access_method::Id) -> Result<()> {
+        self.0
+            .set_api_access_method(types::Uuid::from(api_access_method))
+            .await
+            .map_err(Error::Rpc)
+            .map(drop)
+    }
+
     pub async fn get_split_tunnel_processes(&mut self) -> Result<Vec<i32>> {
         use futures::TryStreamExt;
 
@@ -442,7 +675,6 @@ impl MullvadProxyClient {
         procs.try_collect().await.map_err(Error::Rpc)
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn add_split_tunnel_process(&mut self, pid: i32) -> Result<()> {
         self.0
             .add_split_tunnel_process(pid)
@@ -451,7 +683,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn remove_split_tunnel_process(&mut self, pid: i32) -> Result<()> {
         self.0
             .remove_split_tunnel_process(pid)
@@ -460,7 +691,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn clear_split_tunnel_processes(&mut self) -> Result<()> {
         self.0
             .clear_split_tunnel_processes(())
@@ -469,7 +699,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
     pub async fn add_split_tunnel_app<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref().to_str().ok_or(Error::PathMustBeUtf8)?;
         self.0
@@ -479,7 +708,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
     pub async fn remove_split_tunnel_app<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref().to_str().ok_or(Error::PathMustBeUtf8)?;
         self.0
@@ -489,7 +717,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
     pub async fn clear_split_tunnel_apps(&mut self) -> Result<()> {
         self.0
             .clear_split_tunnel_apps(())
@@ -498,7 +725,6 @@ impl MullvadProxyClient {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
     pub async fn set_split_tunnel_state(&mut self, state: bool) -> Result<()> {
         self.0
             .set_split_tunnel_state(state)
@@ -522,18 +748,29 @@ impl MullvadProxyClient {
             .collect::<Vec<_>>())
     }
 
-    #[cfg(target_os = "windows")]
-    pub async fn set_use_wireguard_nt(&mut self, state: bool) -> Result<()> {
-        self.0
-            .set_use_wireguard_nt(state)
-            .await
-            .map_err(Error::Rpc)?;
+    // check_volumes
+
+    pub async fn apply_json_settings(&mut self, blob: String) -> Result<()> {
+        self.0.apply_json_settings(blob).await.map_err(Error::Rpc)?;
         Ok(())
     }
 
-    // check_volumes
+    pub async fn export_json_settings(&mut self) -> Result<String> {
+        let blob = self.0.export_json_settings(()).await.map_err(Error::Rpc)?;
+        Ok(blob.into_inner())
+    }
+
+    pub async fn get_feature_indicators(&mut self) -> Result<FeatureIndicators> {
+        self.0
+            .get_feature_indicators(())
+            .await
+            .map_err(Error::Rpc)
+            .map(|response| response.into_inner())
+            .map(FeatureIndicators::from)
+    }
 }
 
+#[cfg(not(target_os = "android"))]
 fn map_device_error(status: Status) -> Error {
     match status.code() {
         Code::ResourceExhausted => Error::TooManyDevices,
@@ -544,9 +781,23 @@ fn map_device_error(status: Status) -> Error {
     }
 }
 
-fn map_location_error(status: Status) -> Error {
+#[cfg(not(target_os = "android"))]
+fn map_custom_list_error(status: Status) -> Error {
     match status.code() {
-        Code::NotFound => Error::NoLocationData,
+        Code::NotFound => {
+            if status.details() == crate::CUSTOM_LIST_LIST_NOT_FOUND_DETAILS {
+                Error::CustomListListNotFound
+            } else {
+                Error::Rpc(status)
+            }
+        }
+        Code::AlreadyExists => {
+            if status.details() == crate::CUSTOM_LIST_LIST_EXISTS_DETAILS {
+                Error::CustomListExists
+            } else {
+                Error::Rpc(status)
+            }
+        }
         _other => Error::Rpc(status),
     }
 }

@@ -11,22 +11,22 @@ const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(err_derive::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(display = "Failed to watch /etc/resolv.conf for changes")]
-    WatchResolvConf(#[error(source)] std::io::Error),
+    #[error("Failed to watch /etc/resolv.conf for changes")]
+    WatchResolvConf(#[source] std::io::Error),
 
-    #[error(display = "Failed to write to {}", _0)]
-    WriteResolvConf(&'static str, #[error(source)] io::Error),
+    #[error("Failed to write to {0}")]
+    WriteResolvConf(&'static str, #[source] io::Error),
 
-    #[error(display = "Failed to read from {}", _0)]
-    ReadResolvConf(&'static str, #[error(source)] io::Error),
+    #[error("Failed to read from {0}")]
+    ReadResolvConf(&'static str, #[source] io::Error),
 
-    #[error(display = "resolv.conf at {} could not be parsed", _0)]
-    Parse(&'static str, #[error(source)] resolv_conf::ParseError),
+    #[error("resolv.conf at {0} could not be parsed")]
+    Parse(&'static str, #[source] resolv_conf::ParseError),
 
-    #[error(display = "Failed to remove stale resolv.conf backup at {}", _0)]
-    RemoveBackup(&'static str, #[error(source)] io::Error),
+    #[error("Failed to remove stale resolv.conf backup at {0}")]
+    RemoveBackup(&'static str, #[source] io::Error),
 }
 
 pub struct StaticResolvConf {
@@ -35,11 +35,11 @@ pub struct StaticResolvConf {
 }
 
 impl StaticResolvConf {
-    pub async fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         restore_from_backup()?;
 
         let state = Arc::new(Mutex::new(None));
-        let watcher = DnsWatcher::start(state.clone()).await?;
+        let watcher = DnsWatcher::start(state.clone())?;
 
         Ok(StaticResolvConf {
             state,
@@ -112,8 +112,8 @@ impl Drop for DnsWatcher {
 }
 
 impl DnsWatcher {
-    async fn start(state: Arc<Mutex<Option<State>>>) -> Result<Self> {
-        let mut watcher = Inotify::init().map_err(Error::WatchResolvConf)?;
+    fn start(state: Arc<Mutex<Option<State>>>) -> Result<Self> {
+        let watcher = Inotify::init().map_err(Error::WatchResolvConf)?;
         let mut mask = WatchMask::empty();
         // Documentation for the meaning of these masks can be found in `man inotify`
         //
@@ -125,7 +125,8 @@ impl DnsWatcher {
         mask.insert(WatchMask::MOVE_SELF);
 
         watcher
-            .add_watch(RESOLV_CONF_PATH, mask)
+            .watches()
+            .add(RESOLV_CONF_PATH, mask)
             .map_err(Error::WatchResolvConf)?;
 
         let (cancel_trigger, cancel_listener) = trigger();
@@ -136,14 +137,14 @@ impl DnsWatcher {
     }
 
     async fn event_loop(
-        mut watcher: Inotify,
+        watcher: Inotify,
         mut cancel_listener: Listener,
         state: &Arc<Mutex<Option<State>>>,
     ) {
         const EVENT_BUFFER_SIZE: usize = 1024;
         let mut buffer = [0; EVENT_BUFFER_SIZE];
         let mut events = watcher
-            .event_stream(&mut buffer)
+            .into_event_stream(&mut buffer)
             .expect("Could not read events for resolv.conf");
 
         loop {

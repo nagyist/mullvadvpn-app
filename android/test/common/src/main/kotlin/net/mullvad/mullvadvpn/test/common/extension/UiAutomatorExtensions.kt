@@ -7,7 +7,7 @@ import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import java.util.regex.Pattern
-import net.mullvad.mullvadvpn.test.common.constant.DEFAULT_INTERACTION_TIMEOUT
+import net.mullvad.mullvadvpn.test.common.constant.DEFAULT_TIMEOUT
 
 fun UiDevice.findObjectByCaseInsensitiveText(text: String): UiObject2 {
     return findObjectWithTimeout(By.text(Pattern.compile(text, Pattern.CASE_INSENSITIVE)))
@@ -17,28 +17,38 @@ fun UiObject2.findObjectByCaseInsensitiveText(text: String): UiObject2 {
     return findObjectWithTimeout(By.text(Pattern.compile(text, Pattern.CASE_INSENSITIVE)))
 }
 
+fun UiDevice.hasObjectWithTimeout(selector: BySelector, timeout: Long = DEFAULT_TIMEOUT): Boolean =
+    wait(Until.hasObject(selector), timeout)
+
 fun UiDevice.findObjectWithTimeout(
     selector: BySelector,
-    timeout: Long = DEFAULT_INTERACTION_TIMEOUT
+    timeout: Long = DEFAULT_TIMEOUT,
 ): UiObject2 {
 
     wait(Until.hasObject(selector), timeout)
 
-    return try {
-        findObject(selector)
-    } catch (e: NullPointerException) {
-        throw IllegalArgumentException(
-            "No matches for selector within timeout ($timeout): $selector"
-        )
-    }
+    val foundObject = findObject(selector)
+
+    require(foundObject != null) { "No matches for selector within timeout ($timeout): $selector" }
+
+    return foundObject
 }
 
 fun UiDevice.clickAgreeOnPrivacyDisclaimer() {
     findObjectWithTimeout(By.text("Agree and continue")).click()
 }
 
+// The dialog will only be shown when there's a new version code and bundled release notes.
+fun UiDevice.dismissChangelogDialogIfShown() {
+    try {
+        findObjectWithTimeout(By.text("Got it!")).click()
+    } catch (e: IllegalArgumentException) {
+        // This is OK since it means the changes dialog wasn't shown.
+    }
+}
+
 fun UiDevice.clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove(
-    timeout: Long = DEFAULT_INTERACTION_TIMEOUT
+    timeout: Long = DEFAULT_TIMEOUT
 ) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         // Skipping as notification permissions are not shown.
@@ -60,7 +70,7 @@ fun UiDevice.clickAllowOnNotificationPermissionPromptIfApiLevel33AndAbove(
 
 fun UiObject2.findObjectWithTimeout(
     selector: BySelector,
-    timeout: Long = DEFAULT_INTERACTION_TIMEOUT
+    timeout: Long = DEFAULT_TIMEOUT,
 ): UiObject2 {
 
     wait(Until.hasObject(selector), timeout)

@@ -3,11 +3,12 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 02/08/2020.
-//  Copyright © 2020 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
 @_exported import Logging
+import MullvadTypes
 
 private enum LoggerOutput {
     case fileOutput(_ fileOutput: LogFileOutputStream)
@@ -20,11 +21,13 @@ public struct LoggerBuilder {
 
     public var metadata: Logger.Metadata = [:]
     public var logLevel: Logger.Level = .debug
+    public var header: String
 
-    public init() {}
+    public init(header: String) {
+        self.header = header
+    }
 
     public mutating func addFileOutput(fileURL: URL) {
-        let logFileName = fileURL.lastPathComponent
         let logsDirectoryURL = fileURL.deletingLastPathComponent()
 
         try? FileManager.default.createDirectory(
@@ -34,12 +37,15 @@ public struct LoggerBuilder {
         )
 
         do {
-            try LogRotation.rotateLog(logsDirectory: logsDirectoryURL, logFileName: logFileName)
+            try LogRotation.rotateLogs(logDirectory: logsDirectoryURL, options: LogRotation.Options(
+                storageSizeLimit: 2_000_000, // 2 MB
+                oldestAllowedDate: Date(timeIntervalSinceNow: -Duration.days(7).timeInterval)
+            ))
         } catch {
             logRotationErrors.append(error)
         }
 
-        outputs.append(.fileOutput(LogFileOutputStream(fileURL: fileURL)))
+        outputs.append(.fileOutput(LogFileOutputStream(fileURL: fileURL, header: header)))
     }
 
     public mutating func addOSLogOutput(subsystem: String) {
@@ -72,7 +78,7 @@ public struct LoggerBuilder {
             let rotationLogger = Logger(label: "LogRotation")
 
             for error in logRotationErrors {
-                rotationLogger.error(error: error, message: "Failed to rotate log")
+                rotationLogger.error(error: error, message: error.localizedDescription)
             }
         }
     }

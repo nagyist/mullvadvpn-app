@@ -3,7 +3,7 @@
 //  MullvadVPN
 //
 //  Created by pronebird on 29/03/2022.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import Foundation
@@ -13,8 +13,9 @@ import MullvadTypes
 import Operations
 import StoreKit
 
-class SendStoreReceiptOperation: ResultOperation<REST.CreateApplePaymentResponse>, SKRequestDelegate {
-    private let apiProxy: REST.APIProxy
+class SendStoreReceiptOperation: ResultOperation<REST.CreateApplePaymentResponse>, SKRequestDelegate,
+    @unchecked Sendable {
+    private let apiProxy: APIQuerying
     private let accountNumber: String
 
     private let forceRefresh: Bool
@@ -26,7 +27,7 @@ class SendStoreReceiptOperation: ResultOperation<REST.CreateApplePaymentResponse
     private let logger = Logger(label: "SendStoreReceiptOperation")
 
     init(
-        apiProxy: REST.APIProxy,
+        apiProxy: APIQuerying,
         accountNumber: String,
         forceRefresh: Bool,
         receiptProperties: [String: Any]?,
@@ -132,16 +133,15 @@ class SendStoreReceiptOperation: ResultOperation<REST.CreateApplePaymentResponse
     private func sendReceipt(_ receiptData: Data) {
         submitReceiptTask = apiProxy.createApplePayment(
             accountNumber: accountNumber,
-            receiptString: receiptData,
-            retryStrategy: .noRetry
-        ) { result in
+            receiptString: receiptData
+        ).execute(retryStrategy: .noRetry) { result in
             switch result {
             case let .success(response):
                 self.logger.info(
                     """
                     AppStore receipt was processed. \
                     Time added: \(response.timeAdded), \
-                    New expiry: \(response.newExpiry.logFormatDate())
+                    New expiry: \(response.newExpiry.logFormatted)
                     """
                 )
                 self.finish(result: .success(response))

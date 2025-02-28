@@ -3,14 +3,14 @@
 //  MullvadVPN
 //
 //  Created by Andreas Lif on 2022-08-05.
-//  Copyright © 2022 Mullvad VPN AB. All rights reserved.
+//  Copyright © 2025 Mullvad VPN AB. All rights reserved.
 //
 
 import MullvadREST
 import MullvadTypes
 import UIKit
 
-protocol RedeemVoucherViewControllerDelegate: AnyObject {
+protocol RedeemVoucherViewControllerDelegate: AnyObject, Sendable {
     func redeemVoucherDidSucceed(
         _ controller: RedeemVoucherViewController,
         with response: REST.SubmitVoucherResponse
@@ -18,16 +18,22 @@ protocol RedeemVoucherViewControllerDelegate: AnyObject {
     func redeemVoucherDidCancel(_ controller: RedeemVoucherViewController)
 }
 
-class RedeemVoucherViewController: UIViewController, UINavigationControllerDelegate {
-    private let contentView = RedeemVoucherContentView()
-    private var voucherTask: Cancellable?
-    private var interactor: RedeemVoucherInteractor?
+@MainActor
+class RedeemVoucherViewController: UIViewController, UINavigationControllerDelegate, RootContainment {
+    private let contentView: RedeemVoucherContentView
+    nonisolated(unsafe) private var interactor: RedeemVoucherInteractor
 
     weak var delegate: RedeemVoucherViewControllerDelegate?
 
-    init(interactor: RedeemVoucherInteractor) {
-        super.init(nibName: nil, bundle: nil)
+    init(
+        configuration: RedeemVoucherViewConfiguration,
+        interactor: RedeemVoucherInteractor
+    ) {
+        self.contentView = RedeemVoucherContentView(configuration: configuration)
         self.interactor = interactor
+        self.contentView.isUserInteractionEnabled = false
+
+        super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
@@ -38,6 +44,18 @@ class RedeemVoucherViewController: UIViewController, UINavigationControllerDeleg
         .lightContent
     }
 
+    var preferredHeaderBarPresentation: HeaderBarPresentation {
+        HeaderBarPresentation(style: .default, showsDivider: true)
+    }
+
+    var prefersHeaderBarHidden: Bool {
+        false
+    }
+
+    var prefersDeviceInfoBarHidden: Bool {
+        true
+    }
+
     // MARK: - Life Cycle
 
     override func viewDidLoad() {
@@ -46,17 +64,24 @@ class RedeemVoucherViewController: UIViewController, UINavigationControllerDeleg
         addActions()
     }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        enableEditing()
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+
+        contentView.isUserInteractionEnabled = true
+        contentView.isEditing = true
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        contentView.isEditing = false
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        contentView.isEditing = false
+        super.viewWillTransition(to: size, with: coordinator)
     }
 
     // MARK: - private functions
-
-    private func enableEditing() {
-        guard !contentView.isEditing else { return }
-        contentView.isEditing = true
-    }
 
     private func addActions() {
         contentView.redeemAction = { [weak self] code in
@@ -66,10 +91,17 @@ class RedeemVoucherViewController: UIViewController, UINavigationControllerDeleg
         contentView.cancelAction = { [weak self] in
             self?.cancel()
         }
+
+        contentView.logoutAction = { [weak self] in
+            self?.logout()
+        }
+
+        interactor.showLogoutDialog = { [weak self] in
+            self?.contentView.isLogoutDialogHidden = false
+        }
     }
 
     private func configureUI() {
-        view.addSubview(contentView)
         view.addConstrainedSubviews([contentView]) {
             contentView.pinEdgesToSuperview(.all())
         }
@@ -77,15 +109,19 @@ class RedeemVoucherViewController: UIViewController, UINavigationControllerDeleg
 
     private func submit(code: String) {
         contentView.state = .verifying
-        voucherTask = interactor?.redeemVoucher(code: code, completion: { [weak self] result in
+        contentView.isEditing = false
+        interactor.redeemVoucher(code: code, completion: { [weak self] result in
             guard let self else { return }
-            switch result {
-            case let .success(value):
-                contentView.state = .success
-                contentView.isEditing = false
-                delegate?.redeemVoucherDidSucceed(self, with: value)
-            case let .failure(error):
-                contentView.state = .failure(error)
+            /// Safe to assume `@MainActor` isolation because
+            /// `TunnelManager.redeemVoucher` sets the `RedeemVoucherOperation`'s `completionQueue` to `.main`
+            MainActor.assumeIsolated {
+                switch result {
+                case let .success(value):
+                    contentView.state = .success
+                    delegate?.redeemVoucherDidSucceed(self, with: value)
+                case let .failure(error):
+                    contentView.state = .failure(error)
+                }
             }
         })
     }
@@ -93,8 +129,20 @@ class RedeemVoucherViewController: UIViewController, UINavigationControllerDeleg
     private func cancel() {
         contentView.isEditing = false
 
-        voucherTask?.cancel()
+        interactor.cancelAll()
 
         delegate?.redeemVoucherDidCancel(self)
+    }
+
+    private func logout() {
+        contentView.isEditing = false
+
+        contentView.state = .logout
+
+        Task { [weak self] in
+            guard let self else { return }
+            await interactor.logout()
+            contentView.state = .initial
+        }
     }
 }
